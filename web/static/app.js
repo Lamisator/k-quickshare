@@ -1,8 +1,14 @@
 (function () {
   'use strict';
 
-  const I18N = window.I18N || {};
-  const LANG = window.LANG || 'en';
+  // i18n strings ship as a JSON data attribute (CSP forbids inline scripts)
+  let I18N = {};
+  let LANG = 'en';
+  const i18nEl = document.getElementById('i18n-data');
+  if (i18nEl) {
+    try { I18N = JSON.parse(i18nEl.getAttribute('data-json')) || {}; } catch (e) { /* keep defaults */ }
+    LANG = i18nEl.getAttribute('data-lang') || 'en';
+  }
   const t = (key, arg) => {
     let s = I18N[key] || key;
     if (arg !== undefined) s = s.replace('%s', arg);
@@ -242,6 +248,12 @@
       } else if (xhr.status === 413) {
         row.classList.add('queue-error');
         status.textContent = t('too_large');
+      } else if (xhr.status === 507) {
+        row.classList.add('queue-error');
+        status.textContent = t('quota');
+      } else if (xhr.status === 429) {
+        row.classList.add('queue-error');
+        status.textContent = t('rate_limited');
       } else {
         row.classList.add('queue-error');
         status.textContent = t('failed');

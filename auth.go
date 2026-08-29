@@ -216,7 +216,11 @@ func (a *App) upsertOIDCUser(ctx context.Context, sub, preferredUsername, email 
 		if email != "" {
 			username = email
 		} else {
-			username = "user-" + sub[:8]
+			shortSub := sub
+			if len(shortSub) > 8 {
+				shortSub = shortSub[:8]
+			}
+			username = "user-" + shortSub
 		}
 	}
 	base := username
@@ -311,6 +315,16 @@ func (a *App) sessionUser(ctx context.Context, sid string) (*User, error) {
 	return &u, nil
 }
 
+// deleteUserSessions revokes a user's sessions. exceptSID keeps one session
+// alive (the one performing a self-service password change); pass "" to
+// revoke everything (admin resets, privilege changes).
+func (a *App) deleteUserSessions(ctx context.Context, userID uuid.UUID, exceptSID string) error {
+	_, err := a.db.Exec(ctx,
+		`DELETE FROM sessions WHERE user_id = $1 AND id <> $2`,
+		userID.String(), exceptSID)
+	return err
+}
+
 func (a *App) deleteSession(ctx context.Context, sid string) {
 	if sid == "" {
 		return
@@ -389,29 +403,34 @@ func wantsJSON(r *http.Request) bool {
 
 // --- admin bootstrap ------------------------------------------------------
 
+// bootstrapAdmin provisions the initial super-admin. It only ever CREATES an
+// account: once any super-admin exists in the database, the routine is a
+// no-op, and an existing username is never promoted — a username match says
+// nothing about identity (an OIDC user could have claimed the same name), so
+// promotion would be a privilege-escalation path.
 func (a *App) bootstrapAdmin(ctx context.Context, username, password string) error {
 	if username == "" {
 		return nil
 	}
+	var superAdmins int
+	if err := a.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM users WHERE is_super_admin`).Scan(&superAdmins); err != nil {
+		return err
+	}
+	if superAdmins > 0 {
+		return nil
+	}
 	u, _, err := a.findUserByUsername(ctx, username)
 	if err == nil {
-		if !u.IsSuperAdmin || !u.IsAdmin {
-			if _, err := a.db.Exec(ctx,
-				`UPDATE users SET is_admin = TRUE, is_super_admin = TRUE WHERE id = $1`,
-				u.ID.String()); err != nil {
-				return err
-			}
-			log.Printf("admin bootstrap: promoted existing user %q to super-admin", u.Username)
-		} else {
-			log.Printf("admin bootstrap: user %q already super-admin, leaving unchanged", u.Username)
-		}
+		log.Printf("admin bootstrap: user %q already exists (oidc=%v) — refusing to promote it; "+
+			"grant super-admin manually via SQL if this is really the right account", u.Username, u.OIDCSubject != "")
 		return nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	if password == "" {
-		log.Printf("admin bootstrap: no user %q and ADMIN_PASSWORD not set — skipping", username)
+	if len(password) < minPasswordLen {
+		log.Printf("admin bootstrap: no super-admin exists and ADMIN_PASSWORD is unset or shorter than %d chars — skipping", minPasswordLen)
 		return nil
 	}
 	nu, err := a.createLocalUser(ctx, username, "", password, true)

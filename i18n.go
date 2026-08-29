@@ -75,6 +75,8 @@ var translations = map[string]map[string]string{
 	"js.confirm_delete": {"en": "Delete “%s”? The link stops working immediately.", "de": "„%s“ löschen? Der Link funktioniert danach sofort nicht mehr."},
 	"js.protected":      {"en": "password-protected", "de": "passwortgeschützt"},
 	"js.no_results":     {"en": "No files match your search.", "de": "Keine Dateien entsprechen deiner Suche."},
+	"js.quota":          {"en": "Storage limit reached", "de": "Speicherlimit erreicht"},
+	"js.rate_limited":   {"en": "Too many attempts", "de": "Zu viele Versuche"},
 
 	// --- files / history page ---
 	"files.heading":       {"en": "My files", "de": "Meine Dateien"},
@@ -115,6 +117,7 @@ var translations = map[string]map[string]string{
 	"dl.password":       {"en": "Password", "de": "Passwort"},
 	"dl.unlock":         {"en": "Unlock", "de": "Entsperren"},
 	"dl.wrong_pw":       {"en": "Wrong password — please try again.", "de": "Falsches Passwort — bitte erneut versuchen."},
+	"dl.too_many":       {"en": "Too many failed attempts. Please wait a few minutes and try again.", "de": "Zu viele Fehlversuche. Bitte warte ein paar Minuten und versuche es erneut."},
 	"dl.no_preview":     {"en": "No preview available for this file type.", "de": "Für diesen Dateityp ist keine Vorschau verfügbar."},
 	"dl.preview":        {"en": "Preview", "de": "Vorschau"},
 	"dl.gone_title":     {"en": "Link unavailable", "de": "Link nicht verfügbar"},
@@ -133,6 +136,7 @@ var translations = map[string]map[string]string{
 	"login.oidc":        {"en": "Continue with Zitadel", "de": "Weiter mit Zitadel"},
 	"login.err_empty":   {"en": "Enter your username and password.", "de": "Bitte Benutzername und Passwort eingeben."},
 	"login.err_invalid": {"en": "Invalid username or password.", "de": "Benutzername oder Passwort ist falsch."},
+	"login.too_many":    {"en": "Too many failed attempts. Please wait a few minutes and try again.", "de": "Zu viele Fehlversuche. Bitte warte ein paar Minuten und versuche es erneut."},
 
 	// --- account ---
 	"account.heading":   {"en": "Your account", "de": "Dein Konto"},
@@ -343,6 +347,7 @@ func jsStrings(lang string) map[string]string {
 		"js.done", "js.failed", "js.too_large", "js.login", "js.network",
 		"js.copy", "js.copied", "js.toast_copied", "js.toast_copyerr",
 		"js.confirm_delete", "js.protected", "js.no_results",
+		"js.quota", "js.rate_limited",
 	}
 	out := make(map[string]string, len(keys))
 	for _, k := range keys {

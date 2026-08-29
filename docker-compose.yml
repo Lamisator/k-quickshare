@@ -12,8 +12,17 @@ services:
       FILES_DIR: /data/files
       LISTEN_ADDR: ":8080"
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-536870912}
+      FILE_ENCRYPTION_KEY: ${FILE_ENCRYPTION_KEY:-}
+      QUOTA_USER_BYTES: ${QUOTA_USER_BYTES:-21474836480}
+      QUOTA_USER_FILES: ${QUOTA_USER_FILES:-1000}
+      QUOTA_TOTAL_BYTES: ${QUOTA_TOTAL_BYTES:-0}
+      DISK_MIN_FREE_BYTES: ${DISK_MIN_FREE_BYTES:-1073741824}
     volumes:
       - ./data/files:/data/files
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - "${APP_PORT:-8080}:8080"
 

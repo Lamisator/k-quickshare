@@ -7,7 +7,7 @@
 <meta name="color-scheme" content="{{if eq .Theme "light"}}light{{else}}dark{{end}}">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<script>window.I18N = {{.I18N}}; window.LANG = {{.Lang}};</script>
+<meta id="i18n-data" data-lang="{{.Lang}}" data-json="{{.I18NJSON}}">
 </head>
 {{end}}
 

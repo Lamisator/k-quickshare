@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -31,10 +33,25 @@ type App struct {
 	maxUpload    int64
 	cookieSecure bool
 	unlockKey    []byte // HMAC key for per-file password-unlock cookies
+	fileKEK      []byte // key-encryption key for at-rest file encryption (nil = disabled)
+
+	quota QuotaConfig
+
+	loginLimiter *failLimiter
+	shareLimiter *failLimiter
 
 	oidcMu  sync.RWMutex
 	oidc    *OIDC
 	oidcCfg OIDCSettings
+}
+
+// QuotaConfig bounds storage consumption. Zero values mean "no limit" except
+// MinFreeBytes, which always applies when > 0.
+type QuotaConfig struct {
+	UserBytes    int64 // max total bytes of active files per non-admin user
+	UserFiles    int64 // max active file count per non-admin user
+	TotalBytes   int64 // max total bytes of active files instance-wide
+	MinFreeBytes int64 // refuse uploads when the volume has less free space
 }
 
 func main() {
@@ -78,6 +95,14 @@ func main() {
 		log.Fatalf("load templates: %v", err)
 	}
 
+	fileKEK, err := loadFileKEK()
+	if err != nil {
+		log.Fatalf("file encryption key: %v", err)
+	}
+	if fileKEK == nil {
+		log.Print("WARNING: FILE_ENCRYPTION_KEY not set — uploads will be stored UNENCRYPTED")
+	}
+
 	app := &App{
 		db:           pool,
 		filesDir:     filesDir,
@@ -85,6 +110,15 @@ func main() {
 		maxUpload:    maxUpload,
 		cookieSecure: cookieSecure,
 		unlockKey:    randomBytes(32),
+		fileKEK:      fileKEK,
+		quota: QuotaConfig{
+			UserBytes:    envInt64("QUOTA_USER_BYTES", 20*1024*1024*1024),
+			UserFiles:    envInt64("QUOTA_USER_FILES", 1000),
+			TotalBytes:   envInt64("QUOTA_TOTAL_BYTES", 0),
+			MinFreeBytes: envInt64("DISK_MIN_FREE_BYTES", 1024*1024*1024),
+		},
+		loginLimiter: newFailLimiter(10, 10*time.Minute),
+		shareLimiter: newFailLimiter(10, 10*time.Minute),
 	}
 
 	if err := app.bootstrapAdmin(ctx, adminUser, adminPass); err != nil {
@@ -99,6 +133,7 @@ func main() {
 	}
 
 	app.startSweeper(ctx, time.Minute)
+	app.encryptLegacyFiles(ctx)
 
 	mux := http.NewServeMux()
 
@@ -148,7 +183,11 @@ func main() {
 	mux.Handle("/admin/settings", http.HandlerFunc(app.requireAdmin(app.handleAdminSettings)))
 	mux.Handle("/admin/settings/oidc", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsOIDC)))
 
-	handler := app.withOptionalUser(logRequests(mux))
+	var handler http.Handler = mux
+	handler = app.withOptionalUser(handler)
+	handler = sameOriginCheck(handler)
+	handler = securityHeaders(handler)
+	handler = logRequests(handler)
 
 	srv := &http.Server{
 		Addr:              listen,
@@ -207,7 +246,8 @@ func (a *App) renderStatus(w http.ResponseWriter, r *http.Request, status int, n
 	}
 	lang := langFromRequest(r)
 	data["Lang"] = lang
-	data["I18N"] = jsStrings(lang)
+	i18nJSON, _ := json.Marshal(jsStrings(lang))
+	data["I18NJSON"] = string(i18nJSON)
 	data["Theme"] = themeFromRequest(r)
 	data["ReqPath"] = r.URL.RequestURI()
 	if _, ok := data["User"]; !ok {
@@ -227,7 +267,65 @@ func logRequests(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		h.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
+		log.Printf("%s %s %s", r.Method, redactPath(r.URL.Path), time.Since(start))
+	})
+}
+
+// redactPath truncates share IDs in /files/ URLs: the UUID is the bearer
+// secret of an unprotected share and must not be reconstructable from logs.
+func redactPath(p string) string {
+	const prefix = "/files/"
+	if !strings.HasPrefix(p, prefix) {
+		return p
+	}
+	rest := p[len(prefix):]
+	id, action, hasAction := strings.Cut(rest, "/")
+	if len(id) > 8 {
+		id = id[:8] + "…"
+	}
+	if hasAction {
+		return prefix + id + "/" + action
+	}
+	return prefix + id
+}
+
+// securityHeaders sets browser-hardening defaults. Handlers that stream user
+// content (the preview endpoint) overwrite CSP/framing with stricter or
+// embedding-compatible values of their own.
+func securityHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr := w.Header()
+		hdr.Set("X-Content-Type-Options", "nosniff")
+		hdr.Set("Referrer-Policy", "no-referrer")
+		hdr.Set("X-Frame-Options", "DENY")
+		hdr.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		hdr.Set("Content-Security-Policy",
+			"default-src 'self'; img-src 'self' data:; media-src 'self'; "+
+				"script-src 'self'; style-src 'self'; object-src 'none'; "+
+				"base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self'")
+		h.ServeHTTP(w, r)
+	})
+}
+
+// sameOriginCheck rejects state-changing cross-origin browser requests
+// (CSRF hardening on top of SameSite=Lax cookies). Requests without Origin
+// and Referer (curl, API clients) pass — they carry no ambient cookies.
+func sameOriginCheck(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			source := r.Header.Get("Origin")
+			if source == "" {
+				source = r.Header.Get("Referer")
+			}
+			if source != "" {
+				u, err := url.Parse(source)
+				if err != nil || !strings.EqualFold(u.Host, r.Host) {
+					http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		h.ServeHTTP(w, r)
 	})
 }
 

@@ -78,7 +78,7 @@ func (a *App) handleAdminSettingsOIDC(w http.ResponseWriter, r *http.Request) {
 		"oidc.enabled":        boolStr(enabled),
 		"oidc.issuer":         issuer,
 		"oidc.client_id":      clientID,
-		"oidc.client_secret":  clientSecret,
+		"oidc.client_secret":  a.encryptSecret(clientSecret),
 		"oidc.redirect_url":   redirect,
 		"oidc.allowed_domain": allowedDomain,
 	}); err != nil {

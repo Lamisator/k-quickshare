@@ -53,16 +53,28 @@ func (a *App) handleUploadPage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	user := userFromContext(r.Context())
-	rows, err := a.db.Query(r.Context(),
-		`SELECT f.id::text, f.original_name, f.stored_name, f.size_bytes, f.content_type,
+
+	// Share IDs are bearer secrets: a regular user must only ever see their
+	// own uploads. Admins intentionally get the instance-wide view.
+	const baseQuery = `SELECT f.id::text, f.original_name, f.stored_name, f.size_bytes, f.content_type,
 		        f.uploaded_at, f.uploaded_by::text, u.username,
 		        f.expires_at, (f.password_hash IS NOT NULL),
 		        f.max_downloads, f.download_count
 		 FROM files f
 		 LEFT JOIN users u ON u.id = f.uploaded_by
-		 WHERE f.expires_at IS NULL OR f.expires_at > NOW()
-		 ORDER BY f.uploaded_at DESC
-		 LIMIT 500`)
+		 WHERE (f.expires_at IS NULL OR f.expires_at > NOW())`
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if user.IsAdmin {
+		rows, err = a.db.Query(r.Context(),
+			baseQuery+` ORDER BY f.uploaded_at DESC LIMIT 500`)
+	} else {
+		rows, err = a.db.Query(r.Context(),
+			baseQuery+` AND f.uploaded_by = $1 ORDER BY f.uploaded_at DESC LIMIT 500`,
+			user.ID.String())
+	}
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
@@ -145,14 +157,26 @@ func (a *App) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		a.renderLoginError(w, r, a.tr(r, "login.err_empty"), next)
 		return
 	}
+	limitKey := clientIP(r) + "|" + strings.ToLower(username)
+	if !a.loginLimiter.allow(limitKey) {
+		a.renderStatus(w, r, http.StatusTooManyRequests, "login.html", map[string]any{
+			"Title":       a.tr(r, "title.login") + " · k-fileshare",
+			"OIDCEnabled": a.getOIDC() != nil,
+			"Error":       a.tr(r, "login.too_many"),
+			"Next":        next,
+		})
+		return
+	}
 	user, hash, err := a.findUserByUsername(r.Context(), username)
 	if err != nil || !checkPassword(hash, password) {
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			log.Printf("login lookup: %v", err)
 		}
+		a.loginLimiter.fail(limitKey)
 		a.renderLoginError(w, r, a.tr(r, "login.err_invalid"), next)
 		return
 	}
+	a.loginLimiter.reset(limitKey)
 	sid, expires, err := a.createSession(r.Context(), user.ID)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
@@ -221,6 +245,17 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cheap pre-check before writing anything to disk; the exact size is
+	// enforced again below once it is known.
+	if err := a.checkQuota(r.Context(), user, 0); err != nil {
+		if errors.Is(err, errQuotaExceeded) {
+			http.Error(w, err.Error(), http.StatusInsufficientStorage)
+			return
+		}
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
 	id := uuid.New()
 	storedName := id.String()
 	dstPath := filepath.Join(a.filesDir, storedName)
@@ -230,7 +265,27 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	written, copyErr := io.Copy(dst, file)
+
+	var (
+		written    int64
+		copyErr    error
+		encVersion = encVersionPlain
+		wrappedDEK []byte
+	)
+	if len(a.fileKEK) > 0 {
+		dek := randomBytes(32)
+		wrappedDEK, err = a.wrapDEK(dek)
+		if err != nil {
+			dst.Close()
+			_ = os.Remove(dstPath)
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
+		encVersion = encVersionGCM
+		written, copyErr = encryptStream(dst, file, dek)
+	} else {
+		written, copyErr = io.Copy(dst, file)
+	}
 	closeErr := dst.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(dstPath)
@@ -246,6 +301,15 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file exceeds max size", http.StatusRequestEntityTooLarge)
 		return
 	}
+	if err := a.checkQuota(r.Context(), user, written); err != nil {
+		_ = os.Remove(dstPath)
+		if errors.Is(err, errQuotaExceeded) {
+			http.Error(w, err.Error(), http.StatusInsufficientStorage)
+			return
+		}
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
 
 	contentType := header.Header.Get("Content-Type")
 	if contentType == "" {
@@ -255,10 +319,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	_, err = a.db.Exec(r.Context(),
 		`INSERT INTO files (id, original_name, stored_name, size_bytes, content_type,
-		                    uploaded_by, expires_at, password_hash, max_downloads)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		                    uploaded_by, expires_at, password_hash, max_downloads,
+		                    enc_version, enc_key)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		id.String(), origName, storedName, written, contentType,
-		user.ID.String(), expiresAt, passwordHash, maxDownloads)
+		user.ID.String(), expiresAt, passwordHash, maxDownloads,
+		encVersion, wrappedDEK)
 	if err != nil {
 		_ = os.Remove(dstPath)
 		httpError(w, err, http.StatusInternalServerError)
@@ -293,6 +359,8 @@ type fileMeta struct {
 	PasswordHash  *string
 	MaxDownloads  *int
 	DownloadCount int
+	EncVersion    int
+	EncKey        []byte
 }
 
 // dispatchFileRoutes handles /files/{id}, /files/{id}/download, /files/{id}/preview.
@@ -325,10 +393,24 @@ func (a *App) dispatchFileRoutes(w http.ResponseWriter, r *http.Request) {
 
 	switch action {
 	case "":
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		a.handleFileLanding(w, r, fm)
 	case "download":
+		// GET only: a download is consumed exactly by a counted GET. HEAD
+		// probes and other methods must not burn scarce download slots.
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		a.handleFileDownload(w, r, fm)
 	case "preview":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		a.handleFilePreview(w, r, fm)
 	default:
 		http.NotFound(w, r)
@@ -339,10 +421,12 @@ func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	fm := &fileMeta{ID: id.String()}
 	err := a.db.QueryRow(r.Context(),
 		`SELECT original_name, stored_name, size_bytes, content_type, uploaded_at,
-		        expires_at, password_hash, max_downloads, download_count
+		        expires_at, password_hash, max_downloads, download_count,
+		        enc_version, enc_key
 		 FROM files WHERE id = $1`, id.String()).
 		Scan(&fm.OriginalName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
-			&fm.ExpiresAt, &fm.PasswordHash, &fm.MaxDownloads, &fm.DownloadCount)
+			&fm.ExpiresAt, &fm.PasswordHash, &fm.MaxDownloads, &fm.DownloadCount,
+			&fm.EncVersion, &fm.EncKey)
 	if err != nil {
 		return nil, err
 	}
@@ -363,13 +447,27 @@ func (a *App) handleFileLanding(w http.ResponseWriter, r *http.Request, fm *file
 	locked := fm.PasswordHash != nil && !a.isUnlocked(r, fm)
 
 	if r.Method == http.MethodPost && locked {
+		limitKey := clientIP(r) + "|" + fm.ID
+		if !a.shareLimiter.allow(limitKey) {
+			a.renderStatus(w, r, http.StatusTooManyRequests, "download.html", map[string]any{
+				"Title": a.tr(r, "title.download") + " · k-fileshare",
+				"State": "locked",
+				"ID":    fm.ID,
+				"Name":  fm.OriginalName,
+				"Size":  fm.Size,
+				"Error": a.tr(r, "dl.too_many"),
+			})
+			return
+		}
 		_ = r.ParseForm()
 		submitted := r.PostFormValue("password")
 		if submitted != "" && checkPassword(*fm.PasswordHash, submitted) {
+			a.shareLimiter.reset(limitKey)
 			a.setUnlockCookie(w, fm)
 			http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
 			return
 		}
+		a.shareLimiter.fail(limitKey)
 		a.renderStatus(w, r, http.StatusUnauthorized, "download.html", map[string]any{
 			"Title": a.tr(r, "title.download") + " · k-fileshare",
 			"State": "locked",
@@ -411,25 +509,33 @@ func (a *App) handleFileLanding(w http.ResponseWriter, r *http.Request, fm *file
 		data["HasLimit"] = true
 		data["MaxDL"] = *fm.MaxDownloads
 		data["DownloadsLeft"] = *fm.MaxDownloads - fm.DownloadCount
+		// Previews stream the original bytes without consuming a download
+		// slot, which would let recipients bypass the limit — so download-
+		// limited files get no preview.
+		data["PreviewKind"] = ""
 	}
 	a.render(w, r, "download.html", data)
 }
 
 // checkFileAccess enforces the password on the raw endpoints. Accepts the
-// unlock cookie (set by the landing page) or an explicit password via form or
-// query string (for curl-style use).
+// unlock cookie (set by the landing page) or an X-Share-Password header for
+// curl/API use. Passwords in query strings are deliberately NOT accepted:
+// URLs end up in browser history, proxy logs and monitoring systems.
 func (a *App) checkFileAccess(w http.ResponseWriter, r *http.Request, fm *fileMeta) bool {
 	if fm.PasswordHash == nil || a.isUnlocked(r, fm) {
 		return true
 	}
-	submitted := r.URL.Query().Get("password")
-	if r.Method == http.MethodPost {
-		if err := r.ParseForm(); err == nil && r.PostFormValue("password") != "" {
-			submitted = r.PostFormValue("password")
+	if submitted := r.Header.Get("X-Share-Password"); submitted != "" {
+		limitKey := clientIP(r) + "|" + fm.ID
+		if !a.shareLimiter.allow(limitKey) {
+			http.Error(w, "too many attempts", http.StatusTooManyRequests)
+			return false
 		}
-	}
-	if submitted != "" && checkPassword(*fm.PasswordHash, submitted) {
-		return true
+		if checkPassword(*fm.PasswordHash, submitted) {
+			a.shareLimiter.reset(limitKey)
+			return true
+		}
+		a.shareLimiter.fail(limitKey)
 	}
 	http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
 	return false
@@ -456,9 +562,14 @@ func (a *App) handleFileDownload(w http.ResponseWriter, r *http.Request, fm *fil
 }
 
 // handleFilePreview streams the file inline for the landing-page preview.
-// It does not count against the download limit; script execution is blocked
-// via a sandboxing CSP so user uploads can't run code on this origin.
+// Previews don't consume download slots, so files with a download limit are
+// never previewable (the bytes would bypass the limit). Script execution is
+// blocked via a sandboxing CSP so user uploads can't run code on this origin.
 func (a *App) handleFilePreview(w http.ResponseWriter, r *http.Request, fm *fileMeta) {
+	if fm.MaxDownloads != nil {
+		http.NotFound(w, r)
+		return
+	}
 	if !a.checkFileAccess(w, r, fm) {
 		return
 	}
@@ -466,19 +577,19 @@ func (a *App) handleFilePreview(w http.ResponseWriter, r *http.Request, fm *file
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; media-src 'self'; img-src 'self'; object-src 'self'; style-src 'unsafe-inline'")
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; media-src 'self'; img-src 'self'; object-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'")
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	a.serveFileBlob(w, r, fm, false)
 }
 
 func (a *App) serveFileBlob(w http.ResponseWriter, r *http.Request, fm *fileMeta, attachment bool) {
-	path := filepath.Join(a.filesDir, fm.StoredName)
-	f, err := os.Open(path)
+	content, closer, err := a.openFileBlob(fm)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	defer closer.Close()
 
 	contentType := fm.ContentType
 	disposition := "inline"
@@ -491,7 +602,7 @@ func (a *App) serveFileBlob(w http.ResponseWriter, r *http.Request, fm *fileMeta
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`%s; filename="%s"`, disposition, quoteForHeader(fm.OriginalName)))
-	http.ServeContent(w, r, fm.OriginalName, fm.UploadedAt, f)
+	http.ServeContent(w, r, fm.OriginalName, fm.UploadedAt, content)
 }
 
 // --- unlock cookies ---------------------------------------------------------

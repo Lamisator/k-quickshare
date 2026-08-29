@@ -63,6 +63,11 @@ func (a *App) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
+	// Revoke every other session: a password change is often a response to a
+	// suspected compromise, and stolen session cookies must die with it.
+	if err := a.deleteUserSessions(r.Context(), user.ID, readSessionCookie(r)); err != nil {
+		log.Printf("revoke sessions after password change: %v", err)
+	}
 	log.Printf("password changed: %s", user.Username)
 	a.renderAccount(w, r, http.StatusOK, "", a.tr(r, "msg.pw_updated"))
 }
@@ -156,6 +161,9 @@ func (a *App) handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
+	if err := a.deleteUserSessions(r.Context(), id, ""); err != nil {
+		log.Printf("revoke sessions after admin reset: %v", err)
+	}
 	log.Printf("admin reset password for user id=%s", id)
 	a.renderAdminUsers(w, r, http.StatusOK, "", a.tr(r, "msg.pw_reset"))
 }
@@ -208,6 +216,11 @@ func (a *App) handleAdminToggleAdmin(w http.ResponseWriter, r *http.Request) {
 	if err := a.setAdminFlag(r.Context(), id, target); err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
+	}
+	// Privilege changes invalidate existing sessions so the new role takes
+	// effect on a fresh, deliberate sign-in.
+	if err := a.deleteUserSessions(r.Context(), id, ""); err != nil {
+		log.Printf("revoke sessions after privilege change: %v", err)
 	}
 	verb := "revoked"
 	msgKey := "msg.admin_revoked"

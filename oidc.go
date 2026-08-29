@@ -86,11 +86,26 @@ func (a *App) loadAndApplyOIDC(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	stored := m["oidc.client_secret"]
+	secret, err := a.decryptSecret(stored)
+	if err != nil {
+		return fmt.Errorf("decrypt oidc client secret: %w", err)
+	}
+	// One-time migration: re-persist a legacy plaintext secret encrypted.
+	if secret != "" && stored == secret && len(a.fileKEK) > 0 {
+		if err := a.saveSettings(ctx, map[string]string{
+			"oidc.client_secret": a.encryptSecret(secret),
+		}); err != nil {
+			log.Printf("oidc: re-encrypt stored client secret: %v", err)
+		} else {
+			log.Print("oidc: client secret re-encrypted at rest")
+		}
+	}
 	s := OIDCSettings{
 		Enabled:       m["oidc.enabled"] == "true",
 		Issuer:        m["oidc.issuer"],
 		ClientID:      m["oidc.client_id"],
-		ClientSecret:  m["oidc.client_secret"],
+		ClientSecret:  secret,
 		RedirectURL:   m["oidc.redirect_url"],
 		AllowedDomain: m["oidc.allowed_domain"],
 	}
@@ -147,7 +162,7 @@ func (a *App) seedOIDCFromEnv(ctx context.Context, issuer, clientID, clientSecre
 		"oidc.enabled":        "true",
 		"oidc.issuer":         issuer,
 		"oidc.client_id":      clientID,
-		"oidc.client_secret":  clientSecret,
+		"oidc.client_secret":  a.encryptSecret(clientSecret),
 		"oidc.redirect_url":   redirect,
 		"oidc.allowed_domain": allowedDomain,
 	}
