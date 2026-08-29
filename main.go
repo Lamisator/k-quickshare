@@ -310,7 +310,11 @@ func securityHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hdr := w.Header()
 		hdr.Set("X-Content-Type-Options", "nosniff")
-		hdr.Set("Referrer-Policy", "no-referrer")
+		// NOT "no-referrer": per the Fetch spec browsers then serialize the
+		// Origin header as "null" even on same-origin form POSTs, which the
+		// same-origin middleware would reject. "same-origin" keeps the
+		// referrer away from external sites while preserving Origin.
+		hdr.Set("Referrer-Policy", "same-origin")
 		hdr.Set("X-Frame-Options", "DENY")
 		hdr.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		hdr.Set("Content-Security-Policy",
