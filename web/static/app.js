@@ -716,13 +716,58 @@
     fileInput.value = '';
   });
 
+  // Uploads run ONE AT A TIME.
+  //
+  // Firing them in parallel shares the same upstream bandwidth between every
+  // request, so the batch finishes no sooner while each individual request
+  // takes N times longer to send its body. That is what trips a reverse
+  // proxy's per-request read timeout: eight parallel uploads each sat past
+  // Traefik's 60s readTimeout and were cut off mid-body, surfacing as 502s,
+  // where the same eight sent back-to-back each finish well inside it.
+  // Sequential also makes the per-file progress bar and rate mean something.
+  let uploadChain = Promise.resolve();
+  function enqueue(fn) {
+    uploadChain = uploadChain.then(fn).catch(() => {}); // one failure must not stall the queue
+    return uploadChain;
+  }
+
   function handleFiles(files) {
     if (!files || files.length === 0) return;
     if (sessionSection) sessionSection.hidden = false;
     // One snapshot for the whole drop: a retry must repeat the share settings
     // the user actually chose, not whatever the form holds later on.
     const opts = snapshotOptions();
-    for (const file of files) uploadOne(file, opts);
+    for (const file of files) {
+      // Rows appear immediately so the queue shows the whole drop, not just
+      // the file currently in flight. Each carries its own cancel token from
+      // the start, so a file can be cancelled while it is still waiting.
+      const row = newQueueRow(file);
+      const ctl = { aborted: false, xhr: null };
+      const status = row.querySelector('.queue-status');
+      const actions = row.querySelector('.queue-actions');
+      status.textContent = t('queued');
+      actions.appendChild(queueButton('cancel', 'btn-cancel', () => {
+        if (ctl.aborted) return;
+        ctl.aborted = true;
+        if (ctl.xhr) ctl.xhr.abort();
+        markRowCancelled(row);
+      }));
+      enqueue(() => uploadOne(file, opts, row, ctl));
+    }
+  }
+
+  // Shared by the waiting-row cancel button and uploadOne's own handler.
+  function markRowCancelled(row) {
+    const status = row.querySelector('.queue-status');
+    const actions = row.querySelector('.queue-actions');
+    const reason = row.querySelector('.queue-reason');
+    row.classList.remove('queue-error', 'queue-done');
+    row.classList.add('queue-cancelled');
+    status.textContent = t('cancelled');
+    row.querySelector('.queue-fill').style.width = '0%';
+    reason.textContent = t('reason_cancelled');
+    reason.hidden = false;
+    actions.textContent = '';
   }
 
   // snapshotOptions freezes the share settings for an upload. The form is
@@ -775,7 +820,14 @@
     return row;
   }
 
-  async function uploadOne(file, opts, existingRow) {
+  async function uploadOne(file, opts, existingRow, existingCtl) {
+    // Duck-typed AbortSignal: encryptFile only reads `.aborted`, and XHR has
+    // its own abort(), so no AbortController is needed. A queued row hands in
+    // the token it was created with, so a cancel pressed while waiting is
+    // already recorded by the time this file's turn comes up.
+    const ctl = existingCtl || { aborted: false, xhr: null };
+    if (ctl.aborted) return;
+
     const row = existingRow || newQueueRow(file);
     const fill = row.querySelector('.queue-fill');
     const status = row.querySelector('.queue-status');
@@ -792,13 +844,11 @@
     const staleLink = row.querySelector('.queue-link');
     if (staleLink) staleLink.remove();
 
-    // Duck-typed AbortSignal: encryptFile only reads `.aborted`, and XHR has
-    // its own abort(), so no AbortController is needed.
-    const ctl = { aborted: false, xhr: null };
-
     function showRetry() {
       actions.textContent = '';
-      actions.appendChild(queueButton('retry', 'btn-retry', () => uploadOne(file, opts, row)));
+      // Retries join the queue rather than running alongside an active upload.
+      actions.appendChild(queueButton('retry', 'btn-retry',
+        () => enqueue(() => uploadOne(file, opts, row))));
     }
 
     // The reason stays in the row until the upload is retried — a failure the
@@ -819,7 +869,8 @@
       if (ctl.aborted) return;
       ctl.aborted = true;
       if (ctl.xhr) ctl.xhr.abort();
-      fail('cancelled', t('reason_cancelled'));
+      markRowCancelled(row);
+      showRetry();
     }));
 
     // Expiry, limit and password belong to the batch row, not the member, so
