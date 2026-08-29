@@ -8,14 +8,14 @@ import (
 	"time"
 )
 
-const langCookieName = "fileshare_lang"
+const langCookieName = "pyxis_lang"
 
 var supportedLangs = []string{"en", "de"}
 
 // translations maps key -> lang -> string. English is the fallback.
 var translations = map[string]map[string]string{
 	// --- app / nav ---
-	"app.name":          {"en": "k-fileshare", "de": "k-fileshare"},
+	"app.name":          {"en": "Pyxis", "de": "Pyxis"},
 	"app.tagline":       {"en": "Private file sharing", "de": "Privates Dateiteilen"},
 	"nav.section.share": {"en": "Share", "de": "Teilen"},
 	"nav.upload":        {"en": "Upload", "de": "Hochladen"},

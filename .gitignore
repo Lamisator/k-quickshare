@@ -2,4 +2,5 @@
 /.env
 *.log
 /id_ssh
+/pyxis
 /fileshare

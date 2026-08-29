@@ -210,7 +210,7 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
-	log.Printf("fileshare listening on %s (files dir: %s, max upload: %d bytes)", listen, filesDir, maxUpload)
+	log.Printf("pyxis listening on %s (files dir: %s, max upload: %d bytes)", listen, filesDir, maxUpload)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server: %v", err)
 	}
@@ -277,7 +277,7 @@ func (a *App) renderStatus(w http.ResponseWriter, r *http.Request, status int, n
 		}
 	}
 	if _, ok := data["Title"]; !ok {
-		data["Title"] = "k-fileshare"
+		data["Title"] = "Pyxis"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)

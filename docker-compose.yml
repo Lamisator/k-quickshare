@@ -2,13 +2,13 @@ services:
 
   app:
     build: .
-    container_name: fileshare-app
+    container_name: pyxis-app
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://fileshare:${POSTGRES_PASSWORD}@db:5432/fileshare?sslmode=disable
+      DATABASE_URL: postgres://pyxis:${POSTGRES_PASSWORD}@db:5432/pyxis?sslmode=disable
       FILES_DIR: /data/files
       LISTEN_ADDR: ":8080"
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-536870912}
@@ -29,16 +29,16 @@ services:
 
   db:
     image: postgres:16.15-alpine
-    container_name: fileshare-db
+    container_name: pyxis-db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: fileshare
-      POSTGRES_USER: fileshare
+      POSTGRES_DB: pyxis
+      POSTGRES_USER: pyxis
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fileshare -d fileshare"]
+      test: ["CMD-SHELL", "pg_isready -U pyxis -d pyxis"]
       interval: 5s
       timeout: 5s
       retries: 10

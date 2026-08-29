@@ -1,4 +1,4 @@
-// End-to-end encryption for k-fileshare.
+// End-to-end encryption for Pyxis.
 //
 // The browser encrypts before upload and decrypts after download using the
 // SAME container format the Go side uses, so ciphertext is interchangeable:
@@ -18,10 +18,10 @@
   const CHUNK = 65536;
   const TAG = 16;
   const PBKDF2_ITER = 600000;
-  const INFO_URL = 'k-fileshare-e2e-url-v1';
-  const INFO_ENC = 'k-fileshare-e2e-enc-v1';
-  const INFO_AUTH = 'k-fileshare-e2e-auth-v1';
-  const INFO_BATCH = 'k-fileshare-e2e-batch-v1';
+  const INFO_URL = 'pyxis-e2e-url-v1';
+  const INFO_ENC = 'pyxis-e2e-enc-v1';
+  const INFO_AUTH = 'pyxis-e2e-auth-v1';
+  const INFO_BATCH = 'pyxis-e2e-batch-v1';
   const WRAP_NONCE = 12;
 
   const subtle = (window.crypto && window.crypto.subtle) || null;
@@ -169,7 +169,7 @@
     return new Blob(parts, { type: type || 'application/octet-stream' });
   }
 
-  window.KFS_E2E = {
+  window.PYXIS_E2E = {
     available: !!subtle && !!(window.crypto && crypto.getRandomValues),
     b64uEncode: b64uEncode,
     b64uDecode: b64uDecode,

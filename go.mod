@@ -1,4 +1,4 @@
-module github.com/example/fileshare
+module github.com/Lamisator/pyxis
 
 go 1.27
 

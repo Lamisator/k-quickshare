@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const themeCookieName = "fileshare_theme"
+const themeCookieName = "pyxis_theme"
 
 var supportedThemes = []string{"dark", "light"}
 

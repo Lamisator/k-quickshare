@@ -1,4 +1,10 @@
-# k-fileshare
+# Pyxis
+
+**Secure sharing, ephemerally.**
+
+*Pyxis* (Latin, from Greek *pyxís*): a small lidded box — the kind used to carry
+something valuable a short distance, then opened once and set aside. It is also
+a faint southern constellation, the Mariner's Compass.
 
 Self-hosted file sharing where **the server cannot read what it stores**.
 
@@ -67,7 +73,7 @@ bounded and makes the ciphertext seekable.
 
 | `key_mode` | Name | Where the key comes from |
 |---|---|---|
-| `3` | E2E URL | `HKDF(fragment secret, "", "k-fileshare-e2e-url-v1")` |
+| `3` | E2E URL | `HKDF(fragment secret, "", "pyxis-e2e-url-v1")` |
 | `4` | E2E password | `PBKDF2-SHA256(password, salt, 600k)` → HKDF split |
 
 For a **password** share the password itself is never transmitted. PBKDF2
@@ -128,7 +134,7 @@ The batch link carries one secret. Each member file is encrypted under its **own
 random key**, sealed under the batch key and stored as an opaque `wrapped_key`:
 
 ```
-batch key   = HKDF(fragment secret, "", "k-fileshare-e2e-batch-v1")
+batch key   = HKDF(fragment secret, "", "pyxis-e2e-batch-v1")
               (or the PBKDF2/HKDF enc branch, for a password batch)
 wrapped_key = 12-byte nonce || AES-GCM(batch key, file key)   — 60 bytes
 ```
@@ -175,7 +181,7 @@ docker compose up -d --build
 
 The app listens on `${APP_PORT:-8080}`. `deploy/docker-compose.yml` is the
 production variant: no published port, Traefik labels for TLS termination, an
-external `proxy` network and absolute host paths under `/srv/docker/fileshare/`.
+external `proxy` network and absolute host paths under `/srv/docker/pyxis/`.
 
 Data lives in two bind mounts:
 
@@ -192,7 +198,7 @@ must be owned by 10001 on the host.
 Needs Go 1.27 and a reachable PostgreSQL 16:
 
 ```bash
-export DATABASE_URL="postgres://fileshare:secret@localhost:5432/fileshare?sslmode=disable"
+export DATABASE_URL="postgres://pyxis:secret@localhost:5432/pyxis?sslmode=disable"
 export FILE_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 export FILES_DIR="$PWD/data/files"
 export COOKIE_SECURE=false      # only when serving over plain HTTP locally
@@ -338,6 +344,20 @@ can be tested against each other rather than against assumptions.
 ---
 
 ## Operational notes
+
+**Renamed from k-fileshare.** The rename was deliberately total and includes the
+cryptographic namespace, so it is a **breaking change**, not cosmetic:
+
+- HKDF info strings moved from `k-fileshare-e2e-*` to `pyxis-e2e-*`. Every key is
+  derived differently, so **share links created before the rename can no longer
+  be decrypted**. The ciphertext is intact and the failure is clean — GCM
+  authentication fails and the page reports a decryption error — but the files
+  are gone for practical purposes. `e2e_interop_test.go` carries regenerated
+  vectors.
+- Cookies moved from `fileshare_*` to `pyxis_*`, and the unlock cookie prefixes
+  from `fsu_`/`fsb_` to `pxu_`/`pxb_`. Everyone is signed out once, and any
+  in-flight share unlocks must be redone.
+- Containers, the database, its role and the deploy directory are all `pyxis`.
 
 **Backups.** Back up `data/postgres` and `data/files`. Neither contains
 anything the server can decrypt, so a backup leaks no file contents — but it is

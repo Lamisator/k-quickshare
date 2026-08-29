@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	sessionCookieName = "fileshare_sid"
+	sessionCookieName = "pyxis_sid"
 	sessionTTL        = 30 * 24 * time.Hour
 )
 

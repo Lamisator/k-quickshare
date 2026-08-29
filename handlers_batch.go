@@ -245,7 +245,7 @@ func (a *App) renderBatchLanding(w http.ResponseWriter, r *http.Request, bm *bat
 		mode = "password"
 	}
 	data := map[string]any{
-		"Title":      a.tr(r, "batch.title") + " · k-fileshare",
+		"Title":      a.tr(r, "batch.title") + " · Pyxis",
 		"State":      "batch",
 		"E2EMode":    mode,
 		"Unlocked":   !bm.isPassword() || a.batchUnlocked(r, bm),
@@ -419,7 +419,7 @@ func (a *App) archiveBatchIfSpent(r *http.Request, bm *batchMeta) {
 // --- batch unlock cookies ---------------------------------------------------
 
 func (a *App) batchUnlockCookieName(id string) string {
-	return "fsb_" + strings.ReplaceAll(id, "-", "")
+	return "pxb_" + strings.ReplaceAll(id, "-", "")
 }
 
 func (a *App) batchUnlockToken(bm *batchMeta) string {

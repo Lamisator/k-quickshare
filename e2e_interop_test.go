@@ -14,17 +14,18 @@ import (
 )
 
 // Vectors produced by the browser implementation (web/static/e2e.js, run on
-// Node's WebCrypto). They pin the wire format across both implementations:
+// Node's WebCrypto). Regenerated when the HKDF info strings were renamed to
+// the pyxis-e2e-* namespace, which changes every derived key by design. They pin the wire format across both implementations:
 // the chunked AES-256-GCM container is deterministic given key + plaintext
 // (nonces are counters), so any divergence in chunk size, nonce layout or
 // key derivation breaks these byte-exact comparisons.
 const (
-	jsURLKeyHex    = "eed10ad633a62dfd71655723e3c6fe2fc68e6573d998b07922d7840d8e7e56d9"
-	jsEncKeyHex    = "92b556df6118097b8cdc28eb7bede2faf2e5d00cfda4e5c35c95b130fc6ed924"
-	jsAuthHex      = "6db911cebad1276c8783f5e5c55ac8a435a8b5784cce8dd1af195c99aa100340"
+	jsURLKeyHex    = "0325291e9aab6ccfee3b3de894e78c62b169a9fec1229d0ffce335c1f1bd5788"
+	jsEncKeyHex    = "ce6888382034c7ea58a919faf1eb70e239f7f03e5c09b63aa793e81ddc8b3966"
+	jsAuthHex      = "1695abc0c830d8bc246dbc8ae6b005181ceaba419e0cffe4fbea23fa85aa83ab"
 	jsPlainLen     = 197842
 	jsCipherLen    = 197906
-	jsCipherSHA256 = "c4be2131935f500252de7584691865aafcc1d341fc492ed2d63465b23754900a"
+	jsCipherSHA256 = "1515d2b8e2d8ed0c3e0aedcbc9ac3c23aeeeae5b07a6ebfe04ea96285dc10fe6"
 
 	jsPassword = "correct horse battery staple"
 )
@@ -65,14 +66,14 @@ func hkdf32Go(t *testing.T, material, salt []byte, info string) []byte {
 // TestE2EKeyDerivationMatchesBrowser checks that Go reproduces the exact key
 // material the browser derives, for both the URL-secret and password modes.
 func TestE2EKeyDerivationMatchesBrowser(t *testing.T) {
-	urlKey := hkdf32Go(t, vectorSecret(), nil, "k-fileshare-e2e-url-v1")
+	urlKey := hkdf32Go(t, vectorSecret(), nil, "pyxis-e2e-url-v1")
 	if got := hex.EncodeToString(urlKey); got != jsURLKeyHex {
 		t.Errorf("url key: got %s, want %s", got, jsURLKeyHex)
 	}
 
 	master := pbkdf2.Key([]byte(jsPassword), vectorSalt(), 600000, 32, sha256.New)
-	encKey := hkdf32Go(t, master, vectorSalt(), "k-fileshare-e2e-enc-v1")
-	auth := hkdf32Go(t, master, vectorSalt(), "k-fileshare-e2e-auth-v1")
+	encKey := hkdf32Go(t, master, vectorSalt(), "pyxis-e2e-enc-v1")
+	auth := hkdf32Go(t, master, vectorSalt(), "pyxis-e2e-auth-v1")
 	if got := hex.EncodeToString(encKey); got != jsEncKeyHex {
 		t.Errorf("password enc key: got %s, want %s", got, jsEncKeyHex)
 	}

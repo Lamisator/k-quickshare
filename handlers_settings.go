@@ -13,7 +13,7 @@ func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 func (a *App) renderSettings(w http.ResponseWriter, r *http.Request, status int, errMsg, okMsg string) {
 	cfg := a.getOIDCSettings()
 	a.renderStatus(w, r, status, "admin_settings.html", map[string]any{
-		"Title":        a.tr(r, "title.settings") + " · k-fileshare",
+		"Title":        a.tr(r, "title.settings") + " · Pyxis",
 		"Active":       "settings",
 		"OIDC":         cfg,
 		"OIDCLive":     a.getOIDC() != nil,

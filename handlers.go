@@ -50,7 +50,7 @@ func (a *App) handleUploadPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.render(w, r, "index.html", map[string]any{
-		"Title":     a.tr(r, "title.upload") + " · k-fileshare",
+		"Title":     a.tr(r, "title.upload") + " · Pyxis",
 		"Active":    "upload",
 		"MaxUpload": a.maxUpload,
 	})
@@ -156,7 +156,7 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.render(w, r, "history.html", map[string]any{
-		"Title":       a.tr(r, "title.files") + " · k-fileshare",
+		"Title":       a.tr(r, "title.files") + " · Pyxis",
 		"Active":      "files",
 		"Files":       files,
 		"ActiveCount": activeCount,
@@ -175,7 +175,7 @@ func (a *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		next = "/"
 	}
 	a.render(w, r, "login.html", map[string]any{
-		"Title":       a.tr(r, "title.login") + " · k-fileshare",
+		"Title":       a.tr(r, "title.login") + " · Pyxis",
 		"OIDCEnabled": a.getOIDC() != nil,
 		"Next":        next,
 	})
@@ -199,7 +199,7 @@ func (a *App) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	limitKey := a.clientIP(r) + "|" + strings.ToLower(username)
 	if !a.loginLimiter.allow(limitKey) {
 		a.renderStatus(w, r, http.StatusTooManyRequests, "login.html", map[string]any{
-			"Title":       a.tr(r, "title.login") + " · k-fileshare",
+			"Title":       a.tr(r, "title.login") + " · Pyxis",
 			"OIDCEnabled": a.getOIDC() != nil,
 			"Error":       a.tr(r, "login.too_many"),
 			"Next":        next,
@@ -228,7 +228,7 @@ func (a *App) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) renderLoginError(w http.ResponseWriter, r *http.Request, msg, next string) {
 	a.renderStatus(w, r, http.StatusUnauthorized, "login.html", map[string]any{
-		"Title":       a.tr(r, "title.login") + " · k-fileshare",
+		"Title":       a.tr(r, "title.login") + " · Pyxis",
 		"OIDCEnabled": a.getOIDC() != nil,
 		"Error":       msg,
 		"Next":        next,
@@ -586,7 +586,7 @@ func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 
 func (a *App) renderGone(w http.ResponseWriter, r *http.Request, status int, msgKey string) {
 	a.renderStatus(w, r, status, "download.html", map[string]any{
-		"Title": a.tr(r, "title.download") + " · k-fileshare",
+		"Title": a.tr(r, "title.download") + " · Pyxis",
 		"State": "gone",
 		"Gone":  a.tr(r, msgKey),
 	})
@@ -636,7 +636,7 @@ func (a *App) renderE2ELanding(w http.ResponseWriter, r *http.Request, fm *fileM
 		mode = "password"
 	}
 	data := map[string]any{
-		"Title":       fm.OriginalName + " · k-fileshare",
+		"Title":       fm.OriginalName + " · Pyxis",
 		"State":       "e2e",
 		"E2EMode":     mode,
 		"Unlocked":    fm.KeyMode == keyModeE2EPassword && a.isUnlocked(r, fm),
@@ -718,7 +718,7 @@ func (a *App) handleFileRaw(w http.ResponseWriter, r *http.Request, fm *fileMeta
 // --- unlock cookies ---------------------------------------------------------
 
 func (a *App) unlockCookieName(id string) string {
-	return "fsu_" + strings.ReplaceAll(id, "-", "")
+	return "pxu_" + strings.ReplaceAll(id, "-", "")
 }
 
 func (a *App) unlockToken(fm *fileMeta) string {

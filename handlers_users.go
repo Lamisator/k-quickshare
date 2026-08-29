@@ -20,7 +20,7 @@ func (a *App) handleAccount(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) renderAccount(w http.ResponseWriter, r *http.Request, status int, errMsg, okMsg string) {
 	a.renderStatus(w, r, status, "account.html", map[string]any{
-		"Title":   a.tr(r, "title.account") + " · k-fileshare",
+		"Title":   a.tr(r, "title.account") + " · Pyxis",
 		"Active":  "account",
 		"Error":   errMsg,
 		"Success": okMsg,
@@ -97,7 +97,7 @@ func (a *App) renderAdminUsers(w http.ResponseWriter, r *http.Request, status in
 	}
 	me := userFromContext(r.Context())
 	a.renderStatus(w, r, status, "admin_users.html", map[string]any{
-		"Title":     a.tr(r, "title.users") + " · k-fileshare",
+		"Title":     a.tr(r, "title.users") + " · Pyxis",
 		"Active":    "users",
 		"Users":     users,
 		"MeID":      me.ID.String(),

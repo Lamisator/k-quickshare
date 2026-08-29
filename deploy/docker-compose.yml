@@ -2,13 +2,13 @@ services:
 
   app:
     build: .
-    container_name: fileshare-app
+    container_name: pyxis-app
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://fileshare:${POSTGRES_PASSWORD}@db:5432/fileshare?sslmode=disable
+      DATABASE_URL: postgres://pyxis:${POSTGRES_PASSWORD}@db:5432/pyxis?sslmode=disable
       FILES_DIR: /data/files
       LISTEN_ADDR: ":8080"
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-536870912}
@@ -26,7 +26,7 @@ services:
       QUOTA_TOTAL_BYTES: ${QUOTA_TOTAL_BYTES:-0}
       DISK_MIN_FREE_BYTES: ${DISK_MIN_FREE_BYTES:-1073741824}
     volumes:
-      - /srv/docker/fileshare/data/files:/data/files
+      - /srv/docker/pyxis/data/files:/data/files
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -37,26 +37,26 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=proxy
-      - traefik.http.routers.share.rule=Host(`share.kloeck-it.de`)
-      - traefik.http.routers.share.entrypoints=websecure
-      - traefik.http.routers.share.tls=true
-      - traefik.http.routers.share.tls.certresolver=le
-      - traefik.http.services.share.loadbalancer.server.port=8080
+      - traefik.http.routers.pyxis.rule=Host(`share.kloeck-it.de`)
+      - traefik.http.routers.pyxis.entrypoints=websecure
+      - traefik.http.routers.pyxis.tls=true
+      - traefik.http.routers.pyxis.tls.certresolver=le
+      - traefik.http.services.pyxis.loadbalancer.server.port=8080
 
   db:
     image: postgres:16.15-alpine
-    container_name: fileshare-db
+    container_name: pyxis-db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: fileshare
-      POSTGRES_USER: fileshare
+      POSTGRES_DB: pyxis
+      POSTGRES_USER: pyxis
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - /srv/docker/fileshare/data/postgres:/var/lib/postgresql/data
+      - /srv/docker/pyxis/data/postgres:/var/lib/postgresql/data
     networks:
       - backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fileshare -d fileshare"]
+      test: ["CMD-SHELL", "pg_isready -U pyxis -d pyxis"]
       interval: 5s
       timeout: 5s
       retries: 10

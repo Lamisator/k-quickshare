@@ -17,9 +17,6 @@
     return s;
   };
 
-  // saveBlob hands a blob to the browser as a download. Batch members and the
-  // zip are built in this tab and never exist as a server URL, so an object
-  // URL is the only way to offer them.
   // renderPreviewInto builds the preview node for a decrypted blob and appends
   // it to box. Shared by the single-file landing page and the batch list so the
   // content-sniffing rules below cannot drift apart between the two.
@@ -52,6 +49,9 @@
     return true;
   }
 
+  // saveBlob hands a blob to the browser as a download. Batch members and the
+  // zip are built in this tab and never exist as a server URL, so an object
+  // URL is the only way to offer them.
   function saveBlob(blob, filename) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -177,7 +177,7 @@
 
   const e2eRoot = document.getElementById('dl-root');
   if (e2eRoot && e2eRoot.getAttribute('data-e2e') === '1') {
-    const E2E = window.KFS_E2E;
+    const E2E = window.PYXIS_E2E;
     const fileId = e2eRoot.getAttribute('data-file');
     const mode = e2eRoot.getAttribute('data-mode');
     const fileName = e2eRoot.getAttribute('data-name');
@@ -336,8 +336,8 @@
 
   const batchRoot = document.getElementById('batch-root');
   if (batchRoot) {
-    const E2E = window.KFS_E2E;
-    const ZIP = window.KFS_ZIP;
+    const E2E = window.PYXIS_E2E;
+    const ZIP = window.PYXIS_ZIP;
     const batchId = batchRoot.getAttribute('data-batch');
     const mode = batchRoot.getAttribute('data-mode');
     const errBox = document.getElementById('batch-error');
@@ -875,7 +875,7 @@
     // Encrypt in this tab before anything is sent. The password (when set) is
     // never transmitted: only a token derived from it on a separate KDF
     // branch, which cannot yield the file key.
-    const E2E = window.KFS_E2E;
+    const E2E = window.PYXIS_E2E;
     if (!E2E || !E2E.available) {
       // Fail closed. WebCrypto is missing precisely in insecure contexts
       // (plain HTTP), so falling back to a server-side upload would ship the
@@ -1015,7 +1015,7 @@
     if (batchState.id) return batchState;
     if (batchState.creating) return batchState.creating;
 
-    const E2E = window.KFS_E2E;
+    const E2E = window.PYXIS_E2E;
     batchState.creating = (async () => {
       const body = new URLSearchParams();
       if (opts.expiresAt) body.set('expires_at', opts.expiresAt);

@@ -1,4 +1,4 @@
-// Minimal ZIP writer for k-fileshare batch downloads.
+// Minimal ZIP writer for Pyxis batch downloads.
 //
 // The server stores ciphertext and holds no keys, so it cannot zip a batch —
 // only the browser can, after decrypting each member locally. This builds a
@@ -167,5 +167,5 @@
     return err;
   }
 
-  window.KFS_ZIP = { build: build, MAX_BYTES: MAX32 };
+  window.PYXIS_ZIP = { build: build, MAX_BYTES: MAX32 };
 })();

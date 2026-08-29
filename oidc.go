@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	oidcStateCookie    = "fileshare_oidc_state"
-	oidcVerifierCookie = "fileshare_oidc_verifier"
-	oidcNextCookie     = "fileshare_oidc_next"
+	oidcStateCookie    = "pyxis_oidc_state"
+	oidcVerifierCookie = "pyxis_oidc_verifier"
+	oidcNextCookie     = "pyxis_oidc_next"
 	oidcStateTTL       = 10 * time.Minute
 
 	// Zitadel confirms the org context of a scope-restricted login via
@@ -338,7 +338,7 @@ func (a *App) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) renderOIDCDenied(w http.ResponseWriter, r *http.Request, allowed, actual string) {
 	a.renderStatus(w, r, http.StatusForbidden, "oidc_denied.html", map[string]any{
-		"Title":         a.tr(r, "denied.heading") + " · k-fileshare",
+		"Title":         a.tr(r, "denied.heading") + " · Pyxis",
 		"AllowedDomain": allowed,
 		"ActualDomain":  actual,
 	})

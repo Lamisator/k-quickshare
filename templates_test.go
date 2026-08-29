@@ -119,7 +119,7 @@ func TestTemplatesRender(t *testing.T) {
 }
 
 // TestE2EScriptIncluded guards the wiring between e2e.js and app.js. app.js
-// reads window.KFS_E2E and fails every upload closed with "Encryption
+// reads window.PYXIS_E2E and fails every upload closed with "Encryption
 // unavailable" when it is missing, so a layout that forgets the script tag
 // breaks uploads in every browser while all other tests still pass — which is
 // exactly how it shipped once. Both shells need it: the app shell uploads, the
@@ -139,7 +139,7 @@ func TestE2EScriptIncluded(t *testing.T) {
 		// download.html (bare shell) fields:
 		"State": "ready", "ID": "id1", "Name": "f.bin", "Size": int64(5),
 		"ContentType": "application/octet-stream", "UploadedAt": time.Now(),
-		"IconKind": "generic", "KeyCookie": "fsk_x",
+		"IconKind": "generic",
 	}
 
 	for _, name := range []string{"index.html", "download.html"} {
@@ -151,7 +151,7 @@ func TestE2EScriptIncluded(t *testing.T) {
 		e2e := strings.Index(out, "/static/e2e.js")
 		app := strings.Index(out, "/static/app.js")
 		if e2e < 0 {
-			t.Errorf("%s: does not load /static/e2e.js; window.KFS_E2E will be "+
+			t.Errorf("%s: does not load /static/e2e.js; window.PYXIS_E2E will be "+
 				"undefined and every upload fails closed", name)
 			continue
 		}
