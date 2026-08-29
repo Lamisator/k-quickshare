@@ -21,6 +21,8 @@
   const INFO_URL = 'k-fileshare-e2e-url-v1';
   const INFO_ENC = 'k-fileshare-e2e-enc-v1';
   const INFO_AUTH = 'k-fileshare-e2e-auth-v1';
+  const INFO_BATCH = 'k-fileshare-e2e-batch-v1';
+  const WRAP_NONCE = 12;
 
   const subtle = (window.crypto && window.crypto.subtle) || null;
   const te = new TextEncoder();
@@ -68,6 +70,40 @@
     return importAes(await hkdf32(secret, new Uint8Array(0), INFO_URL));
   }
 
+  // --- batch keys ----------------------------------------------------------
+  //
+  // A batch link carries ONE secret, but every member file is encrypted under
+  // its own random key, sealed under the batch key and stored server-side as an
+  // opaque blob. Two reasons to wrap rather than derive per-file keys from the
+  // secret: the browser encrypts before the server has assigned a file id, so
+  // there is nothing stable to derive from; and a member can later be removed
+  // or added without renumbering anything.
+  //
+  // INFO_BATCH keeps a batch secret and a single-file secret in separate key
+  // spaces even if the same 32 bytes were ever reused.
+  async function deriveBatchKey(secret) {
+    return importAes(await hkdf32(secret, new Uint8Array(0), INFO_BATCH));
+  }
+
+  async function wrapFileKey(batchKey, rawFileKey) {
+    const nonce = randomBytes(WRAP_NONCE);
+    const sealed = await subtle.encrypt({ name: 'AES-GCM', iv: nonce }, batchKey, rawFileKey);
+    const out = new Uint8Array(WRAP_NONCE + sealed.byteLength);
+    out.set(nonce, 0);
+    out.set(new Uint8Array(sealed), WRAP_NONCE);
+    return out;
+  }
+
+  // Throws if the batch key is wrong — GCM verification fails, so a bad secret
+  // or password can never yield a usable file key.
+  async function unwrapFileKey(batchKey, wrapped) {
+    if (!wrapped || wrapped.length <= WRAP_NONCE) throw new Error('malformed wrapped key');
+    const raw = await subtle.decrypt(
+      { name: 'AES-GCM', iv: wrapped.subarray(0, WRAP_NONCE) }, batchKey,
+      wrapped.subarray(WRAP_NONCE));
+    return importAes(new Uint8Array(raw));
+  }
+
   // Returns { key, auth } — the encryption key never leaves the browser.
   async function derivePasswordKeys(password, salt, onStatus) {
     if (onStatus) onStatus();
@@ -82,12 +118,31 @@
     return { key: await importAes(encKey), auth: auth };
   }
 
+  // aborted reports whether a cancellation token has been tripped. The token is
+  // anything with an `aborted` property, so a real AbortSignal works too.
+  function aborted(signal) {
+    return !!(signal && signal.aborted);
+  }
+
+  function abortError() {
+    const err = new Error('aborted');
+    err.name = 'AbortError';
+    return err;
+  }
+
   // encryptFile turns a File/Blob into a ciphertext Blob in chunk format.
-  async function encryptFile(file, aesKey, onProgress) {
+  //
+  // The optional cancellation token is checked between chunks: an aborted
+  // encryption throws AbortError and the partial ciphertext is dropped with
+  // the rest of the frame, so nothing half-encrypted can reach the network.
+  // Cancelling cannot interrupt a chunk already inside subtle.encrypt, but a
+  // 64 KiB chunk returns fast enough that the delay is imperceptible.
+  async function encryptFile(file, aesKey, onProgress, signal) {
     const total = file.size;
     const chunks = Math.ceil(total / CHUNK);
     const parts = [];
     for (let i = 0; i < chunks; i++) {
+      if (aborted(signal)) throw abortError();
       const slice = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, total));
       const buf = await slice.arrayBuffer();
       const ct = await subtle.encrypt({ name: 'AES-GCM', iv: chunkNonce(i) }, aesKey, buf);
@@ -122,6 +177,9 @@
     importAes: importAes,
     deriveUrlKey: deriveUrlKey,
     derivePasswordKeys: derivePasswordKeys,
+    deriveBatchKey: deriveBatchKey,
+    wrapFileKey: wrapFileKey,
+    unwrapFileKey: unwrapFileKey,
     encryptFile: encryptFile,
     decryptBuffer: decryptBuffer,
     SALT_LEN: 16,

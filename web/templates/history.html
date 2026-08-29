@@ -44,8 +44,9 @@
     <div class="file-main">
       <div class="file-name-row">
         {{if or .Archived .Keyed}}<span class="file-name">{{.OriginalName}}</span>
-        {{else}}<a class="file-name" href="/files/{{.ID}}">{{.OriginalName}}</a>{{end}}
+        {{else}}<a class="file-name" href="{{if .BatchID}}/b/{{.BatchID}}{{else}}/files/{{.ID}}{{end}}">{{.OriginalName}}</a>{{end}}
         {{if .Archived}}<span class="chip chip-archived">{{T $.Lang "files.archived"}}</span>{{end}}
+        {{if .BatchID}}<span class="chip chip-batch" title="{{T $.Lang "files.batch_tip"}}">{{T $.Lang "files.batch"}}</span>{{end}}
         {{if and .Keyed (not .Archived)}}<span class="chip chip-keyed" title="{{T $.Lang "files.keyed_tip"}}">
           <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L21 2M15 8l3 3M18 5l3 3"/></svg>
           {{T $.Lang "files.keyed"}}</span>{{end}}
@@ -66,15 +67,15 @@
     </div>
     <div class="file-actions">
       {{if and (not .Archived) (not .Keyed)}}
-      <button type="button" class="btn btn-ghost btn-sm btn-copy" data-copy="/files/{{.ID}}">
+      <button type="button" class="btn btn-ghost btn-sm btn-copy" data-copy="{{if .BatchID}}/b/{{.BatchID}}{{else}}/files/{{.ID}}{{end}}">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         {{T $.Lang "js.copy"}}
       </button>
-      <button type="button" class="btn btn-ghost btn-sm btn-qr" data-qr-url="/files/{{.ID}}" title="{{T $.Lang "files.qr"}}">
+      <button type="button" class="btn btn-ghost btn-sm btn-qr" data-qr-url="{{if .BatchID}}/b/{{.BatchID}}{{else}}/files/{{.ID}}{{end}}" title="{{T $.Lang "files.qr"}}">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14h1M14 20h1M18 18h3v3h-3z"/></svg>
         QR
       </button>
-      <a class="btn btn-ghost btn-sm" href="/files/{{.ID}}" target="_blank" rel="noopener">{{T $.Lang "files.open"}}</a>
+      <a class="btn btn-ghost btn-sm" href="{{if .BatchID}}/b/{{.BatchID}}{{else}}/files/{{.ID}}{{end}}" target="_blank" rel="noopener">{{T $.Lang "files.open"}}</a>
       {{end}}
       {{if .CanDelete}}
       <form class="file-delete" action="/delete/{{.ID}}" method="post" data-confirm="{{T $.Lang "js.confirm_delete" .OriginalName}}">

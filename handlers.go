@@ -39,6 +39,7 @@ type File struct {
 	Keyed         bool // decryption key lives only in the original share link
 	CanDelete     bool
 	IconKind      string
+	BatchID       *string // set when this file is shared as part of a batch link
 }
 
 // --- pages ----------------------------------------------------------------
@@ -61,13 +62,24 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	// Share IDs are bearer secrets: a regular user must only ever see their
 	// own uploads. Admins intentionally get the instance-wide view.
 	// Archived rows (blob deleted, metadata kept 30 days) stay listed.
+	// A batch member holds no expiry, limit or password of its own — the batch
+	// row does — so those columns are coalesced through the join. Without it
+	// every member would list as "never expires, no limit", which is the
+	// opposite of what its link actually enforces.
 	const baseQuery = `SELECT f.id::text, f.original_name, f.stored_name, f.size_bytes, f.content_type,
 		        f.uploaded_at, f.uploaded_by::text, u.username,
-		        f.expires_at, (f.password_hash IS NOT NULL OR f.key_mode = 4),
-		        f.max_downloads, f.download_count, f.archived_at, f.key_mode
+		        COALESCE(b.expires_at, f.expires_at),
+		        (f.password_hash IS NOT NULL OR f.key_mode = 4),
+		        COALESCE(b.max_downloads, f.max_downloads),
+		        COALESCE(b.download_count, f.download_count),
+		        COALESCE(b.archived_at, f.archived_at),
+		        f.key_mode, f.batch_id::text, b.key_mode
 		 FROM files f
 		 LEFT JOIN users u ON u.id = f.uploaded_by
-		 WHERE (f.archived_at IS NOT NULL OR f.expires_at IS NULL OR f.expires_at > NOW())`
+		 LEFT JOIN batches b ON b.id = f.batch_id
+		 WHERE (COALESCE(b.archived_at, f.archived_at) IS NOT NULL
+		     OR COALESCE(b.expires_at, f.expires_at) IS NULL
+		     OR COALESCE(b.expires_at, f.expires_at) > NOW())`
 	var (
 		rows pgx.Rows
 		err  error
@@ -94,21 +106,29 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	)
 	for rows.Next() {
 		var (
-			f          File
-			uploaderID *string
-			uploader   *string
-			expires    *time.Time
-			maxDL      *int
-			archivedAt *time.Time
-			keyMode    int
+			f            File
+			uploaderID   *string
+			uploader     *string
+			expires      *time.Time
+			maxDL        *int
+			archivedAt   *time.Time
+			keyMode      int
+			batchKeyMode *int
 		)
 		if err := rows.Scan(&f.ID, &f.OriginalName, &f.StoredName, &f.Size, &f.ContentType,
 			&f.UploadedAt, &uploaderID, &uploader,
-			&expires, &f.HasPassword, &maxDL, &f.DownloadCount, &archivedAt, &keyMode); err != nil {
+			&expires, &f.HasPassword, &maxDL, &f.DownloadCount, &archivedAt, &keyMode,
+			&f.BatchID, &batchKeyMode); err != nil {
 			httpError(w, err, http.StatusInternalServerError)
 			return
 		}
 		f.Keyed = keyMode == keyModeURL || keyMode == keyModeE2EURL
+		if batchKeyMode != nil {
+			// The batch, not the member, decides how the share is unlocked: a
+			// password batch has a reproducible link, a fragment batch does not.
+			f.HasPassword = *batchKeyMode == keyModeE2EPassword
+			f.Keyed = *batchKeyMode == keyModeE2EURL
+		}
 		f.UploadedBy = uploaderID
 		if uploader != nil {
 			f.UploaderName = *uploader
@@ -271,6 +291,45 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A batch member inherits expiry, limit and password from the batch row and
+	// keeps none of its own: the batch is the share, and leaving these set on
+	// the member would create a second, conflicting set of rules for the same
+	// bytes. Ownership is checked so a leaked batch id cannot be used to inject
+	// files into someone else's link.
+	var (
+		batch      *batchMeta
+		wrappedKey []byte
+	)
+	if bidStr := r.FormValue("batch_id"); bidStr != "" {
+		bid, perr := uuid.Parse(bidStr)
+		if perr != nil {
+			http.Error(w, "invalid batch_id", http.StatusBadRequest)
+			return
+		}
+		batch, err = a.loadBatchForUpload(r, bid, user.ID.String())
+		if err != nil {
+			switch {
+			case errors.Is(err, pgx.ErrNoRows), errors.Is(err, errNotBatchOwner):
+				http.Error(w, "batch not found", http.StatusNotFound)
+			case errors.Is(err, errBatchClosed):
+				http.Error(w, "batch is no longer open", http.StatusGone)
+			default:
+				httpError(w, err, http.StatusInternalServerError)
+			}
+			return
+		}
+		if r.FormValue("e2e") != "1" {
+			http.Error(w, "batch uploads must be end-to-end encrypted", http.StatusBadRequest)
+			return
+		}
+		wrappedKey, err = base64.RawURLEncoding.DecodeString(r.FormValue("wrapped_key"))
+		if err != nil || len(wrappedKey) != batchWrappedKeyLen {
+			http.Error(w, "invalid wrapped_key", http.StatusBadRequest)
+			return
+		}
+		expiresAt, maxDownloads, passwordHash = nil, nil, nil
+	}
+
 	// Reserve quota atomically BEFORE writing anything to disk. The request
 	// Content-Length is a slight overestimate of the file size (multipart
 	// overhead), which is exactly the conservative direction we want; when
@@ -326,6 +385,11 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		token, terr := base64.RawURLEncoding.DecodeString(r.FormValue("auth_verifier"))
 		salt, _ = base64.RawURLEncoding.DecodeString(r.FormValue("auth_salt"))
 		keyMode = keyModeE2EURL
+		// A batch member's key is wrapped under the batch key, so it carries no
+		// auth material of its own — the batch row holds the password verifier.
+		if batch != nil {
+			token, salt = nil, nil
+		}
 		if len(token) > 0 {
 			if terr != nil || len(token) != 32 || len(salt) != encSaltLen {
 				dst.Close()
@@ -410,14 +474,20 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Swap the reservation for the real row under the quota lock, re-checking
 	// against the actual size.
 	err = a.finalizeUpload(r.Context(), user, resID, written, func(tx pgx.Tx) error {
+		var batchID *string
+		if batch != nil {
+			batchID = &batch.ID
+		}
 		_, err := tx.Exec(r.Context(),
 			`INSERT INTO files (id, original_name, stored_name, size_bytes, content_type,
 			                    uploaded_by, expires_at, password_hash, max_downloads,
-			                    enc_version, enc_key, key_mode, enc_salt, auth_verifier)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+			                    enc_version, enc_key, key_mode, enc_salt, auth_verifier,
+			                    batch_id, wrapped_key)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 			id.String(), origName, storedName, written, contentType,
 			user.ID.String(), expiresAt, passwordHash, maxDownloads,
-			encVersionGCM, wrappedDEK, keyMode, salt, authVerifier)
+			encVersionGCM, wrappedDEK, keyMode, salt, authVerifier,
+			batchID, wrappedKey)
 		return err
 	})
 	if err != nil {
@@ -436,12 +506,17 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// For URL-keyed files the fragment is the only copy of the secret. In the
 	// server-assisted mode it is returned here once and never stored; in E2E
 	// mode the client generated the key itself and appends its own fragment.
+	// A batch member has no link of its own: the batch link is the share, and
+	// the client already holds its fragment from when it created the batch.
 	shareURL := "/files/" + id.String()
-	if keyMode == keyModeURL {
+	switch {
+	case batch != nil:
+		shareURL = "/b/" + batch.ID
+	case keyMode == keyModeURL:
 		shareURL += "#" + base64.RawURLEncoding.EncodeToString(urlSecret)
 	}
 	if wantsJSON(r) {
-		writeJSON(w, http.StatusCreated, map[string]any{
+		res := map[string]any{
 			"id":          id.String(),
 			"name":        origName,
 			"size":        written,
@@ -449,7 +524,13 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			"expiresAt":   expiresAt,
 			"hasPassword": passwordHash != nil || keyMode == keyModeE2EPassword,
 			"keyed":       keyMode == keyModeURL || keyMode == keyModeE2EURL,
-		})
+		}
+		if batch != nil {
+			res["batchId"] = batch.ID
+			res["hasPassword"] = batch.isPassword()
+			res["keyed"] = !batch.isPassword()
+		}
+		writeJSON(w, http.StatusCreated, res)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -474,6 +555,7 @@ type fileMeta struct {
 	EncSalt       []byte
 	AuthVerifier  []byte
 	ArchivedAt    *time.Time
+	BatchID       *string
 }
 
 func (fm *fileMeta) isE2E() bool {
@@ -497,6 +579,18 @@ func (a *App) dispatchFileRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	// A batch member is reachable only through its batch, which is where the
+	// password, expiry and download limit live. Serving it from here would hand
+	// out the bytes with none of those checks applied.
+	if fm.BatchID != nil {
+		if action == "" {
+			// Someone following a stale per-file link gets sent to the share.
+			http.Redirect(w, r, "/b/"+*fm.BatchID, http.StatusSeeOther)
+			return
+		}
+		http.NotFound(w, r)
 		return
 	}
 	if fm.MaxDownloads != nil && fm.DownloadCount >= *fm.MaxDownloads {
@@ -545,11 +639,13 @@ func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	err := a.db.QueryRow(r.Context(),
 		`SELECT original_name, stored_name, size_bytes, content_type, uploaded_at,
 		        expires_at, password_hash, max_downloads, download_count,
-		        enc_version, enc_key, key_mode, enc_salt, auth_verifier, archived_at
+		        enc_version, enc_key, key_mode, enc_salt, auth_verifier, archived_at,
+		        batch_id
 		 FROM files WHERE id = $1`, id.String()).
 		Scan(&fm.OriginalName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
 			&fm.ExpiresAt, &fm.PasswordHash, &fm.MaxDownloads, &fm.DownloadCount,
-			&fm.EncVersion, &fm.EncKey, &fm.KeyMode, &fm.EncSalt, &fm.AuthVerifier, &fm.ArchivedAt)
+			&fm.EncVersion, &fm.EncKey, &fm.KeyMode, &fm.EncSalt, &fm.AuthVerifier, &fm.ArchivedAt,
+			&fm.BatchID)
 	if err != nil {
 		return nil, err
 	}

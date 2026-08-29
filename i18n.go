@@ -92,6 +92,57 @@ var translations = map[string]map[string]string{
 	"js.e2e_unavailable": {"en": "Encryption unavailable — upload refused", "de": "Verschlüsselung nicht verfügbar — Upload abgelehnt"},
 	"js.e2e_insecure":    {"en": "Nothing was sent: encryption requires a secure (HTTPS) connection.", "de": "Es wurde nichts gesendet: Die Verschlüsselung erfordert eine sichere (HTTPS-)Verbindung."},
 
+	// --- upload queue: cancel / retry / failure reasons ---
+	"js.cancel":    {"en": "Cancel", "de": "Abbrechen"},
+	"js.retry":     {"en": "Retry", "de": "Erneut versuchen"},
+	"js.cancelled": {"en": "Cancelled", "de": "Abgebrochen"},
+	"js.reason_cancelled": {"en": "Cancelled before the upload finished. Nothing was stored.",
+		"de": "Vor Abschluss des Uploads abgebrochen. Es wurde nichts gespeichert."},
+	"js.reason_network": {"en": "The connection was interrupted before the upload finished. Nothing was stored.",
+		"de": "Die Verbindung wurde vor Abschluss des Uploads unterbrochen. Es wurde nichts gespeichert."},
+	"js.reason_login": {"en": "Your session expired. Sign in again, then retry the upload.",
+		"de": "Deine Sitzung ist abgelaufen. Melde dich erneut an und versuche den Upload noch einmal."},
+	"js.reason_http": {"en": "The server rejected the upload (HTTP %s).",
+		"de": "Der Server hat den Upload abgelehnt (HTTP %s)."},
+	"js.reason_encrypt": {"en": "Encryption failed in this browser: %s",
+		"de": "Die Verschlüsselung ist in diesem Browser fehlgeschlagen: %s"},
+
+	// --- batch strings used by app.js ---
+	"js.batch_link":         {"en": "Share link for all files", "de": "Freigabe-Link für alle Dateien"},
+	"js.batch_count":        {"en": "%s in this link", "de": "%s in diesem Link"},
+	"js.batch_new":          {"en": "Start a new link", "de": "Neuen Link starten"},
+	"js.batch_download":     {"en": "Download", "de": "Herunterladen"},
+	"js.batch_preview":      {"en": "Preview", "de": "Vorschau"},
+	"js.batch_hide_preview": {"en": "Hide preview", "de": "Vorschau ausblenden"},
+	"js.batch_preview_failed": {"en": "%s could not be previewed — its contents do not match its type.",
+		"de": "%s konnte nicht in der Vorschau angezeigt werden — der Inhalt passt nicht zum Dateityp."},
+	"js.batch_empty":    {"en": "This share has no files.", "de": "Diese Freigabe enthält keine Dateien."},
+	"js.batch_zipping":  {"en": "Packing ZIP…", "de": "ZIP wird gepackt…"},
+	"js.batch_fetching": {"en": "Downloading %s…", "de": "%s wird heruntergeladen…"},
+	"js.batch_zip_too_large": {"en": "This batch is too large to zip in the browser (4 GiB limit). Download the files individually instead.",
+		"de": "Dieser Stapel ist zu groß, um im Browser gezippt zu werden (4-GiB-Grenze). Lade die Dateien stattdessen einzeln herunter."},
+	"js.batch_zip_name": {"en": "shared-files.zip", "de": "geteilte-dateien.zip"},
+	"js.batch_options_locked": {"en": "Expiry, password and download limit apply to the whole link and were set with the first file. Start a new link to change them.",
+		"de": "Ablauf, Passwort und Download-Limit gelten für den gesamten Link und wurden mit der ersten Datei festgelegt. Starte einen neuen Link, um sie zu ändern."},
+	"js.batch_failed": {"en": "Could not load this share.", "de": "Diese Freigabe konnte nicht geladen werden."},
+
+	// --- batch share (one link, many files) ---
+	"batch.title":          {"en": "Shared files", "de": "Geteilte Dateien"},
+	"batch.kicker":         {"en": "Someone shared these files with you", "de": "Jemand hat diese Dateien mit dir geteilt"},
+	"batch.heading":        {"en": "Shared files", "de": "Geteilte Dateien"},
+	"batch.n_files":        {"en": "%d files", "de": "%d Dateien"},
+	"batch.one_file":       {"en": "1 file", "de": "1 Datei"},
+	"batch.locked_summary": {"en": "Password protected", "de": "Passwortgeschützt"},
+	"batch.pw_hint": {"en": "Enter the password to list and download these files.",
+		"de": "Gib das Passwort ein, um diese Dateien zu sehen und herunterzuladen."},
+	// The limit counts file downloads, not link opens: pulling a 5-file batch
+	// spends 5, whether one at a time or via the zip.
+	"batch.downloads_left": {"en": "%d of %d file downloads left", "de": "Noch %d von %d Dateidownloads"},
+	"batch.download_all":   {"en": "Download all as ZIP", "de": "Alle als ZIP herunterladen"},
+	"files.batch":          {"en": "In a batch", "de": "Im Stapel"},
+	"files.batch_tip": {"en": "Shared together with other files under one link",
+		"de": "Zusammen mit anderen Dateien unter einem Link geteilt"},
+
 	// --- files / history page ---
 	"files.heading":       {"en": "My files", "de": "Meine Dateien"},
 	"files.sub":           {"en": "Everything shared on this instance, newest first.", "de": "Alles, was auf dieser Instanz geteilt wurde — Neuestes zuerst."},
@@ -374,6 +425,15 @@ func jsStrings(lang string) map[string]string {
 		"js.e2e_encrypting", "js.e2e_decrypting", "js.e2e_downloading",
 		"js.e2e_deriving", "js.e2e_failed", "js.e2e_wrong_pw", "js.e2e_unsupported",
 		"js.e2e_unavailable", "js.e2e_insecure",
+		"js.cancel", "js.retry", "js.cancelled",
+		"js.reason_cancelled", "js.reason_network", "js.reason_login",
+		"js.reason_http", "js.reason_encrypt",
+		"js.batch_link", "js.batch_count", "js.batch_new", "js.batch_download",
+		"js.batch_preview", "js.batch_hide_preview", "js.batch_preview_failed",
+		"js.batch_empty", "js.batch_zipping", "js.batch_fetching",
+		"js.batch_zip_too_large", "js.batch_zip_name", "js.batch_options_locked",
+		"js.batch_failed",
+		"batch.n_files", "batch.one_file",
 	}
 	out := make(map[string]string, len(keys))
 	for _, k := range keys {

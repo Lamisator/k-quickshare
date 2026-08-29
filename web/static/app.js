@@ -9,11 +9,58 @@
     try { I18N = JSON.parse(i18nEl.getAttribute('data-json')) || {}; } catch (e) { /* keep defaults */ }
     LANG = i18nEl.getAttribute('data-lang') || 'en';
   }
+  // %d and %s are interchangeable here: the same catalogue feeds Go's Sprintf
+  // (which needs %d for counts) and this one-argument substitution.
   const t = (key, arg) => {
     let s = I18N[key] || key;
-    if (arg !== undefined) s = s.replace('%s', arg);
+    if (arg !== undefined) s = s.replace(/%[sd]/, arg);
     return s;
   };
+
+  // saveBlob hands a blob to the browser as a download. Batch members and the
+  // zip are built in this tab and never exist as a server URL, so an object
+  // URL is the only way to offer them.
+  // renderPreviewInto builds the preview node for a decrypted blob and appends
+  // it to box. Shared by the single-file landing page and the batch list so the
+  // content-sniffing rules below cannot drift apart between the two.
+  // Returns false when the blob refused to render.
+  async function renderPreviewInto(box, kind, blob, name) {
+    box.classList.add('dl-preview-' + kind);
+    if (kind === 'text') {
+      const pre = document.createElement('pre');
+      pre.className = 'e2e-text';
+      pre.textContent = await blob.text();
+      box.appendChild(pre);
+    } else if (kind === 'pdf') {
+      // Only frame a blob that really is a PDF: a lying content type must not
+      // turn into an HTML document on a blob: origin.
+      const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+      if (String.fromCharCode.apply(null, head) !== '%PDF-') return false;
+      const frame = document.createElement('iframe');
+      frame.src = URL.createObjectURL(blob);
+      frame.title = name;
+      box.appendChild(frame);
+    } else {
+      const el = document.createElement(
+        kind === 'image' ? 'img' : kind === 'video' ? 'video' : 'audio');
+      if (kind !== 'image') { el.controls = true; el.preload = 'metadata'; }
+      el.src = URL.createObjectURL(blob);
+      if (kind === 'image') el.alt = name;
+      box.appendChild(el);
+    }
+    box.hidden = false;
+    return true;
+  }
+
+  function saveBlob(blob, filename) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
 
   // human-readable transfer rate, localized decimal (e.g. "3.2 MB/s" / "3,2 MB/s")
   const rateFmt = new Intl.NumberFormat(LANG === 'de' ? 'de-DE' : 'en-GB', {
@@ -29,6 +76,20 @@
     }
     return rateFmt.format(v) + ' ' + units[i];
   }
+
+  // Binary units, matching the Go humanSize helper used in the templates.
+  function fmtSize(bytes) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let v = Number(bytes) || 0;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return (i === 0 ? v : rateFmt.format(v)) + ' ' + units[i];
+  }
+
+  const fileCountLabel = (n) => (n === 1 ? t('batch.one_file') : t('batch.n_files', n));
 
   // ---- toast ---------------------------------------------------------------
 
@@ -197,30 +258,7 @@
         fail(t('e2e_failed') + ' (' + err.message + ')');
         return;
       }
-      box.classList.add('dl-preview-' + previewKind);
-      if (previewKind === 'text') {
-        const pre = document.createElement('pre');
-        pre.className = 'e2e-text';
-        pre.textContent = await blob.text();
-        box.appendChild(pre);
-      } else if (previewKind === 'pdf') {
-        // Only frame a blob that really is a PDF: a lying content type must
-        // not turn into an HTML document on a blob: origin.
-        const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
-        if (String.fromCharCode.apply(null, head) !== '%PDF-') return;
-        const frame = document.createElement('iframe');
-        frame.src = URL.createObjectURL(blob);
-        frame.title = fileName;
-        box.appendChild(frame);
-      } else {
-        const el = document.createElement(
-          previewKind === 'image' ? 'img' : previewKind === 'video' ? 'video' : 'audio');
-        if (previewKind !== 'image') { el.controls = true; el.preload = 'metadata'; }
-        el.src = URL.createObjectURL(blob);
-        if (previewKind === 'image') el.alt = fileName;
-        box.appendChild(el);
-      }
-      box.hidden = false;
+      await renderPreviewInto(box, previewKind, blob, fileName);
     }
 
     async function startSession() {
@@ -283,6 +321,252 @@
           fileKey = key;
           lockBox.hidden = true;
           await startSession();
+        } catch (err) {
+          fail(t('e2e_failed') + ' (' + err.message + ')');
+        } finally {
+          unlockBtn.disabled = false;
+        }
+      };
+      unlockBtn.addEventListener('click', unlock);
+      pwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
+    }
+  }
+
+  // ---- batch share landing (one link, many files) --------------------------
+  //
+  // Everything below happens in the tab. The server holds ciphertext and no
+  // keys, so it cannot list, decrypt or zip anything: the page derives the
+  // batch key from the fragment (or the password), unwraps each member's own
+  // key, and assembles the zip locally.
+
+  const batchRoot = document.getElementById('batch-root');
+  if (batchRoot) {
+    const E2E = window.KFS_E2E;
+    const ZIP = window.KFS_ZIP;
+    const batchId = batchRoot.getAttribute('data-batch');
+    const mode = batchRoot.getAttribute('data-mode');
+    const errBox = document.getElementById('batch-error');
+    const keyMissing = document.getElementById('key-missing');
+    const mainBox = document.getElementById('batch-main');
+    const listEl = document.getElementById('batch-list');
+    const zipBtn = document.getElementById('batch-zip');
+    const summaryEl = document.getElementById('batch-summary');
+    const progress = document.getElementById('batch-progress');
+    const statusEl = document.getElementById('batch-status');
+    const pctEl = document.getElementById('batch-pct');
+    const fillEl = document.getElementById('batch-fill');
+
+    let batchKey = null;
+    let members = [];
+
+    const fail = (msg) => {
+      errBox.textContent = msg;
+      errBox.hidden = false;
+      progress.hidden = true;
+    };
+    const setProgress = (label, frac) => {
+      progress.hidden = false;
+      statusEl.textContent = label;
+      const pct = Math.round(Math.max(0, Math.min(1, frac)) * 100);
+      fillEl.style.width = pct + '%';
+      pctEl.textContent = pct + '%';
+    };
+    const clearProgress = () => { progress.hidden = true; };
+
+    async function loadManifest() {
+      const res = await fetch('/b/' + batchId + '/manifest', {
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      members = (await res.json()).files || [];
+    }
+
+    // Each member is sealed under its own key; the batch key only unwraps.
+    //
+    // The result is memoised per member: every /raw fetch counts as a download,
+    // so previewing and then downloading the same file must not spend two.
+    const plainCache = new Map();
+    function decryptMember(m, onProgress) {
+      if (plainCache.has(m.id)) return plainCache.get(m.id);
+      const p = (async () => {
+        const fileKey = await E2E.unwrapFileKey(batchKey, E2E.b64uDecode(m.wrappedKey));
+        const res = await fetch('/b/' + batchId + '/f/' + m.id + '/raw');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const buf = await res.arrayBuffer();
+        return E2E.decryptBuffer(buf, fileKey, m.contentType, onProgress);
+      })();
+      // A failed attempt must stay retryable, so only a success is kept.
+      plainCache.set(m.id, p);
+      p.catch(() => plainCache.delete(m.id));
+      return p;
+    }
+
+    function renderList() {
+      listEl.textContent = '';
+      let total = 0;
+      for (const m of members) total += Number(m.size) || 0;
+      summaryEl.textContent = fileCountLabel(members.length) + ' · ' + fmtSize(total);
+      zipBtn.hidden = members.length === 0;
+      if (members.length === 0) {
+        const li = document.createElement('li');
+        li.className = 'batch-empty';
+        li.textContent = t('batch_empty');
+        listEl.appendChild(li);
+        return;
+      }
+      for (const m of members) {
+        const li = document.createElement('li');
+        li.className = 'batch-row';
+
+        const icon = document.createElement('span');
+        icon.className = 'ficon ficon-' + (m.iconKind || 'generic');
+        icon.setAttribute('aria-hidden', 'true');
+
+        const meta = document.createElement('div');
+        meta.className = 'batch-row-meta';
+        const name = document.createElement('span');
+        name.className = 'batch-row-name';
+        name.textContent = m.name;
+        const sub = document.createElement('span');
+        sub.className = 'batch-row-sub muted';
+        sub.textContent = fmtSize(m.size) + ' · ' + m.contentType;
+        meta.appendChild(name);
+        meta.appendChild(sub);
+
+        const actions = document.createElement('div');
+        actions.className = 'batch-row-actions';
+        if (m.previewKind) {
+          const pv = document.createElement('button');
+          pv.type = 'button';
+          pv.className = 'btn btn-ghost btn-sm';
+          pv.textContent = t('batch_preview');
+          pv.addEventListener('click', () => togglePreview(m, pv, li));
+          actions.appendChild(pv);
+        }
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-ghost btn-sm';
+        btn.textContent = t('batch_download');
+        btn.addEventListener('click', () => downloadMember(m, btn));
+        actions.appendChild(btn);
+
+        li.appendChild(icon);
+        li.appendChild(meta);
+        li.appendChild(actions);
+        listEl.appendChild(li);
+      }
+    }
+
+    async function togglePreview(m, btn, li) {
+      const open = li.querySelector('.batch-preview');
+      if (open) {
+        open.remove();
+        btn.textContent = t('batch_preview');
+        return;
+      }
+      btn.disabled = true;
+      errBox.hidden = true;
+      try {
+        setProgress(t('batch_fetching', m.name), 0);
+        const blob = await decryptMember(m, (f) => setProgress(t('e2e_decrypting'), f));
+        const box = document.createElement('div');
+        box.className = 'dl-preview batch-preview';
+        if (await renderPreviewInto(box, m.previewKind, blob, m.name)) {
+          li.appendChild(box);
+          btn.textContent = t('batch_hide_preview');
+        } else {
+          // A blob that failed its content check (a "PDF" that isn't one).
+          fail(t('batch_preview_failed', m.name));
+        }
+      } catch (err) {
+        fail(t('e2e_failed') + ' (' + err.message + ')');
+      } finally {
+        btn.disabled = false;
+        clearProgress();
+      }
+    }
+
+    async function downloadMember(m, btn) {
+      btn.disabled = true;
+      errBox.hidden = true;
+      try {
+        setProgress(t('batch_fetching', m.name), 0);
+        const blob = await decryptMember(m, (f) => setProgress(t('e2e_decrypting'), f));
+        saveBlob(blob, m.name);
+      } catch (err) {
+        fail(t('e2e_failed') + ' (' + err.message + ')');
+      } finally {
+        btn.disabled = false;
+        clearProgress();
+      }
+    }
+
+    zipBtn.addEventListener('click', async () => {
+      zipBtn.disabled = true;
+      errBox.hidden = true;
+      try {
+        // Members are decrypted one at a time and handed to the zip as blobs,
+        // so only one file's plaintext is held as bytes at any moment.
+        const entries = [];
+        for (let i = 0; i < members.length; i++) {
+          const m = members[i];
+          setProgress(t('batch_fetching', m.name), i / members.length);
+          entries.push({ name: m.name, blob: await decryptMember(m) });
+        }
+        const zip = await ZIP.build(entries, (done, all) =>
+          setProgress(t('batch_zipping'), done / all));
+        saveBlob(zip, t('batch_zip_name'));
+      } catch (err) {
+        fail(err && err.name === 'ZipTooLargeError'
+          ? t('batch_zip_too_large')
+          : t('e2e_failed') + ' (' + err.message + ')');
+      } finally {
+        zipBtn.disabled = false;
+        clearProgress();
+      }
+    });
+
+    async function startBatch() {
+      mainBox.hidden = false;
+      await loadManifest();
+      renderList();
+    }
+
+    if (!E2E || !E2E.available || !ZIP) {
+      fail(t('e2e_unsupported'));
+      zipBtn.classList.add('btn-disabled');
+    } else if (mode === 'url') {
+      const secret = (location.hash || '').replace(/^#/, '');
+      if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) {
+        keyMissing.hidden = false;
+      } else {
+        E2E.deriveBatchKey(E2E.b64uDecode(secret))
+          .then((k) => { batchKey = k; return startBatch(); })
+          .catch(() => fail(t('batch_failed')));
+      }
+    } else {
+      const pwInput = document.getElementById('batch-password');
+      const unlockBtn = document.getElementById('batch-unlock');
+      const lockBox = document.getElementById('batch-lock');
+      const salt = E2E.b64uDecode(batchRoot.getAttribute('data-salt') || '');
+      const unlock = async () => {
+        if (!pwInput.value) return;
+        unlockBtn.disabled = true;
+        errBox.hidden = true;
+        try {
+          setProgress(t('e2e_deriving'), 0.5);
+          const { key, auth } = await E2E.derivePasswordKeys(pwInput.value, salt);
+          const res = await fetch('/b/' + batchId + '/unlock', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'auth=' + encodeURIComponent(E2E.b64uEncode(auth)),
+          });
+          clearProgress();
+          if (res.status === 429) { fail(t('rate_limited')); return; }
+          if (!res.ok) { fail(t('e2e_wrong_pw')); pwInput.value = ''; return; }
+          batchKey = key;
+          lockBox.hidden = true;
+          await startBatch();
         } catch (err) {
           fail(t('e2e_failed') + ' (' + err.message + ')');
         } finally {
@@ -435,81 +719,162 @@
   function handleFiles(files) {
     if (!files || files.length === 0) return;
     if (sessionSection) sessionSection.hidden = false;
-    for (const file of files) uploadOne(file);
+    // One snapshot for the whole drop: a retry must repeat the share settings
+    // the user actually chose, not whatever the form holds later on.
+    const opts = snapshotOptions();
+    for (const file of files) uploadOne(file, opts);
   }
 
-  async function uploadOne(file) {
+  // snapshotOptions freezes the share settings for an upload. The form is
+  // reset on pageshow and can be edited while transfers are still running, so
+  // reading it again at retry time would silently change the share.
+  function snapshotOptions() {
+    const opts = { maxDownloads: '0', password: '' };
+    if (expiresSel && expiresSel.value === 'custom' && expiresAtInput && expiresAtInput.value) {
+      // datetime-local is timezone-less; convert to UTC ISO for the server
+      opts.expiresAt = new Date(expiresAtInput.value).toISOString();
+    } else if (expiresSel && expiresSel.value !== 'custom') {
+      opts.expiresHours = expiresSel.value || '0';
+    }
+    if (maxDownloadsInput) opts.maxDownloads = maxDownloadsInput.value || '0';
+    if (passwordInput) opts.password = passwordInput.value;
+    return opts;
+  }
+
+  // Failure kinds a retry could plausibly clear. A file over the size limit,
+  // an expired session or a browser without WebCrypto will fail identically
+  // every time, so those rows get an explanation but no retry button.
+  const RETRYABLE = {
+    network: true, failed: true, quota: true, rate_limited: true,
+    e2e_failed: true, cancelled: true,
+  };
+
+  function queueButton(labelKey, cls, onClick) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-ghost btn-sm ' + cls;
+    b.textContent = t(labelKey);
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function newQueueRow(file) {
     const row = document.createElement('div');
     row.className = 'queue-item';
     row.innerHTML = `
       <div class="queue-info">
         <span class="queue-name"></span>
         <span class="queue-status">0%</span>
+        <span class="queue-actions"></span>
       </div>
       <div class="queue-bar"><div class="queue-fill"></div></div>
+      <p class="queue-reason" hidden></p>
     `;
     row.querySelector('.queue-name').textContent = file.name;
     queue.prepend(row);
+    return row;
+  }
 
+  async function uploadOne(file, opts, existingRow) {
+    const row = existingRow || newQueueRow(file);
     const fill = row.querySelector('.queue-fill');
     const status = row.querySelector('.queue-status');
+    const actions = row.querySelector('.queue-actions');
+    const reason = row.querySelector('.queue-reason');
 
-    const fd = new FormData();
-    if (expiresSel && expiresSel.value === 'custom' && expiresAtInput && expiresAtInput.value) {
-      // datetime-local is timezone-less; convert to UTC ISO for the server
-      fd.append('expires_at', new Date(expiresAtInput.value).toISOString());
-    } else if (expiresSel && expiresSel.value !== 'custom') {
-      fd.append('expires_hours', expiresSel.value || '0');
+    // A retry reuses the row, so clear whatever the previous attempt left.
+    row.classList.remove('queue-error', 'queue-done', 'queue-cancelled');
+    fill.style.width = '0%';
+    status.textContent = '0%';
+    actions.textContent = '';
+    reason.textContent = '';
+    reason.hidden = true;
+    const staleLink = row.querySelector('.queue-link');
+    if (staleLink) staleLink.remove();
+
+    // Duck-typed AbortSignal: encryptFile only reads `.aborted`, and XHR has
+    // its own abort(), so no AbortController is needed.
+    const ctl = { aborted: false, xhr: null };
+
+    function showRetry() {
+      actions.textContent = '';
+      actions.appendChild(queueButton('retry', 'btn-retry', () => uploadOne(file, opts, row)));
     }
-    if (maxDownloadsInput) fd.append('max_downloads', maxDownloadsInput.value || '0');
+
+    // The reason stays in the row until the upload is retried — a failure the
+    // user stepped away from must still explain itself when they come back.
+    function fail(kind, detail) {
+      row.classList.add(kind === 'cancelled' ? 'queue-cancelled' : 'queue-error');
+      status.textContent = t(kind);
+      fill.style.width = kind === 'cancelled' ? '0%' : '100%';
+      if (detail) {
+        reason.textContent = detail;
+        reason.hidden = false;
+      }
+      if (RETRYABLE[kind]) showRetry();
+      else actions.textContent = '';
+    }
+
+    actions.appendChild(queueButton('cancel', 'btn-cancel', () => {
+      if (ctl.aborted) return;
+      ctl.aborted = true;
+      if (ctl.xhr) ctl.xhr.abort();
+      fail('cancelled', t('reason_cancelled'));
+    }));
+
+    // Expiry, limit and password belong to the batch row, not the member, so
+    // the per-file POST carries none of them.
+    const fd = new FormData();
 
     // Encrypt in this tab before anything is sent. The password (when set) is
     // never transmitted: only a token derived from it on a separate KDF
     // branch, which cannot yield the file key.
     const E2E = window.KFS_E2E;
-    const password = passwordInput ? passwordInput.value : '';
-    let fragment = '';
-    if (E2E && E2E.available) {
-      try {
-        let key;
-        if (password) {
-          const salt = E2E.randomBytes(E2E.SALT_LEN);
-          status.textContent = t('e2e_deriving');
-          const derived = await E2E.derivePasswordKeys(password, salt);
-          key = derived.key;
-          fd.append('auth_salt', E2E.b64uEncode(salt));
-          fd.append('auth_verifier', E2E.b64uEncode(derived.auth));
-        } else {
-          const secret = E2E.randomBytes(E2E.KEY_LEN);
-          fragment = '#' + E2E.b64uEncode(secret);
-          key = await E2E.deriveUrlKey(secret);
-        }
-        const cipher = await E2E.encryptFile(file, key, (f) => {
-          fill.style.width = Math.round(f * 100) + '%';
-          status.textContent = t('e2e_encrypting');
-        });
-        fd.append('file', cipher, file.name);
-        fd.append('e2e', '1');
-        fd.append('plain_size', String(file.size));
-        fd.append('content_type', file.type || 'application/octet-stream');
-      } catch (err) {
-        row.classList.add('queue-error');
-        status.textContent = t('e2e_failed');
-        return;
-      }
-    } else {
+    if (!E2E || !E2E.available) {
       // Fail closed. WebCrypto is missing precisely in insecure contexts
       // (plain HTTP), so falling back to a server-side upload would ship the
       // plaintext file and the password over the very connection that can't
       // be trusted — and would do it without telling anyone.
-      row.classList.add('queue-error');
-      status.textContent = t('e2e_unavailable');
-      fill.style.width = '100%';
+      fail('e2e_unavailable', t('e2e_insecure'));
       toast(t('e2e_insecure'));
       return;
     }
 
+    let batch;
+    try {
+      status.textContent = t('e2e_deriving');
+      batch = await ensureBatch(opts);
+    } catch (err) {
+      fail('failed', t('batch_failed'));
+      return;
+    }
+    if (ctl.aborted) return;
+    fd.append('batch_id', batch.id);
+
+    try {
+      // Every member gets its own random key, sealed under the batch key. The
+      // server stores the sealed blob and can open neither.
+      const rawKey = E2E.randomBytes(E2E.KEY_LEN);
+      const key = await E2E.importAes(rawKey);
+      fd.append('wrapped_key', E2E.b64uEncode(await E2E.wrapFileKey(batch.key, rawKey)));
+
+      const cipher = await E2E.encryptFile(file, key, (f) => {
+        fill.style.width = Math.round(f * 100) + '%';
+        status.textContent = t('e2e_encrypting');
+      }, ctl);
+      fd.append('file', cipher, file.name);
+      fd.append('e2e', '1');
+      fd.append('plain_size', String(file.size));
+      fd.append('content_type', file.type || 'application/octet-stream');
+    } catch (err) {
+      if (err && err.name === 'AbortError') return; // cancel handler already rendered
+      fail('e2e_failed', t('reason_encrypt', (err && err.message) || String(err)));
+      return;
+    }
+    if (ctl.aborted) return;
+
     const xhr = new XMLHttpRequest();
+    ctl.xhr = xhr;
     xhr.open('POST', '/upload');
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
@@ -533,73 +898,156 @@
       status.textContent =
         Math.min(99, Math.round(pct)) + '%' + (emaRate > 0 ? ' · ' + fmtRate(emaRate) : '');
     };
+    // serverReason prefers the server's own message: httpError() sends only
+    // http.StatusText, and the deliberate ones ("storage quota exceeded:
+    // personal storage limit reached") say more than any generic string here.
+    const serverReason = () => {
+      const body = (xhr.responseText || '').trim();
+      if (body && body.length <= 300 && body.charAt(0) !== '<') return body;
+      return t('reason_http', xhr.status);
+    };
     xhr.onload = () => {
+      if (ctl.aborted) return;
       if (xhr.status >= 200 && xhr.status < 400) {
         fill.style.width = '100%';
         row.classList.add('queue-done');
         status.textContent = t('done');
-        let res = null;
-        try { res = JSON.parse(xhr.responseText); } catch (e) { /* ignore */ }
-        if (res && res.url) addLinkRow(row, res, fragment);
+        actions.textContent = '';
+        // No per-file link: the batch link covers every file in this visit.
+        batchState.count++;
+        renderBatchPanel();
       } else if (xhr.status === 401) {
-        row.classList.add('queue-error');
-        status.textContent = t('login');
+        fail('login', t('reason_login'));
         setTimeout(() => (location.href = '/login?next=/'), 800);
       } else if (xhr.status === 413) {
-        row.classList.add('queue-error');
-        status.textContent = t('too_large');
+        fail('too_large', serverReason());
       } else if (xhr.status === 507) {
-        row.classList.add('queue-error');
-        status.textContent = t('quota');
+        fail('quota', serverReason());
       } else if (xhr.status === 429) {
-        row.classList.add('queue-error');
-        status.textContent = t('rate_limited');
+        fail('rate_limited', serverReason());
       } else {
-        row.classList.add('queue-error');
-        status.textContent = t('failed');
+        fail('failed', serverReason());
       }
     };
     xhr.onerror = () => {
-      row.classList.add('queue-error');
-      status.textContent = t('network');
+      if (ctl.aborted) return;
+      fail('network', t('reason_network'));
     };
     xhr.send(fd);
   }
 
-  function addLinkRow(row, res, fragment) {
-    // For key-in-URL shares this is the only moment the complete link exists:
-    // the fragment was generated in this tab and the server never sees it.
-    const url = new URL(res.url + (fragment || ''), location.href).toString();
-    const wrap = document.createElement('div');
-    wrap.className = 'queue-link';
+  // ---- batch link panel ----------------------------------------------------
+  //
+  // Every file uploaded during this visit lands under one link. The batch is
+  // created lazily with the first file so the share options still apply, then
+  // frozen: expiry, password and download limit live on the batch row, so
+  // editing them afterwards would silently redefine a link that may already
+  // have been sent to somebody. "Start a new link" is the way out.
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.readOnly = true;
-    input.value = url;
-    input.addEventListener('focus', () => input.select());
+  const batchState = { id: null, fragment: '', key: null, count: 0, creating: null };
 
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn btn-ghost btn-sm btn-copy';
-    btn.setAttribute('data-copy', url);
-    btn.textContent = t('copy');
+  const batchShare = document.getElementById('batch-share');
+  const batchShareUrl = document.getElementById('batch-share-url');
+  const batchShareCopy = document.getElementById('batch-share-copy');
+  const batchShareQR = document.getElementById('batch-share-qr');
+  const batchShareLabel = document.getElementById('batch-share-label');
+  const batchShareCount = document.getElementById('batch-share-count');
+  const batchShareNote = document.getElementById('batch-share-note');
+  const batchShareNew = document.getElementById('batch-share-new');
 
-    const qrBtn = document.createElement('button');
-    qrBtn.type = 'button';
-    qrBtn.className = 'btn btn-ghost btn-sm btn-qr';
-    qrBtn.setAttribute('data-qr-url', url);
-    qrBtn.textContent = 'QR';
-
-    wrap.appendChild(input);
-    wrap.appendChild(btn);
-    wrap.appendChild(qrBtn);
-    if (res.hasPassword) {
-      const chip = document.createElement('span');
-      chip.className = 'chip chip-lock';
-      chip.textContent = t('protected');
-      row.querySelector('.queue-info').insertBefore(chip, row.querySelector('.queue-status'));
+  function setOptionsLocked(locked) {
+    for (const el of [expiresSel, expiresAtInput, passwordInput, maxDownloadsInput]) {
+      if (el) el.disabled = locked;
     }
-    row.appendChild(wrap);
+    const box = document.getElementById('options');
+    if (box) box.classList.toggle('options-locked', locked);
+  }
+
+  // Concurrent uploads all await the same creation: handleFiles starts every
+  // file at once, and without this they would each open their own batch.
+  async function ensureBatch(opts) {
+    if (batchState.id) return batchState;
+    if (batchState.creating) return batchState.creating;
+
+    const E2E = window.KFS_E2E;
+    batchState.creating = (async () => {
+      const body = new URLSearchParams();
+      if (opts.expiresAt) body.set('expires_at', opts.expiresAt);
+      else if (opts.expiresHours !== undefined) body.set('expires_hours', opts.expiresHours);
+      body.set('max_downloads', opts.maxDownloads);
+
+      let key;
+      let fragment = '';
+      if (opts.password) {
+        const salt = E2E.randomBytes(E2E.SALT_LEN);
+        const derived = await E2E.derivePasswordKeys(opts.password, salt);
+        key = derived.key;
+        body.set('auth_salt', E2E.b64uEncode(salt));
+        body.set('auth_verifier', E2E.b64uEncode(derived.auth));
+      } else {
+        // The fragment is the only copy of the batch secret and never leaves
+        // this tab — the server sees the batch id and nothing else.
+        const secret = E2E.randomBytes(E2E.KEY_LEN);
+        fragment = '#' + E2E.b64uEncode(secret);
+        key = await E2E.deriveBatchKey(secret);
+      }
+
+      const res = await fetch('/batches', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: body.toString(),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+
+      batchState.id = data.id;
+      batchState.fragment = fragment;
+      batchState.key = key;
+      setOptionsLocked(true);
+      return batchState;
+    })();
+
+    try {
+      return await batchState.creating;
+    } finally {
+      batchState.creating = null;
+    }
+  }
+
+  function renderBatchPanel() {
+    if (!batchShare || !batchState.id) return;
+    const url = new URL('/b/' + batchState.id + batchState.fragment, location.href).toString();
+    batchShare.hidden = false;
+    batchShareLabel.textContent = t('batch_link');
+    batchShareCount.textContent = fileCountLabel(batchState.count);
+    batchShareUrl.value = url;
+    batchShareCopy.textContent = t('copy');
+    batchShareCopy.setAttribute('data-copy', url);
+    batchShareQR.setAttribute('data-qr-url', url);
+    batchShareNote.textContent = t('batch_options_locked');
+    batchShareNew.textContent = t('batch_new');
+  }
+
+  if (batchShareUrl) {
+    batchShareUrl.addEventListener('focus', () => batchShareUrl.select());
+  }
+  if (batchShareNew) {
+    batchShareNew.addEventListener('click', () => {
+      batchState.id = null;
+      batchState.fragment = '';
+      batchState.key = null;
+      batchState.count = 0;
+      batchState.creating = null;
+      setOptionsLocked(false);
+      batchShare.hidden = true;
+      // The queue described the previous link; clearing avoids implying those
+      // files are reachable through the next one.
+      queue.textContent = '';
+      if (sessionSection) sessionSection.hidden = true;
+    });
   }
 })();

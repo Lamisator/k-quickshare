@@ -21,6 +21,7 @@ func TestTemplatesRender(t *testing.T) {
 	user := &User{ID: uuid.New(), Username: "marius", Email: "m@example.com",
 		IsAdmin: true, IsSuperAdmin: true, HasPassword: true, OIDCSubject: "sub123"}
 	uid := user.ID.String()
+	batchID := uuid.NewString()
 	files := []File{
 		{ID: uuid.NewString(), OriginalName: "photo.jpg", Size: 12345, ContentType: "image/jpeg",
 			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid, ExpiresAt: &exp,
@@ -29,6 +30,10 @@ func TestTemplatesRender(t *testing.T) {
 			UploadedAt: now, DownloadCount: 1, IconKind: "text", Keyed: true},
 		{ID: uuid.NewString(), OriginalName: "old.zip", Size: 99, ContentType: "application/zip",
 			UploadedAt: now, DownloadCount: 5, Archived: true, CanDelete: true, IconKind: "archive"},
+		// Batch member: links to /b/{batch}, not /files/{id}.
+		{ID: uuid.NewString(), OriginalName: "in-batch.png", Size: 512, ContentType: "image/png",
+			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid, ExpiresAt: &exp,
+			CanDelete: true, IconKind: "image", BatchID: &batchID},
 	}
 
 	userRows := []UserRow{
@@ -65,6 +70,16 @@ func TestTemplatesRender(t *testing.T) {
 			"OIDCLive": false, "Error": "", "Success": ""},
 		"oidc_denied.html": {"User": (*User)(nil), "AllowedDomain": "a.example", "ActualDomain": "b.example"},
 	}
+	batchCases := []map[string]any{
+		{"State": "batch", "E2EMode": "url", "Unlocked": true, "ID": uuid.NewString(),
+			"FileCount": 3, "TotalSize": int64(4096), "UploadedAt": now,
+			"ExpiresAt": exp.UTC(), "HasLimit": true, "MaxDL": 10, "DownloadsLeft": 7,
+			"User": (*User)(nil)},
+		// Password batch before unlock: no count, no size, no expiry.
+		{"State": "batch", "E2EMode": "password", "Unlocked": false, "ID": uuid.NewString(),
+			"FileCount": 0, "TotalSize": int64(0), "UploadedAt": now,
+			"AuthSalt": "c2FsdHNhbHRzYWx0c2E", "HasLimit": false, "User": (*User)(nil)},
+	}
 	dlCases := []map[string]any{
 		{"State": "gone", "Gone": "gone msg", "User": (*User)(nil)},
 		{"State": "locked", "ID": "id1", "Name": "f.bin", "Size": int64(5), "Error": "bad", "User": (*User)(nil)},
@@ -98,6 +113,12 @@ func TestTemplatesRender(t *testing.T) {
 			var sb strings.Builder
 			if err := tmpl.ExecuteTemplate(&sb, "download.html", merge(lang, extra)); err != nil {
 				t.Errorf("download.html case %d [%s]: %v", i, lang, err)
+			}
+		}
+		for i, extra := range batchCases {
+			var sb strings.Builder
+			if err := tmpl.ExecuteTemplate(&sb, "batch.html", merge(lang, extra)); err != nil {
+				t.Errorf("batch.html case %d [%s]: %v", i, lang, err)
 			}
 		}
 	}
@@ -142,6 +163,21 @@ func TestE2EScriptIncluded(t *testing.T) {
 		}
 		if app >= 0 && e2e > app {
 			t.Errorf("%s: loads e2e.js after app.js", name)
+		}
+	}
+}
+
+// TestJSStringsResolve catches a key listed in jsStrings but absent from the
+// translations map. tr() falls back to the key itself, so the mistake shows up
+// only as a raw "reason_network" rendered in the UI — never as a failure.
+func TestJSStringsResolve(t *testing.T) {
+	for _, lang := range supportedLangs {
+		for key, val := range jsStrings(lang) {
+			// tr() echoes the key on a miss. jsStrings strips a "js." prefix,
+			// so an unresolved entry shows up either bare or still prefixed.
+			if val == key || val == "js."+key || strings.TrimSpace(val) == "" {
+				t.Errorf("jsStrings[%s][%q] unresolved: %q", lang, key, val)
+			}
 		}
 	}
 }

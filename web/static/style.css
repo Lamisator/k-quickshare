@@ -496,6 +496,9 @@ code {
   white-space: nowrap;
   color: var(--text);
   font-weight: 550;
+  /* min-width:0 lets the ellipsis engage once the action buttons claim room */
+  flex: 1;
+  min-width: 0;
 }
 .queue-status {
   color: var(--text-muted);
@@ -520,6 +523,117 @@ code {
 .queue-done .queue-status { color: var(--success); }
 .queue-error .queue-fill { background: var(--danger); width: 100%; }
 .queue-error .queue-status { color: var(--danger); }
+.queue-cancelled .queue-fill { background: var(--text-muted); width: 0%; }
+.queue-cancelled .queue-status { color: var(--text-muted); }
+
+.queue-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+.queue-actions .btn { padding: 0.2rem 0.6rem; font-size: 0.78rem; }
+
+/* The failure reason is part of the row, not a tooltip: it survives pointer
+   movement, focus changes and scrolling, and stays until the row is retried. */
+.queue-reason {
+  margin: 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--danger);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.queue-cancelled .queue-reason { border-left-color: var(--border-strong); }
+
+/* ---- batch share panel (upload page) ---- */
+
+.batch-share {
+  padding: 0.9rem 1.05rem 1rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.batch-share-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.batch-share-label {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+.batch-share-note {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.batch-share #batch-share-new { align-self: flex-start; }
+
+.options-locked { opacity: 0.55; }
+.options-locked input:disabled,
+.options-locked select:disabled { cursor: not-allowed; }
+
+/* ---- batch landing list ---- */
+
+.batch-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.batch-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  /* the preview panel wraps onto its own full-width line below the row */
+  flex-wrap: wrap;
+}
+.batch-row-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+.batch-preview {
+  flex-basis: 100%;
+  margin-top: 0.7rem;
+}
+.batch-row:last-child { border-bottom: none; }
+.batch-row-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  flex: 1;
+  min-width: 0;
+}
+.batch-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 550;
+  font-size: 0.9rem;
+}
+.batch-row-sub {
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-row .btn { flex-shrink: 0; }
+.batch-empty {
+  padding: 1rem;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
 
 .queue-link {
   display: flex;
@@ -712,6 +826,7 @@ code {
 .file-archived .file-name { color: var(--text-muted); }
 .chip-archived { color: var(--danger); background: var(--danger-soft); border-color: transparent; }
 .chip-keyed { color: var(--success); background: rgba(110, 201, 154, 0.12); border-color: transparent; }
+.chip-batch { color: var(--text-muted); background: var(--bg-hover); border-color: transparent; }
 
 .btn-disabled { opacity: 0.4; pointer-events: none; }
 

@@ -56,6 +56,31 @@ ALTER TABLE files ADD COLUMN IF NOT EXISTS key_mode INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_salt BYTEA;
 ALTER TABLE files ADD COLUMN IF NOT EXISTS auth_verifier BYTEA;
 
+-- A batch is one share link covering many files. Expiry, download limit and
+-- password live here, not on the member rows: the batch is the shareable unit
+-- and its members are reachable only through it.
+--
+-- The server holds no key material for a batch either. Each member carries a
+-- wrapped_key — its own file key sealed under a batch key the browser derives
+-- from the URL fragment or the share password — so the server stores an opaque
+-- blob it can never unwrap.
+CREATE TABLE IF NOT EXISTS batches (
+	id             UUID PRIMARY KEY,
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	created_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+	expires_at     TIMESTAMPTZ,
+	max_downloads  INTEGER,
+	download_count INTEGER NOT NULL DEFAULT 0,
+	key_mode       INTEGER NOT NULL DEFAULT 3,
+	auth_salt      BYTEA,
+	auth_verifier  BYTEA,
+	archived_at    TIMESTAMPTZ
+);
+ALTER TABLE files ADD COLUMN IF NOT EXISTS batch_id UUID REFERENCES batches(id) ON DELETE CASCADE;
+ALTER TABLE files ADD COLUMN IF NOT EXISTS wrapped_key BYTEA;
+CREATE INDEX IF NOT EXISTS files_batch_id_idx ON files (batch_id) WHERE batch_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS batches_expires_at_idx ON batches (expires_at) WHERE expires_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS upload_reservations (
 	id         UUID PRIMARY KEY,
 	user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

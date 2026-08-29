@@ -153,6 +153,7 @@ func main() {
 	// public
 	mux.HandleFunc("/healthz", app.handleHealth)
 	mux.HandleFunc("/files/", app.dispatchFileRoutes)
+	mux.HandleFunc("/b/", app.dispatchBatchRoutes)
 	mux.HandleFunc("/lang", app.handleLang)
 	mux.HandleFunc("/theme", app.handleTheme)
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
@@ -177,6 +178,7 @@ func main() {
 	mux.Handle("/", app.requireUserHandler(app.handleUploadPage))
 	mux.Handle("/history", app.requireUserHandler(app.handleHistory))
 	mux.Handle("/upload", app.requireUserHandler(app.handleUpload))
+	mux.Handle("/batches", app.requireUserHandler(app.handleCreateBatch))
 	mux.Handle("/delete/", app.requireUserHandler(app.handleDelete))
 	mux.Handle("/account", app.requireUserHandler(app.handleAccount))
 	mux.Handle("/account/password", app.requireUserHandler(app.handleAccountPassword))

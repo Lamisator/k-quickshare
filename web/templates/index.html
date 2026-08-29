@@ -59,6 +59,23 @@
     <h2>{{T .Lang "upload.queue"}}</h2>
     <a href="/history" class="view-all">{{T .Lang "upload.view_all"}}</a>
   </div>
+
+  {{/* One link covers every file uploaded in this visit; app.js fills it in
+       after the first upload succeeds and updates the count as more land. */}}
+  <div class="batch-share" id="batch-share" hidden>
+    <div class="batch-share-head">
+      <span class="batch-share-label" id="batch-share-label"></span>
+      <span class="chip" id="batch-share-count"></span>
+    </div>
+    <div class="queue-link">
+      <input type="text" id="batch-share-url" readonly>
+      <button type="button" class="btn btn-ghost btn-sm btn-copy" id="batch-share-copy"></button>
+      <button type="button" class="btn btn-ghost btn-sm btn-qr" id="batch-share-qr">QR</button>
+    </div>
+    <p class="batch-share-note" id="batch-share-note"></p>
+    <button type="button" class="btn btn-ghost btn-sm" id="batch-share-new"></button>
+  </div>
+
   <div id="queue" class="queue"></div>
 </section>
 

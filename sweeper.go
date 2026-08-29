@@ -29,6 +29,9 @@ func (a *App) sweepOnce(ctx context.Context) {
 	if err := a.sweepExpiredFiles(ctx); err != nil {
 		log.Printf("sweeper: files: %v", err)
 	}
+	if err := a.sweepExpiredBatches(ctx); err != nil {
+		log.Printf("sweeper: batches: %v", err)
+	}
 	if err := a.sweepExpiredSessions(ctx); err != nil {
 		log.Printf("sweeper: sessions: %v", err)
 	}
@@ -123,6 +126,80 @@ func (a *App) archiveFile(ctx context.Context, id, storedName string) {
 	if err := os.Remove(filepath.Join(a.filesDir, storedName)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Printf("archive file %s: remove blob: %v", id[:8], err)
 	}
+}
+
+// sweepExpiredBatches mirrors sweepExpiredFiles one level up. Member files
+// carry no expiry or limit of their own — the batch holds both — so they are
+// invisible to the file sweeper and have to be retired through here.
+func (a *App) sweepExpiredBatches(ctx context.Context) error {
+	rows, err := a.db.Query(ctx,
+		`UPDATE batches SET archived_at = NOW()
+		 WHERE archived_at IS NULL
+		   AND ((expires_at IS NOT NULL AND expires_at <= NOW())
+		     OR (max_downloads IS NOT NULL AND download_count >= max_downloads))
+		 RETURNING id`)
+	if err != nil {
+		return err
+	}
+	var dead []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		dead = append(dead, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range dead {
+		a.archiveBatchMembers(ctx, id)
+	}
+	if len(dead) > 0 {
+		log.Printf("sweeper: archived %d dead batch link(s), blobs deleted", len(dead))
+	}
+
+	// Purging the batch row cascades its member file rows away; their blobs
+	// went at archive time.
+	tag, err := a.db.Exec(ctx,
+		`DELETE FROM batches WHERE archived_at <= NOW() - $1::interval`,
+		archiveRetention.String())
+	if err != nil {
+		return err
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		log.Printf("sweeper: purged %d archived batch(es)", n)
+	}
+	return nil
+}
+
+// archiveBatch retires a whole batch immediately — used when the final download
+// slot is spent, the same way archiveFile works for a single share.
+func (a *App) archiveBatch(ctx context.Context, id string) {
+	tag, err := a.db.Exec(ctx,
+		`UPDATE batches SET archived_at = NOW() WHERE id = $1 AND archived_at IS NULL`, id)
+	if err != nil {
+		log.Printf("archive batch %s: %v", id[:8], err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		return // a concurrent request got there first
+	}
+	a.archiveBatchMembers(ctx, id)
+}
+
+func (a *App) archiveBatchMembers(ctx context.Context, id string) {
+	stored, err := a.collectStored(ctx,
+		`UPDATE files SET archived_at = NOW()
+		 WHERE batch_id = $1 AND archived_at IS NULL
+		 RETURNING stored_name`, id)
+	if err != nil {
+		log.Printf("archive batch %s members: %v", id[:8], err)
+		return
+	}
+	a.removeBlobs(stored)
 }
 
 func (a *App) sweepExpiredSessions(ctx context.Context) error {
