@@ -26,7 +26,7 @@ func TestTemplatesRender(t *testing.T) {
 			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid, ExpiresAt: &exp,
 			HasPassword: true, HasLimit: true, MaxDL: 3, DownloadCount: 3, CanDelete: true, IconKind: "image"},
 		{ID: uuid.NewString(), OriginalName: "notes.txt", Size: 42, ContentType: "text/plain",
-			UploadedAt: now, DownloadCount: 1, IconKind: "text"},
+			UploadedAt: now, DownloadCount: 1, IconKind: "text", Keyed: true},
 		{ID: uuid.NewString(), OriginalName: "old.zip", Size: 99, ContentType: "application/zip",
 			UploadedAt: now, DownloadCount: 5, Archived: true, CanDelete: true, IconKind: "archive"},
 	}
@@ -69,10 +69,20 @@ func TestTemplatesRender(t *testing.T) {
 		{"State": "ready", "ID": "id1", "Name": "photo.jpg", "Size": int64(5),
 			"ContentType": "image/jpeg", "UploadedAt": now, "ExpiresAt": exp.UTC(),
 			"HasLimit": true, "MaxDL": 3, "DownloadsLeft": 2,
-			"PreviewKind": "image", "IconKind": "image", "User": (*User)(nil)},
+			"PreviewKind": "image", "IconKind": "image", "User": (*User)(nil),
+			"Keyed": false, "KeyCookie": "fsk_x"},
 		{"State": "ready", "ID": "id1", "Name": "blob.bin", "Size": int64(5),
 			"ContentType": "application/octet-stream", "UploadedAt": now,
-			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil)},
+			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil),
+			"Keyed": false, "KeyCookie": "fsk_x"},
+		{"State": "ready", "ID": "id1", "Name": "keyed.png", "Size": int64(5),
+			"ContentType": "image/png", "UploadedAt": now,
+			"HasLimit": false, "PreviewKind": "image", "IconKind": "image", "User": (*User)(nil),
+			"Keyed": true, "KeyCookie": "fsk_x"},
+		{"State": "ready", "ID": "id1", "Name": "keyed.txt", "Size": int64(5),
+			"ContentType": "text/plain", "UploadedAt": now,
+			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil),
+			"Keyed": true, "KeyCookie": "fsk_x"},
 	}
 
 	for _, lang := range supportedLangs {

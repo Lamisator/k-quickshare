@@ -253,9 +253,9 @@ func (a *App) encryptOneLegacy(ctx context.Context, id, stored string) error {
 	return nil
 }
 
-// openFileBlob opens a stored blob for reading as plaintext, decrypting when
-// the file is encrypted at rest.
-func (a *App) openFileBlob(fm *fileMeta) (io.ReadSeeker, io.Closer, error) {
+// openFileBlob opens a stored blob for reading as plaintext. The caller
+// supplies the already-resolved DEK (nil only for plaintext legacy files).
+func (a *App) openFileBlob(fm *fileMeta, dek []byte) (io.ReadSeeker, io.Closer, error) {
 	f, err := os.Open(filepath.Join(a.filesDir, fm.StoredName))
 	if err != nil {
 		return nil, nil, err
@@ -263,14 +263,9 @@ func (a *App) openFileBlob(fm *fileMeta) (io.ReadSeeker, io.Closer, error) {
 	if fm.EncVersion == encVersionPlain {
 		return f, f, nil
 	}
-	if len(a.fileKEK) == 0 {
+	if len(dek) == 0 {
 		f.Close()
-		return nil, nil, errors.New("file is encrypted but no FILE_ENCRYPTION_KEY configured")
-	}
-	dek, err := a.unwrapDEK(fm.EncKey)
-	if err != nil {
-		f.Close()
-		return nil, nil, err
+		return nil, nil, errors.New("encrypted file served without a DEK")
 	}
 	r, err := newEncReader(f, dek, fm.Size)
 	if err != nil {

@@ -98,6 +98,8 @@ var translations = map[string]map[string]string{
 	"files.by":            {"en": "by %s", "de": "von %s"},
 	"files.archived":      {"en": "expired", "de": "abgelaufen"},
 	"files.qr":            {"en": "Show QR code", "de": "QR-Code anzeigen"},
+	"files.keyed":         {"en": "key in link", "de": "Schlüssel im Link"},
+	"files.keyed_tip":     {"en": "The decryption key is only part of the original share link — the server doesn't store it. Copy the link right after uploading.", "de": "Der Entschlüsselungsschlüssel ist nur Teil des ursprünglichen Freigabe-Links — der Server speichert ihn nicht. Kopiere den Link direkt nach dem Hochladen."},
 
 	// --- relative time ---
 	"time.expired": {"en": "expired", "de": "abgelaufen"},
@@ -121,6 +123,8 @@ var translations = map[string]map[string]string{
 	"dl.unlock":         {"en": "Unlock", "de": "Entsperren"},
 	"dl.wrong_pw":       {"en": "Wrong password — please try again.", "de": "Falsches Passwort — bitte erneut versuchen."},
 	"dl.too_many":       {"en": "Too many failed attempts. Please wait a few minutes and try again.", "de": "Zu viele Fehlversuche. Bitte warte ein paar Minuten und versuche es erneut."},
+	"dl.key_missing":    {"en": "This link is incomplete — the decryption key (the part after #) is missing. Ask the sender for the full link.", "de": "Dieser Link ist unvollständig — der Entschlüsselungsschlüssel (der Teil nach #) fehlt. Bitte den Absender um den vollständigen Link."},
+	"dl.js_required":    {"en": "JavaScript is required to open this encrypted link.", "de": "Zum Öffnen dieses verschlüsselten Links ist JavaScript erforderlich."},
 	"dl.no_preview":     {"en": "No preview available for this file type.", "de": "Für diesen Dateityp ist keine Vorschau verfügbar."},
 	"dl.preview":        {"en": "Preview", "de": "Vorschau"},
 	"dl.gone_title":     {"en": "Link unavailable", "de": "Link nicht verfügbar"},

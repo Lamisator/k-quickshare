@@ -113,6 +113,52 @@ func TestSecretRoundTrip(t *testing.T) {
 	}
 }
 
+func TestKeyModeWrapRoundTrips(t *testing.T) {
+	dek := randomBytes(32)
+	salt := randomBytes(encSaltLen)
+
+	// URL-secret mode: HKDF(secret) wraps the DEK.
+	secret := randomBytes(urlSecretLen)
+	wk, err := deriveURLWrapKey(secret, salt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := wrapKeyWith(wk, dek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := unwrapKeyWith(wk, blob)
+	if err != nil || !bytes.Equal(got, dek) {
+		t.Fatalf("url-mode round trip: %v", err)
+	}
+	wrongWK, _ := deriveURLWrapKey(randomBytes(urlSecretLen), salt)
+	if _, err := unwrapKeyWith(wrongWK, blob); err == nil {
+		t.Fatal("wrong URL secret unwrapped the DEK")
+	}
+
+	// Password mode: Argon2id(password) wraps the DEK; must be deterministic
+	// for the same password+salt and fail for a wrong password.
+	pw1 := derivePasswordWrapKey("correct horse", salt)
+	pw1again := derivePasswordWrapKey("correct horse", salt)
+	if !bytes.Equal(pw1, pw1again) {
+		t.Fatal("argon2 derivation not deterministic")
+	}
+	blob2, err := wrapKeyWith(pw1, dek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := unwrapKeyWith(pw1, blob2); err != nil || !bytes.Equal(got, dek) {
+		t.Fatalf("password-mode round trip: %v", err)
+	}
+	if _, err := unwrapKeyWith(derivePasswordWrapKey("wrong", salt), blob2); err == nil {
+		t.Fatal("wrong password unwrapped the DEK")
+	}
+	// Different salt → different key even with the same password.
+	if bytes.Equal(pw1, derivePasswordWrapKey("correct horse", randomBytes(encSaltLen))) {
+		t.Fatal("salt has no effect on derivation")
+	}
+}
+
 func TestClientIPTrustedProxy(t *testing.T) {
 	nets, err := parseTrustedProxies("172.16.0.0/12, 10.0.0.0/8")
 	if err != nil {

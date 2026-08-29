@@ -83,6 +83,30 @@
     }
   });
 
+  // ---- keyed share links (decryption secret in the URL fragment) ---------------
+  // The fragment never reaches the server in requests; move it into a
+  // path-scoped cookie so the preview/download endpoints can unwrap the DEK.
+
+  const dlRoot = document.getElementById('dl-root');
+  if (dlRoot && dlRoot.getAttribute('data-keyed') === '1') {
+    const fileId = dlRoot.getAttribute('data-file');
+    const cookieName = dlRoot.getAttribute('data-cookie');
+    const secret = (location.hash || '').replace(/^#/, '');
+    if (/^[A-Za-z0-9_-]{40,50}$/.test(secret)) {
+      let cookie = cookieName + '=' + secret + '; path=/files/' + fileId + '; max-age=21600; samesite=lax';
+      if (location.protocol === 'https:') cookie += '; secure';
+      document.cookie = cookie;
+      document.querySelectorAll('[data-preview-src]').forEach((el) => {
+        el.src = el.getAttribute('data-preview-src');
+      });
+    } else {
+      const warn = document.getElementById('key-missing');
+      if (warn) warn.hidden = false;
+      const dlBtn = document.querySelector('.btn-download');
+      if (dlBtn) dlBtn.classList.add('btn-disabled');
+    }
+  }
+
   // ---- QR share modal ----------------------------------------------------------
 
   function showQR(imgSrc, shareUrl) {
@@ -111,11 +135,28 @@
     document.body.appendChild(overlay);
   }
 
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', async (e) => {
     const btn = e.target.closest('.btn-qr');
     if (!btn) return;
     e.preventDefault();
     const shareUrl = new URL(btn.getAttribute('data-qr-url'), location.href).toString();
+    const postEndpoint = btn.getAttribute('data-qr-post');
+    if (postEndpoint) {
+      // Keyed link: the server can't know the fragment, so send the full URL
+      // in a POST body and display the returned PNG from a blob.
+      try {
+        const res = await fetch(postEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'url=' + encodeURIComponent(shareUrl),
+        });
+        if (!res.ok) throw new Error('qr ' + res.status);
+        showQR(URL.createObjectURL(await res.blob()), shareUrl);
+      } catch (err) {
+        toast(t('toast_copyerr'));
+      }
+      return;
+    }
     showQR(btn.getAttribute('data-qr-img'), shareUrl);
   });
 
@@ -322,7 +363,11 @@
     const qrBtn = document.createElement('button');
     qrBtn.type = 'button';
     qrBtn.className = 'btn btn-ghost btn-sm btn-qr';
-    qrBtn.setAttribute('data-qr-img', '/qr/' + res.id);
+    if (res.keyed) {
+      qrBtn.setAttribute('data-qr-post', '/qr/' + res.id);
+    } else {
+      qrBtn.setAttribute('data-qr-img', '/qr/' + res.id);
+    }
     qrBtn.setAttribute('data-qr-url', res.url);
     qrBtn.textContent = 'QR';
 

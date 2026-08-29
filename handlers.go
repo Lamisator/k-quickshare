@@ -3,11 +3,11 @@ package main
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -35,6 +35,7 @@ type File struct {
 	MaxDL         int // dereferenced max_downloads; templates must never format the pointer
 	DownloadCount int
 	Archived      bool
+	Keyed         bool // decryption key lives only in the original share link
 	CanDelete     bool
 	IconKind      string
 }
@@ -62,7 +63,7 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	const baseQuery = `SELECT f.id::text, f.original_name, f.stored_name, f.size_bytes, f.content_type,
 		        f.uploaded_at, f.uploaded_by::text, u.username,
 		        f.expires_at, (f.password_hash IS NOT NULL),
-		        f.max_downloads, f.download_count, f.archived_at
+		        f.max_downloads, f.download_count, f.archived_at, f.key_mode
 		 FROM files f
 		 LEFT JOIN users u ON u.id = f.uploaded_by
 		 WHERE (f.archived_at IS NOT NULL OR f.expires_at IS NULL OR f.expires_at > NOW())`
@@ -98,13 +99,15 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 			expires    *time.Time
 			maxDL      *int
 			archivedAt *time.Time
+			keyMode    int
 		)
 		if err := rows.Scan(&f.ID, &f.OriginalName, &f.StoredName, &f.Size, &f.ContentType,
 			&f.UploadedAt, &uploaderID, &uploader,
-			&expires, &f.HasPassword, &maxDL, &f.DownloadCount, &archivedAt); err != nil {
+			&expires, &f.HasPassword, &maxDL, &f.DownloadCount, &archivedAt, &keyMode); err != nil {
 			httpError(w, err, http.StatusInternalServerError)
 			return
 		}
+		f.Keyed = keyMode == keyModeURL
 		f.UploadedBy = uploaderID
 		if uploader != nil {
 			f.UploaderName = *uploader
@@ -297,26 +300,39 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every upload is encrypted with a fresh DEK. The DEK wrap key never
+	// belongs to the server: without a password it is derived from a random
+	// secret that only lives in the share URL fragment; with a password it is
+	// derived from the password via Argon2id. Either way the server cannot
+	// decrypt the file at rest.
 	var (
-		written    int64
-		copyErr    error
-		encVersion = encVersionPlain
-		wrappedDEK []byte
+		keyMode   = keyModeURL
+		urlSecret []byte
+		salt      = randomBytes(encSaltLen)
+		wrapKey   []byte
 	)
-	if len(a.fileKEK) > 0 {
-		dek := randomBytes(32)
-		wrappedDEK, err = a.wrapDEK(dek)
+	if password != "" {
+		keyMode = keyModePassword
+		wrapKey = derivePasswordWrapKey(password, salt)
+	} else {
+		urlSecret = randomBytes(urlSecretLen)
+		wrapKey, err = deriveURLWrapKey(urlSecret, salt)
 		if err != nil {
 			dst.Close()
 			_ = os.Remove(dstPath)
 			httpError(w, err, http.StatusInternalServerError)
 			return
 		}
-		encVersion = encVersionGCM
-		written, copyErr = encryptStream(dst, file, dek)
-	} else {
-		written, copyErr = io.Copy(dst, file)
 	}
+	dek := randomBytes(32)
+	wrappedDEK, err := wrapKeyWith(wrapKey, dek)
+	if err != nil {
+		dst.Close()
+		_ = os.Remove(dstPath)
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	written, copyErr := encryptStream(dst, file, dek)
 	closeErr := dst.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(dstPath)
@@ -345,11 +361,11 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		_, err := tx.Exec(r.Context(),
 			`INSERT INTO files (id, original_name, stored_name, size_bytes, content_type,
 			                    uploaded_by, expires_at, password_hash, max_downloads,
-			                    enc_version, enc_key)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			                    enc_version, enc_key, key_mode, enc_salt)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 			id.String(), origName, storedName, written, contentType,
 			user.ID.String(), expiresAt, passwordHash, maxDownloads,
-			encVersion, wrappedDEK)
+			encVersionGCM, wrappedDEK, keyMode, salt)
 		return err
 	})
 	if err != nil {
@@ -365,7 +381,13 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	reserved = false // reservation row consumed by finalizeUpload
 
+	// For URL-keyed files the fragment is the only copy of the secret: it is
+	// returned here once and never stored, so this response is the only place
+	// the complete share link ever exists.
 	shareURL := "/files/" + id.String()
+	if keyMode == keyModeURL {
+		shareURL += "#" + base64.RawURLEncoding.EncodeToString(urlSecret)
+	}
 	if wantsJSON(r) {
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"id":          id.String(),
@@ -374,6 +396,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			"url":         shareURL,
 			"expiresAt":   expiresAt,
 			"hasPassword": passwordHash != nil,
+			"keyed":       keyMode == keyModeURL,
 		})
 		return
 	}
@@ -395,6 +418,8 @@ type fileMeta struct {
 	DownloadCount int
 	EncVersion    int
 	EncKey        []byte
+	KeyMode       int
+	EncSalt       []byte
 	ArchivedAt    *time.Time
 }
 
@@ -457,11 +482,11 @@ func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	err := a.db.QueryRow(r.Context(),
 		`SELECT original_name, stored_name, size_bytes, content_type, uploaded_at,
 		        expires_at, password_hash, max_downloads, download_count,
-		        enc_version, enc_key, archived_at
+		        enc_version, enc_key, key_mode, enc_salt, archived_at
 		 FROM files WHERE id = $1`, id.String()).
 		Scan(&fm.OriginalName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
 			&fm.ExpiresAt, &fm.PasswordHash, &fm.MaxDownloads, &fm.DownloadCount,
-			&fm.EncVersion, &fm.EncKey, &fm.ArchivedAt)
+			&fm.EncVersion, &fm.EncKey, &fm.KeyMode, &fm.EncSalt, &fm.ArchivedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -476,10 +501,59 @@ func (a *App) renderGone(w http.ResponseWriter, r *http.Request, status int, msg
 	})
 }
 
+// keyCookieName names the per-file cookie that carries the client-held key
+// material (URL secret for keyModeURL, derived wrap key for keyModePassword).
+func keyCookieName(id string) string {
+	return "fsk_" + strings.ReplaceAll(id, "-", "")
+}
+
+func (a *App) setKeyCookie(w http.ResponseWriter, fm *fileMeta, value []byte, httpOnly bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     keyCookieName(fm.ID),
+		Value:    base64.RawURLEncoding.EncodeToString(value),
+		Path:     "/files/" + fm.ID,
+		Expires:  time.Now().Add(6 * time.Hour),
+		HttpOnly: httpOnly,
+		Secure:   a.cookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func readKeyCookie(r *http.Request, fm *fileMeta) []byte {
+	c, err := r.Cookie(keyCookieName(fm.ID))
+	if err != nil {
+		return nil
+	}
+	b, err := base64.RawURLEncoding.DecodeString(c.Value)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// passwordUnlocked reports whether the request carries key material that
+// actually unwraps the DEK of a password-protected (keyModePassword) file.
+func (a *App) passwordUnlocked(r *http.Request, fm *fileMeta) bool {
+	wk := readKeyCookie(r, fm)
+	if len(wk) != 32 {
+		return false
+	}
+	_, err := unwrapKeyWith(wk, fm.EncKey)
+	return err == nil
+}
+
 // handleFileLanding renders the share landing page (details + preview +
 // download button), or the password gate for protected files.
 func (a *App) handleFileLanding(w http.ResponseWriter, r *http.Request, fm *fileMeta) {
-	locked := fm.PasswordHash != nil && !a.isUnlocked(r, fm)
+	locked := fm.PasswordHash != nil
+	if locked {
+		switch fm.KeyMode {
+		case keyModePassword:
+			locked = !a.passwordUnlocked(r, fm)
+		default:
+			locked = !a.isUnlocked(r, fm)
+		}
+	}
 
 	if r.Method == http.MethodPost && locked {
 		limitKey := a.clientIP(r) + "|" + fm.ID
@@ -498,7 +572,20 @@ func (a *App) handleFileLanding(w http.ResponseWriter, r *http.Request, fm *file
 		submitted := r.PostFormValue("password")
 		if submitted != "" && checkPassword(*fm.PasswordHash, submitted) {
 			a.shareLimiter.reset(limitKey)
-			a.setUnlockCookie(w, fm)
+			if fm.KeyMode == keyModePassword {
+				// Hand the browser the Argon2id-derived wrap key so follow-up
+				// preview/download requests can unwrap the DEK without the
+				// server ever holding a stored copy.
+				wk := derivePasswordWrapKey(submitted, fm.EncSalt)
+				if _, err := unwrapKeyWith(wk, fm.EncKey); err != nil {
+					httpError(w, fmt.Errorf("password verified but DEK unwrap failed: %w", err),
+						http.StatusInternalServerError)
+					return
+				}
+				a.setKeyCookie(w, fm, wk, true)
+			} else {
+				a.setUnlockCookie(w, fm)
+			}
 			http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
 			return
 		}
@@ -536,6 +623,8 @@ func (a *App) handleFileLanding(w http.ResponseWriter, r *http.Request, fm *file
 		"HasLimit":    false,
 		"PreviewKind": previewKind(fm.ContentType, fm.Size),
 		"IconKind":    iconKind(fm.ContentType, fm.OriginalName),
+		"Keyed":       fm.KeyMode == keyModeURL,
+		"KeyCookie":   keyCookieName(fm.ID),
 	}
 	if fm.ExpiresAt != nil {
 		data["ExpiresAt"] = fm.ExpiresAt.UTC()
@@ -552,32 +641,99 @@ func (a *App) handleFileLanding(w http.ResponseWriter, r *http.Request, fm *file
 	a.render(w, r, "download.html", data)
 }
 
-// checkFileAccess enforces the password on the raw endpoints. Accepts the
-// unlock cookie (set by the landing page) or an X-Share-Password header for
-// curl/API use. Passwords in query strings are deliberately NOT accepted:
-// URLs end up in browser history, proxy logs and monitoring systems.
-func (a *App) checkFileAccess(w http.ResponseWriter, r *http.Request, fm *fileMeta) bool {
-	if fm.PasswordHash == nil || a.isUnlocked(r, fm) {
-		return true
-	}
-	if submitted := r.Header.Get("X-Share-Password"); submitted != "" {
-		limitKey := a.clientIP(r) + "|" + fm.ID
+// resolveDEK authorizes the request AND produces the file's decryption key.
+// Key material arrives via the per-file cookie or, for curl/API use, via the
+// X-Share-Key (URL secret) / X-Share-Password headers — never query strings,
+// which end up in browser history, proxy logs and monitoring systems. On
+// failure it has already written a response (redirect to the landing page,
+// or 429). For plaintext legacy files it returns (nil, true).
+func (a *App) resolveDEK(w http.ResponseWriter, r *http.Request, fm *fileMeta) ([]byte, bool) {
+	limitKey := a.clientIP(r) + "|" + fm.ID
+
+	switch fm.KeyMode {
+	case keyModeURL:
+		secret := readKeyCookie(r, fm)
+		if secret == nil {
+			if h := r.Header.Get("X-Share-Key"); h != "" {
+				secret, _ = base64.RawURLEncoding.DecodeString(h)
+			}
+		}
+		if len(secret) != urlSecretLen {
+			http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
+			return nil, false
+		}
 		if !a.shareLimiter.allow(limitKey) {
 			http.Error(w, "too many attempts", http.StatusTooManyRequests)
-			return false
+			return nil, false
 		}
-		if checkPassword(*fm.PasswordHash, submitted) {
-			a.shareLimiter.reset(limitKey)
-			return true
+		wk, err := deriveURLWrapKey(secret, fm.EncSalt)
+		if err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return nil, false
 		}
-		a.shareLimiter.fail(limitKey)
+		dek, err := unwrapKeyWith(wk, fm.EncKey)
+		if err != nil {
+			a.shareLimiter.fail(limitKey)
+			http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
+			return nil, false
+		}
+		a.shareLimiter.reset(limitKey)
+		return dek, true
+
+	case keyModePassword:
+		if wk := readKeyCookie(r, fm); len(wk) == 32 {
+			if dek, err := unwrapKeyWith(wk, fm.EncKey); err == nil {
+				return dek, true
+			}
+		}
+		if pw := r.Header.Get("X-Share-Password"); pw != "" {
+			if !a.shareLimiter.allow(limitKey) {
+				http.Error(w, "too many attempts", http.StatusTooManyRequests)
+				return nil, false
+			}
+			wk := derivePasswordWrapKey(pw, fm.EncSalt)
+			if dek, err := unwrapKeyWith(wk, fm.EncKey); err == nil {
+				a.shareLimiter.reset(limitKey)
+				return dek, true
+			}
+			a.shareLimiter.fail(limitKey)
+		}
+		http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
+		return nil, false
+
+	default: // keyModeKEK: legacy files, server-held key, bcrypt password gate
+		if fm.PasswordHash != nil && !a.isUnlocked(r, fm) {
+			if submitted := r.Header.Get("X-Share-Password"); submitted != "" {
+				if !a.shareLimiter.allow(limitKey) {
+					http.Error(w, "too many attempts", http.StatusTooManyRequests)
+					return nil, false
+				}
+				if !checkPassword(*fm.PasswordHash, submitted) {
+					a.shareLimiter.fail(limitKey)
+					http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
+					return nil, false
+				}
+				a.shareLimiter.reset(limitKey)
+			} else {
+				http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
+				return nil, false
+			}
+		}
+		if fm.EncVersion == encVersionPlain {
+			return nil, true
+		}
+		dek, err := a.unwrapDEK(fm.EncKey)
+		if err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return nil, false
+		}
+		return dek, true
 	}
-	http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
-	return false
 }
 
 func (a *App) handleFileDownload(w http.ResponseWriter, r *http.Request, fm *fileMeta) {
-	if !a.checkFileAccess(w, r, fm) {
+	dek, ok := a.resolveDEK(w, r, fm)
+	if !ok {
 		return
 	}
 	res, err := a.db.Exec(r.Context(),
@@ -593,7 +749,7 @@ func (a *App) handleFileDownload(w http.ResponseWriter, r *http.Request, fm *fil
 		a.renderGone(w, r, http.StatusGone, "dl.gone_limit")
 		return
 	}
-	a.serveFileBlob(w, r, fm, true)
+	a.serveFileBlob(w, r, fm, dek, true)
 
 	// If this consumed the final download slot, retire the blob right away:
 	// the row stays listed as expired for 30 days, but the bytes are gone.
@@ -611,7 +767,8 @@ func (a *App) handleFilePreview(w http.ResponseWriter, r *http.Request, fm *file
 		http.NotFound(w, r)
 		return
 	}
-	if !a.checkFileAccess(w, r, fm) {
+	dek, ok := a.resolveDEK(w, r, fm)
+	if !ok {
 		return
 	}
 	if previewKind(fm.ContentType, fm.Size) == "" {
@@ -621,11 +778,11 @@ func (a *App) handleFilePreview(w http.ResponseWriter, r *http.Request, fm *file
 	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; media-src 'self'; img-src 'self'; object-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'")
 	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	a.serveFileBlob(w, r, fm, false)
+	a.serveFileBlob(w, r, fm, dek, false)
 }
 
-func (a *App) serveFileBlob(w http.ResponseWriter, r *http.Request, fm *fileMeta, attachment bool) {
-	content, closer, err := a.openFileBlob(fm)
+func (a *App) serveFileBlob(w http.ResponseWriter, r *http.Request, fm *fileMeta, dek []byte, attachment bool) {
+	content, closer, err := a.openFileBlob(fm, dek)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return

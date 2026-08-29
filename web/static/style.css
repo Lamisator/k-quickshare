@@ -644,6 +644,9 @@ code {
 .file-archived .ficon { color: var(--text-dim); background: var(--surface-2); }
 .file-archived .file-name { color: var(--text-muted); }
 .chip-archived { color: var(--danger); background: var(--danger-soft); border-color: transparent; }
+.chip-keyed { color: var(--success); background: rgba(110, 201, 154, 0.12); border-color: transparent; }
+
+.btn-disabled { opacity: 0.4; pointer-events: none; }
 
 /* ---- QR modal ---- */
 .qr-modal {

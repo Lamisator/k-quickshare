@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -11,6 +12,9 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/hkdf"
 )
 
 // Files are encrypted at rest with AES-256-GCM in fixed-size chunks so that
@@ -32,6 +36,15 @@ const (
 	encVersionGCM   = 1
 
 	secretPrefix = "enc:v1:"
+
+	// Who holds the key that wraps a file's DEK:
+	keyModeKEK      = 0 // server KEK (legacy files) — server can decrypt alone
+	keyModeURL      = 1 // random secret in the share URL fragment — server cannot
+	keyModePassword = 2 // Argon2id-derived from the share password — server cannot
+
+	urlSecretLen = 32
+	encSaltLen   = 16
+	hkdfInfoURL  = "k-fileshare-url-key-v1"
 )
 
 // loadFileKEK reads the 32-byte key-encryption key from FILE_ENCRYPTION_KEY
@@ -71,9 +84,10 @@ func chunkNonce(idx int64) []byte {
 	return n
 }
 
-// wrapDEK seals a fresh random DEK with the KEK; blob = nonce || ciphertext.
-func (a *App) wrapDEK(dek []byte) ([]byte, error) {
-	aead, err := newAEAD(a.fileKEK)
+// wrapKeyWith seals a DEK under an arbitrary 32-byte wrap key;
+// blob = nonce || ciphertext || tag.
+func wrapKeyWith(wrapKey, dek []byte) ([]byte, error) {
+	aead, err := newAEAD(wrapKey)
 	if err != nil {
 		return nil, err
 	}
@@ -81,8 +95,10 @@ func (a *App) wrapDEK(dek []byte) ([]byte, error) {
 	return append(nonce, aead.Seal(nil, nonce, dek, nil)...), nil
 }
 
-func (a *App) unwrapDEK(blob []byte) ([]byte, error) {
-	aead, err := newAEAD(a.fileKEK)
+// unwrapKeyWith reverses wrapKeyWith; the GCM tag makes a wrong wrap key
+// (wrong URL secret, wrong password) fail authentication cleanly.
+func unwrapKeyWith(wrapKey, blob []byte) ([]byte, error) {
+	aead, err := newAEAD(wrapKey)
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +106,35 @@ func (a *App) unwrapDEK(blob []byte) ([]byte, error) {
 		return nil, errors.New("wrapped DEK too short")
 	}
 	return aead.Open(nil, blob[:aead.NonceSize()], blob[aead.NonceSize():], nil)
+}
+
+// wrapDEK / unwrapDEK wrap with the server KEK (legacy keyModeKEK files).
+func (a *App) wrapDEK(dek []byte) ([]byte, error) {
+	return wrapKeyWith(a.fileKEK, dek)
+}
+
+func (a *App) unwrapDEK(blob []byte) ([]byte, error) {
+	if len(a.fileKEK) == 0 {
+		return nil, errors.New("file is KEK-encrypted but no FILE_ENCRYPTION_KEY configured")
+	}
+	return unwrapKeyWith(a.fileKEK, blob)
+}
+
+// deriveURLWrapKey turns the URL-fragment secret into the DEK wrap key.
+func deriveURLWrapKey(secret, salt []byte) ([]byte, error) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, secret, salt, []byte(hkdfInfoURL)), key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// derivePasswordWrapKey turns a share password into the DEK wrap key.
+// Argon2id with the OWASP-recommended minimum configuration (19 MiB, t=2,
+// p=1): memory-hard enough to make offline guessing expensive, cheap enough
+// that the interactive unlock stays fast.
+func derivePasswordWrapKey(password string, salt []byte) []byte {
+	return argon2.IDKey([]byte(password), salt, 2, 19456, 1, 32)
 }
 
 // encryptStream encrypts src to dst in chunks and returns the plaintext size.

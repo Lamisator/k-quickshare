@@ -28,7 +28,7 @@
 </div>
 
 {{else}}
-<div class="dl-card dl-card-wide">
+<div class="dl-card dl-card-wide" id="dl-root"{{if .Keyed}} data-keyed="1" data-cookie="{{.KeyCookie}}" data-file="{{.ID}}"{{end}}>
   <p class="dl-kicker">{{T .Lang "dl.wants_to_share"}}</p>
 
   <div class="dl-file-head">
@@ -39,18 +39,33 @@
     </div>
   </div>
 
+  {{if .Keyed}}
+  <p class="alert" id="key-missing" hidden>{{T .Lang "dl.key_missing"}}</p>
+  <noscript><p class="alert">{{T .Lang "dl.js_required"}}</p></noscript>
+  {{end}}
+
   {{if .PreviewKind}}
   <div class="dl-preview dl-preview-{{.PreviewKind}}">
-    {{if eq .PreviewKind "image"}}
-      <img src="/files/{{.ID}}/preview" alt="{{T .Lang "dl.preview"}}">
-    {{else if eq .PreviewKind "video"}}
-      <video src="/files/{{.ID}}/preview" controls preload="metadata"></video>
-    {{else if eq .PreviewKind "audio"}}
-      <audio src="/files/{{.ID}}/preview" controls preload="metadata"></audio>
-    {{else if eq .PreviewKind "pdf"}}
-      <iframe src="/files/{{.ID}}/preview" title="{{T .Lang "dl.preview"}}"></iframe>
-    {{else if eq .PreviewKind "text"}}
-      <iframe src="/files/{{.ID}}/preview" title="{{T .Lang "dl.preview"}}"></iframe>
+    {{if .Keyed}}
+      {{if eq .PreviewKind "image"}}
+        <img data-preview-src="/files/{{.ID}}/preview" alt="{{T .Lang "dl.preview"}}">
+      {{else if eq .PreviewKind "video"}}
+        <video data-preview-src="/files/{{.ID}}/preview" controls preload="metadata"></video>
+      {{else if eq .PreviewKind "audio"}}
+        <audio data-preview-src="/files/{{.ID}}/preview" controls preload="metadata"></audio>
+      {{else}}
+        <iframe data-preview-src="/files/{{.ID}}/preview" title="{{T .Lang "dl.preview"}}"></iframe>
+      {{end}}
+    {{else}}
+      {{if eq .PreviewKind "image"}}
+        <img src="/files/{{.ID}}/preview" alt="{{T .Lang "dl.preview"}}">
+      {{else if eq .PreviewKind "video"}}
+        <video src="/files/{{.ID}}/preview" controls preload="metadata"></video>
+      {{else if eq .PreviewKind "audio"}}
+        <audio src="/files/{{.ID}}/preview" controls preload="metadata"></audio>
+      {{else}}
+        <iframe src="/files/{{.ID}}/preview" title="{{T .Lang "dl.preview"}}"></iframe>
+      {{end}}
     {{end}}
   </div>
   {{else}}
