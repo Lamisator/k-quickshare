@@ -48,6 +48,10 @@ dependencies beyond the two containers.
 - A sweeper retires expired and used-up links every minute: the blob is deleted
   at once, the metadata row is kept for 30 days as "expired", then purged.
 - Full English and German localisation, dark and light themes.
+- Language is detected from the browser's `Accept-Language` header, honouring
+  q-values rather than header order, and falls back to English for anything
+  unsupported. An explicit choice via the switcher is remembered in a cookie
+  and always wins.
 
 ---
 

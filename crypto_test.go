@@ -192,3 +192,33 @@ func TestIsSafeNextRejectsFragment(t *testing.T) {
 		}
 	}
 }
+
+// TestNegotiateLang covers Accept-Language handling. The q-value decides, not
+// header order: RFC 9110 does not require the list to be sorted by preference,
+// so picking the first supported tag can select a language the visitor ranked
+// below another one they also accept.
+func TestNegotiateLang(t *testing.T) {
+	cases := []struct{ header, want string }{
+		{"", "en"},                              // no header at all
+		{"de", "de"},                            // bare tag
+		{"DE", "de"},                            // case-insensitive
+		{"de-DE,de;q=0.9,en;q=0.8", "de"},       // typical Chrome/Firefox
+		{"en-US,en;q=0.9", "en"},                // typical English browser
+		{"de-AT", "de"},                         // regional variant maps to base
+		{"fr-FR,fr;q=0.9", "en"},                // nothing supported -> English
+		{"*", "en"},                             // wildcard only
+		{"fr, en;q=0.3, de;q=0.9", "de"},        // out of q order: German wins
+		{"en;q=0.5, de;q=0.9", "de"},            // German preferred despite order
+		{"de;q=0, en;q=0.5", "en"},              // q=0 rejects German
+		{"de;q=0", "en"},                        // sole option rejected
+		{"en, de", "en"},                        // equal q -> first wins
+		{"de;q=abc, en;q=0.4", "de"},            // unparseable q treated as 1.0
+		{"  de-CH ; q=0.8 , en ; q=0.2 ", "de"}, // stray whitespace
+		{"zh-Hant,zh;q=0.9,en;q=0.2", "en"},     // unsupported first, English later
+	}
+	for _, c := range cases {
+		if got := negotiateLang(c.header); got != c.want {
+			t.Errorf("negotiateLang(%q) = %q, want %q", c.header, got, c.want)
+		}
+	}
+}

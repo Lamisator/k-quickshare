@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -342,17 +343,46 @@ func langFromRequest(r *http.Request) string {
 			return c.Value
 		}
 	}
-	accept := strings.ToLower(r.Header.Get("Accept-Language"))
-	for _, part := range strings.Split(accept, ",") {
-		code := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
-		if len(code) >= 2 {
-			code = code[:2]
+	return negotiateLang(r.Header.Get("Accept-Language"))
+}
+
+// negotiateLang picks the best supported language from an Accept-Language
+// header, falling back to English.
+//
+// The q-value decides, not the header order: RFC 9110 does not require the
+// list to be sorted by preference, so "fr, en;q=0.3, de;q=0.9" asks for German
+// ahead of English even though English appears first. q=0 means "not
+// acceptable" and is skipped rather than matched. Ties fall to whichever came
+// first, which is the order browsers actually send.
+//
+// Only the primary subtag matters here: "de-AT", "de-CH" and "de" all select
+// German, because that is as far as the catalogue distinguishes.
+func negotiateLang(header string) string {
+	best, bestQ := "en", -1.0
+	for _, part := range strings.Split(strings.ToLower(header), ",") {
+		tag, params, _ := strings.Cut(strings.TrimSpace(part), ";")
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
 		}
-		if isSupportedLang(code) {
-			return code
+		q := 1.0
+		for _, p := range strings.Split(params, ";") {
+			k, v, ok := strings.Cut(strings.TrimSpace(p), "=")
+			if !ok || strings.TrimSpace(k) != "q" {
+				continue
+			}
+			if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+				q = f
+			}
+		}
+		if q <= 0 {
+			continue // explicitly rejected
+		}
+		if base, _, _ := strings.Cut(tag, "-"); isSupportedLang(base) && q > bestQ {
+			best, bestQ = base, q
 		}
 	}
-	return "en"
+	return best
 }
 
 func isSupportedLang(l string) bool {
