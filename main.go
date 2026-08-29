@@ -176,7 +176,6 @@ func main() {
 	// gated (any user)
 	mux.Handle("/", app.requireUserHandler(app.handleUploadPage))
 	mux.Handle("/history", app.requireUserHandler(app.handleHistory))
-	mux.Handle("/qr/", app.requireUserHandler(app.handleQR))
 	mux.Handle("/upload", app.requireUserHandler(app.handleUpload))
 	mux.Handle("/delete/", app.requireUserHandler(app.handleDelete))
 	mux.Handle("/account", app.requireUserHandler(app.handleAccount))
@@ -317,10 +316,14 @@ func securityHeaders(h http.Handler) http.Handler {
 		hdr.Set("Referrer-Policy", "same-origin")
 		hdr.Set("X-Frame-Options", "DENY")
 		hdr.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		// blob: sources carry locally decrypted E2E previews/downloads. The
+		// only script-capable blob context is the PDF iframe, which app.js
+		// gates on a %PDF- magic-byte check so HTML can't ride in on a lying
+		// content type.
 		hdr.Set("Content-Security-Policy",
-			"default-src 'self'; img-src 'self' data:; media-src 'self'; "+
+			"default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "+
 				"script-src 'self'; style-src 'self'; object-src 'none'; "+
-				"base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self'")
+				"base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self' blob:")
 		h.ServeHTTP(w, r)
 	})
 }

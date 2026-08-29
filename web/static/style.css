@@ -648,6 +648,36 @@ code {
 
 .btn-disabled { opacity: 0.4; pointer-events: none; }
 
+/* ---- End-to-end encryption ---- */
+.e2e-badge {
+  color: var(--success);
+  font-weight: 650;
+  letter-spacing: 0.06em;
+}
+.e2e-note {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.85rem 0 0;
+  font-size: 0.83rem;
+  color: var(--text-dim);
+}
+.e2e-note svg { color: var(--success); flex-shrink: 0; }
+.e2e-progress { border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 1rem; }
+.e2e-text {
+  margin: 0;
+  padding: 1rem;
+  max-height: 300px;
+  overflow: auto;
+  width: 100%;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#e2e-lock { max-width: 340px; margin: 0 auto 1rem; }
+
 /* ---- QR modal ---- */
 .qr-modal {
   position: fixed;

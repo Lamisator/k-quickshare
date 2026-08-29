@@ -42,6 +42,13 @@ const (
 	keyModeURL      = 1 // random secret in the share URL fragment — server cannot
 	keyModePassword = 2 // Argon2id-derived from the share password — server cannot
 
+	// True end-to-end modes: the browser encrypts before upload and decrypts
+	// after download using the same chunk format; the server only ever
+	// stores and serves ciphertext and holds no key material at all.
+	keyModeE2EURL      = 3 // key only in the URL fragment, client-side crypto
+	keyModeE2EPassword = 4 // key derived from the password in the browser;
+	// the server stores just a hash of a separately-derived auth token
+
 	urlSecretLen = 32
 	encSaltLen   = 16
 	hkdfInfoURL  = "k-fileshare-url-key-v1"
@@ -127,6 +134,16 @@ func deriveURLWrapKey(secret, salt []byte) ([]byte, error) {
 		return nil, err
 	}
 	return key, nil
+}
+
+// e2eCipherLen returns the exact ciphertext size the chunk format produces
+// for a given plaintext size — used to validate client-encrypted uploads.
+func e2eCipherLen(plain int64) int64 {
+	if plain <= 0 {
+		return 0
+	}
+	chunks := (plain + chunkPlainSize - 1) / chunkPlainSize
+	return plain + chunks*gcmOverhead
 }
 
 // derivePasswordWrapKey turns a share password into the DEK wrap key.

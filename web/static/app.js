@@ -107,9 +107,198 @@
     }
   }
 
+  // ---- end-to-end encrypted landing page ---------------------------------------
+  // The ciphertext is fetched as-is and decrypted here; the plaintext never
+  // exists outside this tab.
+
+  const e2eRoot = document.getElementById('dl-root');
+  if (e2eRoot && e2eRoot.getAttribute('data-e2e') === '1') {
+    const E2E = window.KFS_E2E;
+    const fileId = e2eRoot.getAttribute('data-file');
+    const mode = e2eRoot.getAttribute('data-mode');
+    const fileName = e2eRoot.getAttribute('data-name');
+    const fileType = e2eRoot.getAttribute('data-type');
+    const previewKind = e2eRoot.getAttribute('data-preview-kind');
+    const errBox = document.getElementById('e2e-error');
+    const keyMissing = document.getElementById('key-missing');
+    const mainBox = document.getElementById('e2e-main');
+    const dlBtn = document.getElementById('e2e-download');
+    const progress = document.getElementById('e2e-progress');
+    const statusEl = document.getElementById('e2e-status');
+    const pctEl = document.getElementById('e2e-pct');
+    const fillEl = document.getElementById('e2e-fill');
+
+    let fileKey = null;
+    let plainBlob = null;
+    let inFlight = null;
+
+    const fail = (msg) => {
+      errBox.textContent = msg;
+      errBox.hidden = false;
+      progress.hidden = true;
+    };
+    const setProgress = (label, frac) => {
+      progress.hidden = false;
+      statusEl.textContent = label;
+      const pct = Math.round(frac * 100);
+      fillEl.style.width = pct + '%';
+      pctEl.textContent = pct + '%';
+    };
+
+    // Fetch the ciphertext once and decrypt it; the result is reused by both
+    // the preview and the download button so a share is counted once.
+    async function getPlain() {
+      if (plainBlob) return plainBlob;
+      if (inFlight) return inFlight;
+      inFlight = (async () => {
+        const res = await fetch('/files/' + fileId + '/raw');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const total = Number(res.headers.get('Content-Length') || 0);
+        const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+        let buf;
+        if (reader) {
+          const parts = [];
+          let got = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            parts.push(value);
+            got += value.length;
+            if (total) setProgress(t('e2e_downloading'), got / total);
+          }
+          buf = await new Blob(parts).arrayBuffer();
+        } else {
+          buf = await res.arrayBuffer();
+        }
+        setProgress(t('e2e_decrypting'), 0);
+        plainBlob = await E2E.decryptBuffer(buf, fileKey, fileType,
+          (f) => setProgress(t('e2e_decrypting'), f));
+        progress.hidden = true;
+        return plainBlob;
+      })();
+      return inFlight;
+    }
+
+    async function renderPreview() {
+      if (!previewKind) return;
+      const box = document.getElementById('e2e-preview');
+      let blob;
+      try {
+        blob = await getPlain();
+      } catch (err) {
+        fail(t('e2e_failed') + ' (' + err.message + ')');
+        return;
+      }
+      box.classList.add('dl-preview-' + previewKind);
+      if (previewKind === 'text') {
+        const pre = document.createElement('pre');
+        pre.className = 'e2e-text';
+        pre.textContent = await blob.text();
+        box.appendChild(pre);
+      } else if (previewKind === 'pdf') {
+        // Only frame a blob that really is a PDF: a lying content type must
+        // not turn into an HTML document on a blob: origin.
+        const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+        if (String.fromCharCode.apply(null, head) !== '%PDF-') return;
+        const frame = document.createElement('iframe');
+        frame.src = URL.createObjectURL(blob);
+        frame.title = fileName;
+        box.appendChild(frame);
+      } else {
+        const el = document.createElement(
+          previewKind === 'image' ? 'img' : previewKind === 'video' ? 'video' : 'audio');
+        if (previewKind !== 'image') { el.controls = true; el.preload = 'metadata'; }
+        el.src = URL.createObjectURL(blob);
+        if (previewKind === 'image') el.alt = fileName;
+        box.appendChild(el);
+      }
+      box.hidden = false;
+    }
+
+    async function startSession() {
+      mainBox.hidden = false;
+      await renderPreview();
+    }
+
+    dlBtn.addEventListener('click', async () => {
+      if (!fileKey) return;
+      dlBtn.disabled = true;
+      try {
+        const blob = await getPlain();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+      } catch (err) {
+        fail(t('e2e_failed') + ' (' + err.message + ')');
+      } finally {
+        dlBtn.disabled = false;
+      }
+    });
+
+    if (!E2E || !E2E.available) {
+      fail(t('e2e_unsupported'));
+      dlBtn.classList.add('btn-disabled');
+    } else if (mode === 'url') {
+      const secret = (location.hash || '').replace(/^#/, '');
+      if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) {
+        keyMissing.hidden = false;
+        dlBtn.classList.add('btn-disabled');
+      } else {
+        E2E.deriveUrlKey(E2E.b64uDecode(secret))
+          .then((k) => { fileKey = k; return startSession(); })
+          .catch(() => fail(t('e2e_failed')));
+      }
+    } else {
+      const pwInput = document.getElementById('e2e-password');
+      const unlockBtn = document.getElementById('e2e-unlock');
+      const lockBox = document.getElementById('e2e-lock');
+      const salt = E2E.b64uDecode(e2eRoot.getAttribute('data-salt') || '');
+      const unlock = async () => {
+        if (!pwInput.value) return;
+        unlockBtn.disabled = true;
+        errBox.hidden = true;
+        try {
+          setProgress(t('e2e_deriving'), 0.5);
+          const { key, auth } = await E2E.derivePasswordKeys(pwInput.value, salt);
+          const res = await fetch('/files/' + fileId, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'auth=' + encodeURIComponent(E2E.b64uEncode(auth)),
+          });
+          progress.hidden = true;
+          if (res.status === 429) { fail(t('rate_limited')); return; }
+          if (!res.ok) { fail(t('e2e_wrong_pw')); pwInput.value = ''; return; }
+          fileKey = key;
+          lockBox.hidden = true;
+          await startSession();
+        } catch (err) {
+          fail(t('e2e_failed') + ' (' + err.message + ')');
+        } finally {
+          unlockBtn.disabled = false;
+        }
+      };
+      unlockBtn.addEventListener('click', unlock);
+      pwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
+    }
+  }
+
   // ---- QR share modal ----------------------------------------------------------
 
-  function showQR(imgSrc, shareUrl) {
+  // QR codes are rendered entirely in the browser: for end-to-end links the
+  // key lives in the fragment, which must never be sent to the server — not
+  // even to draw a picture of it.
+  function qrDataURL(text) {
+    const qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    return qr.createDataURL(6, 4);
+  }
+
+  function showQR(shareUrl) {
     const overlay = document.createElement('div');
     overlay.className = 'qr-modal';
     const box = document.createElement('div');
@@ -118,7 +307,7 @@
     title.className = 'qr-title';
     title.textContent = t('qr_title');
     const img = document.createElement('img');
-    img.src = imgSrc;
+    img.src = qrDataURL(shareUrl);
     img.alt = 'QR';
     const urlP = document.createElement('p');
     urlP.className = 'qr-url';
@@ -135,29 +324,11 @@
     document.body.appendChild(overlay);
   }
 
-  document.addEventListener('click', async (e) => {
+  document.addEventListener('click', (e) => {
     const btn = e.target.closest('.btn-qr');
     if (!btn) return;
     e.preventDefault();
-    const shareUrl = new URL(btn.getAttribute('data-qr-url'), location.href).toString();
-    const postEndpoint = btn.getAttribute('data-qr-post');
-    if (postEndpoint) {
-      // Keyed link: the server can't know the fragment, so send the full URL
-      // in a POST body and display the returned PNG from a blob.
-      try {
-        const res = await fetch(postEndpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'url=' + encodeURIComponent(shareUrl),
-        });
-        if (!res.ok) throw new Error('qr ' + res.status);
-        showQR(URL.createObjectURL(await res.blob()), shareUrl);
-      } catch (err) {
-        toast(t('toast_copyerr'));
-      }
-      return;
-    }
-    showQR(btn.getAttribute('data-qr-img'), shareUrl);
+    showQR(new URL(btn.getAttribute('data-qr-url'), location.href).toString());
   });
 
   // ---- localized delete confirmations -----------------------------------------
@@ -259,7 +430,7 @@
     for (const file of files) uploadOne(file);
   }
 
-  function uploadOne(file) {
+  async function uploadOne(file) {
     const row = document.createElement('div');
     row.className = 'queue-item';
     row.innerHTML = `
@@ -276,15 +447,53 @@
     const status = row.querySelector('.queue-status');
 
     const fd = new FormData();
-    fd.append('file', file);
     if (expiresSel && expiresSel.value === 'custom' && expiresAtInput && expiresAtInput.value) {
       // datetime-local is timezone-less; convert to UTC ISO for the server
       fd.append('expires_at', new Date(expiresAtInput.value).toISOString());
     } else if (expiresSel && expiresSel.value !== 'custom') {
       fd.append('expires_hours', expiresSel.value || '0');
     }
-    if (passwordInput) fd.append('password', passwordInput.value || '');
     if (maxDownloadsInput) fd.append('max_downloads', maxDownloadsInput.value || '0');
+
+    // Encrypt in this tab before anything is sent. The password (when set) is
+    // never transmitted: only a token derived from it on a separate KDF
+    // branch, which cannot yield the file key.
+    const E2E = window.KFS_E2E;
+    const password = passwordInput ? passwordInput.value : '';
+    let fragment = '';
+    if (E2E && E2E.available) {
+      try {
+        let key;
+        if (password) {
+          const salt = E2E.randomBytes(E2E.SALT_LEN);
+          status.textContent = t('e2e_deriving');
+          const derived = await E2E.derivePasswordKeys(password, salt);
+          key = derived.key;
+          fd.append('auth_salt', E2E.b64uEncode(salt));
+          fd.append('auth_verifier', E2E.b64uEncode(derived.auth));
+        } else {
+          const secret = E2E.randomBytes(E2E.KEY_LEN);
+          fragment = '#' + E2E.b64uEncode(secret);
+          key = await E2E.deriveUrlKey(secret);
+        }
+        const cipher = await E2E.encryptFile(file, key, (f) => {
+          fill.style.width = Math.round(f * 100) + '%';
+          status.textContent = t('e2e_encrypting');
+        });
+        fd.append('file', cipher, file.name);
+        fd.append('e2e', '1');
+        fd.append('plain_size', String(file.size));
+        fd.append('content_type', file.type || 'application/octet-stream');
+      } catch (err) {
+        row.classList.add('queue-error');
+        status.textContent = t('e2e_failed');
+        return;
+      }
+    } else {
+      // No WebCrypto (insecure context): fall back to server-side encryption.
+      fd.append('file', file);
+      fd.append('password', password || '');
+    }
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/upload');
@@ -317,7 +526,7 @@
         status.textContent = t('done');
         let res = null;
         try { res = JSON.parse(xhr.responseText); } catch (e) { /* ignore */ }
-        if (res && res.url) addLinkRow(row, res);
+        if (res && res.url) addLinkRow(row, res, fragment);
       } else if (xhr.status === 401) {
         row.classList.add('queue-error');
         status.textContent = t('login');
@@ -343,8 +552,10 @@
     xhr.send(fd);
   }
 
-  function addLinkRow(row, res) {
-    const url = new URL(res.url, location.href).toString();
+  function addLinkRow(row, res, fragment) {
+    // For key-in-URL shares this is the only moment the complete link exists:
+    // the fragment was generated in this tab and the server never sees it.
+    const url = new URL(res.url + (fragment || ''), location.href).toString();
     const wrap = document.createElement('div');
     wrap.className = 'queue-link';
 
@@ -357,18 +568,13 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'btn btn-ghost btn-sm btn-copy';
-    btn.setAttribute('data-copy', res.url);
+    btn.setAttribute('data-copy', url);
     btn.textContent = t('copy');
 
     const qrBtn = document.createElement('button');
     qrBtn.type = 'button';
     qrBtn.className = 'btn btn-ghost btn-sm btn-qr';
-    if (res.keyed) {
-      qrBtn.setAttribute('data-qr-post', '/qr/' + res.id);
-    } else {
-      qrBtn.setAttribute('data-qr-img', '/qr/' + res.id);
-    }
-    qrBtn.setAttribute('data-qr-url', res.url);
+    qrBtn.setAttribute('data-qr-url', url);
     qrBtn.textContent = 'QR';
 
     wrap.appendChild(input);
