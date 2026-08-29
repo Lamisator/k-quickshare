@@ -422,9 +422,13 @@
         const name = document.createElement('span');
         name.className = 'batch-row-name';
         name.textContent = m.name;
+        // Wide screens still ellipse these two lines; the title keeps the full
+        // value reachable there (narrow screens wrap instead of truncating).
+        name.title = m.name;
         const sub = document.createElement('span');
         sub.className = 'batch-row-sub muted';
         sub.textContent = fmtSize(m.size) + ' · ' + m.contentType;
+        sub.title = sub.textContent;
         meta.appendChild(name);
         meta.appendChild(sub);
 
@@ -810,7 +814,9 @@
       <div class="queue-bar"><div class="queue-fill"></div></div>
       <p class="queue-reason" hidden></p>
     `;
-    row.querySelector('.queue-name').textContent = file.name;
+    const nameEl = row.querySelector('.queue-name');
+    nameEl.textContent = file.name;
+    nameEl.title = file.name;
     queue.prepend(row);
     return row;
   }

@@ -69,12 +69,14 @@ code {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .sidebar {
   position: sticky;
   top: 0;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   background: var(--chrome);
@@ -913,6 +915,8 @@ code {
 
 body.bare {
   min-height: 100vh;
+  /* dvh follows the mobile URL bar, so the footer does not sit below the fold */
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -988,12 +992,18 @@ body.bare {
 .dl-file-head .ficon { width: 52px; height: 52px; border-radius: 13px; }
 .dl-file-head .ficon svg { width: 26px; height: 26px; }
 .dl-file-title { min-width: 0; }
+/* overflow-wrap:anywhere rather than word-break:break-all — a long file name or
+   content type still breaks, but a short one is no longer chopped mid-word. */
 .dl-file-title h1 {
   font-size: 1.25rem;
   margin: 0 0 0.1rem;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
-.dl-file-title .muted { font-size: 0.85rem; }
+.dl-file-title .muted {
+  display: block;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
 
 .dl-preview {
   margin: 0 0 1.25rem;
@@ -1043,7 +1053,18 @@ body.bare {
   font-size: 0.9rem;
 }
 .dl-details dt { color: var(--text-muted); }
-.dl-details dd { margin: 0; color: var(--text); display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.dl-details dd {
+  margin: 0;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  /* content types are long and unbreakable; without this the grid cell grows
+     past the card and the whole page scrolls sideways on a phone */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .btn-download { font-size: 1rem; padding: 0.85rem 1rem; }
 
@@ -1321,6 +1342,8 @@ body.bare {
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
   font-size: 0.9rem;
+  max-width: calc(100vw - 2rem);
+  text-align: center;
   opacity: 0;
   transition: opacity 0.2s ease, transform 0.2s ease;
   pointer-events: none;
@@ -1374,6 +1397,8 @@ body.bare {
     top: 0;
     z-index: 30;
     height: auto;
+    max-height: 100dvh;
+    overflow-y: auto;
     padding: 0.7rem 1rem;
     border-right: none;
     border-bottom: 1px solid var(--border);
@@ -1406,10 +1431,100 @@ body.bare {
   .admin-create-form { grid-template-columns: 1fr; }
 }
 
+/* Below ~680px the 640px-wide share card is no longer the limiting factor: the
+   viewport is, and its 2rem of padding is width the file names need more. */
+@media (max-width: 680px) {
+  .bare-top { padding: 0.7rem 0.9rem; gap: 0.6rem; flex-wrap: wrap; }
+  .bare-main { padding: 1.5rem 0.85rem 1.5rem; }
+  .dl-card { padding: 1.5rem 1.15rem 1.35rem; }
+  .card { padding: 1.15rem 1rem; }
+
+  .dl-card h1 { font-size: 1.2rem; }
+  .dl-file-head { gap: 0.7rem; margin-bottom: 1rem; }
+  .dl-file-head .ficon { width: 44px; height: 44px; border-radius: 11px; }
+  .dl-file-head .ficon svg { width: 22px; height: 22px; }
+  .dl-file-title h1 { font-size: 1.1rem; }
+
+  /* Fill the screen rather than a fixed pixel box the phone cannot afford. */
+  .dl-preview img, .dl-preview video { max-height: 55vh; }
+  .dl-preview iframe { height: 60vh; }
+  .e2e-text { max-height: 50vh; }
+
+  /* The 6-column user table scrolls sideways in .table-wrap; without nowrap
+     every cell would instead collapse into a column of single words. */
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+  .user-table th, .user-table td { white-space: nowrap; }
+
+  .queue-item { padding: 0.75rem 0.85rem 0.85rem; }
+  .batch-share { padding: 0.85rem 0.9rem 0.9rem; }
+  .file-item { padding: 0.8rem 0.85rem; gap: 0.7rem; }
+  .batch-row { padding: 0.7rem 0.75rem; gap: 0.65rem; }
+}
+
 @media (max-width: 560px) {
+  .main { padding: 1.25rem 0.85rem 2.5rem; }
   .options { grid-template-columns: 1fr; }
   .file-item { flex-wrap: wrap; }
-  .file-actions { width: 100%; justify-content: flex-end; }
-  .dl-details { grid-template-columns: 110px 1fr; }
+  .file-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
   .stats-row { grid-template-columns: 1fr 1fr; }
+
+  /* A 110px label column left roughly 130px for values like
+     "application/vnd.openxmlformats-...", so stack the pairs instead: the
+     value then gets the full width of the card and is shown in full. */
+  .dl-details, .account-info {
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding: 0.85rem 0.95rem;
+  }
+  .dl-details dt, .account-info dt {
+    font-size: 0.76rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+  }
+  .dl-details dd, .account-info dd { margin-top: 0.1rem; }
+  .dl-details dd + dt, .account-info dd + dt { margin-top: 0.7rem; }
+  .account-info dd { overflow-wrap: anywhere; }
+
+  /* Batch landing rows: the two action buttons plus a 40px icon left the name
+     almost nothing (worse in German — "Vorschau"/"Herunterladen"). Give the
+     name and its size/type line the whole first row and drop the buttons onto
+     a line of their own. */
+  .batch-row-actions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+    margin-top: 0.15rem;
+  }
+  .batch-row-name, .batch-row-sub {
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+  }
+
+  /* Same story for the share link: the field gets its own line, then Copy/QR. */
+  .queue-link { flex-wrap: wrap; }
+  .queue-link input { flex-basis: 100%; }
+
+  /* Upload queue: the file name gets the whole first line and wraps in full,
+     with the percentage and the cancel button below it. Scoped to .queue so the
+     single-file/batch progress bar, which reuses these classes for a short
+     status label, keeps its one-line layout. */
+  .queue .queue-info { flex-wrap: wrap; gap: 0.35rem 0.75rem; }
+  .queue .queue-name { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+
+  /* Comfortable thumb targets — .btn-sm is otherwise ~26px tall. */
+  .btn-sm { padding: 0.5rem 0.8rem; min-height: 38px; }
+  .lang-opt { padding: 0.4rem 0.8rem; }
+  .lang-opt-icon { padding: 0.4rem 0.7rem; }
+
+  /* Anything below 16px makes iOS Safari zoom the page in on focus, and it
+     never zooms back out — a password-protected share link is unusable then. */
+  .auth-form input,
+  .opt input, .opt select,
+  .search-input,
+  .settings-form input:not([type=checkbox]),
+  .admin-create-form input:not([type=checkbox]),
+  .row-action .inline-form input,
+  .queue-link input { font-size: 16px; }
 }
