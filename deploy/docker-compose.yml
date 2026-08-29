@@ -1,0 +1,57 @@
+services:
+
+  app:
+    build: .
+    container_name: fileshare-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://fileshare:${POSTGRES_PASSWORD}@db:5432/fileshare?sslmode=disable
+      FILES_DIR: /data/files
+      LISTEN_ADDR: ":8080"
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-536870912}
+      COOKIE_SECURE: "true"
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
+    volumes:
+      - /srv/docker/fileshare/data/files:/data/files
+    networks:
+      - backend
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.share.rule=Host(`share.kloeck-it.de`)
+      - traefik.http.routers.share.entrypoints=websecure
+      - traefik.http.routers.share.tls=true
+      - traefik.http.routers.share.tls.certresolver=le
+      - traefik.http.services.share.loadbalancer.server.port=8080
+
+  db:
+    image: postgres:16.4-alpine
+    container_name: fileshare-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fileshare
+      POSTGRES_USER: fileshare
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - /srv/docker/fileshare/data/postgres:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fileshare -d fileshare"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+networks:
+  backend:
+  proxy:
+    external: true

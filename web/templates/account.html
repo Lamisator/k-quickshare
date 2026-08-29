@@ -1,0 +1,44 @@
+{{template "header" .}}
+
+<div class="page-head">
+  <h1>{{T .Lang "account.heading"}}</h1>
+</div>
+
+<div class="card card-narrow">
+  <dl class="account-info">
+    <dt>{{T .Lang "account.username"}}</dt><dd>{{.User.Username}}</dd>
+    {{if .User.Email}}<dt>{{T .Lang "account.email"}}</dt><dd>{{.User.Email}}</dd>{{end}}
+    <dt>{{T .Lang "account.role"}}</dt>
+    <dd>{{if .User.IsSuperAdmin}}{{T .Lang "role.super"}}{{else if .User.IsAdmin}}{{T .Lang "role.admin"}}{{else}}{{T .Lang "role.member"}}{{end}}</dd>
+    <dt>{{T .Lang "account.methods"}}</dt>
+    <dd>
+      {{if .User.HasPassword}}<span class="chip">{{T .Lang "account.method_pw"}}</span>{{end}}
+      {{if .User.OIDCSubject}}<span class="chip chip-lock">Zitadel</span>{{end}}
+    </dd>
+  </dl>
+
+  <h2 class="section-title">{{if .User.HasPassword}}{{T .Lang "account.change_pw"}}{{else}}{{T .Lang "account.set_pw"}}{{end}}</h2>
+  {{if .Error}}<p class="alert">{{.Error}}</p>{{end}}
+  {{if .Success}}<p class="alert alert-ok">{{.Success}}</p>{{end}}
+  <form method="post" action="/account/password" class="auth-form" autocomplete="off">
+    {{if .User.HasPassword}}
+    <label>
+      <span>{{T .Lang "account.current"}}</span>
+      <input name="current_password" type="password" required autocomplete="current-password">
+    </label>
+    {{end}}
+    <label>
+      <span>{{T .Lang "account.new"}}</span>
+      <input name="new_password" type="password" required minlength="8" autocomplete="new-password">
+    </label>
+    <label>
+      <span>{{T .Lang "account.confirm"}}</span>
+      <input name="confirm_password" type="password" required minlength="8" autocomplete="new-password">
+    </label>
+    <button type="submit" class="btn btn-primary btn-block">
+      {{if .User.HasPassword}}{{T .Lang "account.update"}}{{else}}{{T .Lang "account.set_pw"}}{{end}}
+    </button>
+  </form>
+</div>
+
+{{template "footer" .}}

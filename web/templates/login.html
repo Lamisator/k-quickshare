@@ -1,0 +1,30 @@
+{{template "bare_header" .}}
+
+<div class="dl-card auth-card">
+  <div class="dl-icon" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>
+  </div>
+  <h1>{{T .Lang "login.heading"}}</h1>
+  <p class="dl-sub">{{T .Lang "login.sub"}}</p>
+  {{if .Error}}<p class="alert">{{.Error}}</p>{{end}}
+  <form method="post" action="/login" class="auth-form">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label>
+      <span>{{T .Lang "login.username"}}</span>
+      <input name="username" required autofocus autocomplete="username">
+    </label>
+    <label>
+      <span>{{T .Lang "login.password"}}</span>
+      <input name="password" type="password" required autocomplete="current-password">
+    </label>
+    <button type="submit" class="btn btn-primary btn-block">{{T .Lang "login.submit"}}</button>
+  </form>
+  {{if .OIDCEnabled}}
+  <div class="divider"><span>{{T .Lang "login.or"}}</span></div>
+  <a href="/auth/oidc/start{{if .Next}}?next={{urlquery .Next}}{{end}}" class="btn btn-oidc btn-block">
+    {{T .Lang "login.oidc"}}
+  </a>
+  {{end}}
+</div>
+
+{{template "bare_footer" .}}

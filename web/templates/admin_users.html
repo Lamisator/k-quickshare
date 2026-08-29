@@ -1,0 +1,92 @@
+{{template "header" .}}
+
+<div class="page-head">
+  <h1>{{T .Lang "users.heading"}} <span class="count">{{len .Users}}</span></h1>
+  <p class="page-sub">{{T .Lang "users.sub"}}</p>
+</div>
+
+{{if .Error}}<p class="alert">{{.Error}}</p>{{end}}
+{{if .Success}}<p class="alert alert-ok">{{.Success}}</p>{{end}}
+
+<details class="admin-create">
+  <summary class="btn btn-primary">{{T .Lang "users.new"}}</summary>
+  <form method="post" action="/admin/users" class="admin-create-form" autocomplete="off">
+    <label>
+      <span>{{T .Lang "users.username"}}</span>
+      <input name="username" required>
+    </label>
+    <label>
+      <span>{{T .Lang "users.email_opt"}}</span>
+      <input name="email" type="email">
+    </label>
+    <label>
+      <span>{{T .Lang "users.password8"}}</span>
+      <input name="password" type="password" required minlength="8">
+    </label>
+    <label class="admin-check">
+      <input name="is_admin" type="checkbox">
+      <span>{{T .Lang "users.is_admin"}}</span>
+    </label>
+    <button type="submit" class="btn btn-primary">{{T .Lang "users.create"}}</button>
+  </form>
+</details>
+
+<div class="table-wrap">
+<table class="user-table">
+  <thead>
+    <tr>
+      <th>{{T .Lang "users.username"}}</th>
+      <th>{{T .Lang "users.col_email"}}</th>
+      <th>{{T .Lang "users.col_methods"}}</th>
+      <th>{{T .Lang "users.col_role"}}</th>
+      <th>{{T .Lang "users.col_created"}}</th>
+      <th class="actions-col">{{T .Lang "users.col_actions"}}</th>
+    </tr>
+  </thead>
+  <tbody>
+  {{range .Users}}
+    <tr>
+      <td class="cell-name">{{.Username}}{{if eq .ID $.MeID}} <span class="badge">{{T $.Lang "badge.you"}}</span>{{end}}</td>
+      <td>{{if .Email}}{{.Email}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td>
+        {{if .HasPassword}}<span class="chip">{{T $.Lang "account.method_pw"}}</span>{{end}}
+        {{if .HasOIDC}}<span class="chip chip-lock">Zitadel</span>{{end}}
+        {{if not (or .HasPassword .HasOIDC)}}<span class="chip chip-warn">{{T $.Lang "users.no_login"}}</span>{{end}}
+      </td>
+      <td>
+        {{if .IsSuperAdmin}}<span class="badge badge-super">{{T $.Lang "role.super"}}</span>
+        {{else if .IsAdmin}}<span class="badge">{{T $.Lang "role.admin"}}</span>
+        {{else}}<span class="muted">{{T $.Lang "users.member"}}</span>{{end}}
+      </td>
+      <td><span class="muted"><time data-ts="{{rfc3339 .CreatedAt}}">{{formatDate .CreatedAt}}</time></span></td>
+      <td class="row-actions">
+        <details class="row-action">
+          <summary class="btn btn-ghost btn-sm">{{T $.Lang "users.reset_pw"}}</summary>
+          <form method="post" action="/admin/users/{{.ID}}/password" class="inline-form" autocomplete="off">
+            <input name="password" type="password" placeholder="{{T $.Lang "users.new_pw_ph"}}" required minlength="8">
+            <button type="submit" class="btn btn-primary btn-sm">{{T $.Lang "users.save"}}</button>
+          </form>
+        </details>
+        <form method="post" action="/admin/users/{{.ID}}/admin" class="inline-form">
+          <input type="hidden" name="value" value="{{if .IsAdmin}}off{{else}}on{{end}}">
+          <button type="submit" class="btn btn-ghost btn-sm"
+                  {{if .IsSuperAdmin}}disabled title="{{T $.Lang "users.t_super_revoke"}}"
+                  {{else if and .IsAdmin (eq .ID $.MeID)}}disabled title="{{T $.Lang "users.t_self_revoke"}}"{{end}}>
+            {{if .IsAdmin}}{{T $.Lang "users.revoke"}}{{else}}{{T $.Lang "users.make_admin"}}{{end}}
+          </button>
+        </form>
+        <form method="post" action="/admin/users/{{.ID}}/delete" class="inline-form" data-confirm="{{T $.Lang "users.confirm_delete" .Username}}">
+          <button type="submit" class="btn btn-danger btn-sm"
+                  {{if .IsSuperAdmin}}disabled title="{{T $.Lang "users.t_super_delete"}}"
+                  {{else if eq .ID $.MeID}}disabled title="{{T $.Lang "users.t_self_delete"}}"{{end}}>
+            {{T $.Lang "users.delete"}}
+          </button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+{{template "footer" .}}

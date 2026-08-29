@@ -1,0 +1,18 @@
+{{template "bare_header" .}}
+
+<div class="dl-card">
+  <div class="dl-icon dl-icon-muted" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M5.5 5.5l13 13"/></svg>
+  </div>
+  <h1>{{T .Lang "denied.heading"}}</h1>
+  <p class="dl-sub">{{T .Lang "denied.msg"}}</p>
+  <dl class="account-info">
+    <dt>{{T .Lang "denied.allowed"}}</dt><dd><code>{{.AllowedDomain}}</code></dd>
+    {{if .ActualDomain}}<dt>{{T .Lang "denied.yours"}}</dt><dd><code>{{.ActualDomain}}</code></dd>{{end}}
+  </dl>
+  <p class="muted denied-hint">{{T .Lang "denied.hint"}}</p>
+  <a href="/auth/oidc/start?prompt=login" class="btn btn-primary btn-block">{{T .Lang "denied.retry"}}</a>
+  <a href="/login" class="btn btn-ghost btn-block" style="margin-top:0.5rem;">{{T .Lang "denied.back"}}</a>
+</div>
+
+{{template "bare_footer" .}}

@@ -1,0 +1,78 @@
+{{template "header" .}}
+
+<div class="page-head">
+  <h1>{{T .Lang "settings.heading"}}</h1>
+  <p class="page-sub">{{T .Lang "settings.sub"}}</p>
+</div>
+
+{{if .Error}}<p class="alert">{{.Error}}</p>{{end}}
+{{if .Success}}<p class="alert alert-ok">{{.Success}}</p>{{end}}
+
+<section class="card settings-card">
+  <div class="settings-head">
+    <h2>{{T .Lang "settings.oidc"}}</h2>
+    <span class="chip {{if .OIDCLive}}chip-lock{{else}}chip-warn{{end}}">
+      {{if .OIDCLive}}{{T .Lang "settings.active"}}{{else}}{{T .Lang "settings.inactive"}}{{end}}
+    </span>
+  </div>
+
+  <details class="settings-help">
+    <summary>{{T .Lang "settings.howto"}}</summary>
+    <ol>
+      <li>{{T .Lang "howto.1" (or .OIDC.Issuer "https://auth1.antwire.net")}}</li>
+      <li>{{T .Lang "howto.2"}}</li>
+      <li>{{T .Lang "howto.3"}}</li>
+      <li>{{T .Lang "howto.4"}} <code>https://share.kloeck-it.de/auth/oidc/callback</code></li>
+      <li>{{T .Lang "howto.5"}} <code>https://share.kloeck-it.de/login</code></li>
+      <li>{{T .Lang "howto.6"}}</li>
+      <li>{{T .Lang "howto.7"}}</li>
+      <li>{{T .Lang "howto.8"}}</li>
+      <li>{{T .Lang "howto.9"}}</li>
+    </ol>
+  </details>
+
+  <form method="post" action="/admin/settings/oidc" class="settings-form" autocomplete="off">
+    <label class="opt-check">
+      <input type="checkbox" name="enabled" {{if .OIDC.Enabled}}checked{{end}}>
+      <span>{{T .Lang "settings.enable"}}</span>
+    </label>
+
+    <label>
+      <span>{{T .Lang "settings.issuer"}}</span>
+      <input name="issuer" value="{{.OIDC.Issuer}}" placeholder="https://auth1.antwire.net">
+      <em class="hint">{{T .Lang "settings.issuer_h"}}</em>
+    </label>
+
+    <label>
+      <span>{{T .Lang "settings.client_id"}}</span>
+      <input name="client_id" value="{{.OIDC.ClientID}}">
+    </label>
+
+    <label>
+      <span>{{T .Lang "settings.secret"}}</span>
+      <input name="client_secret" type="password"
+             placeholder="{{if .OIDC.ClientSecret}}{{T .Lang "settings.secret_keep"}}{{else}}{{T .Lang "settings.secret_paste"}}{{end}}">
+      <em class="hint">{{T .Lang "settings.secret_h"}}</em>
+    </label>
+
+    <label>
+      <span>{{T .Lang "settings.redirect"}}</span>
+      <input name="redirect_url" value="{{.OIDC.RedirectURL}}"
+             placeholder="https://share.kloeck-it.de/auth/oidc/callback">
+      <em class="hint">{{T .Lang "settings.redirect_h"}}</em>
+    </label>
+
+    <label>
+      <span>{{T .Lang "settings.domain"}}</span>
+      <input name="allowed_domain" value="{{.OIDC.AllowedDomain}}"
+             placeholder="antwire.auth1.antwire.net">
+      <em class="hint">{{T .Lang "settings.domain_h"}}</em>
+    </label>
+
+    <div class="settings-actions">
+      <button type="submit" class="btn btn-primary">{{T .Lang "settings.save"}}</button>
+    </div>
+  </form>
+</section>
+
+{{template "footer" .}}

@@ -1,0 +1,60 @@
+{{template "header" .}}
+
+<div class="page-head">
+  <h1>{{T .Lang "upload.heading"}}</h1>
+  <p class="page-sub">{{T .Lang "upload.sub"}}</p>
+</div>
+
+<section class="uploader">
+  <form id="upload-form" enctype="multipart/form-data">
+    <label for="file-input" id="dropzone" class="dropzone">
+      <span class="dropzone-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="46" height="46" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v14"/>
+          <path d="M6 9l6-6 6 6"/>
+          <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+      </span>
+      <span class="dropzone-text">{{T .Lang "upload.drop"}} <em>{{T .Lang "upload.browse"}}</em></span>
+      <span class="dropzone-hint">{{T .Lang "upload.hint" (humanSize .MaxUpload)}}</span>
+      <input id="file-input" type="file" name="file" multiple>
+    </label>
+
+    <fieldset class="options" id="options">
+      <legend>{{T .Lang "upload.options"}}</legend>
+      <label class="opt">
+        <span>{{T .Lang "upload.expiry"}}</span>
+        <select id="opt-expires" name="expires_hours">
+          <option value="0">{{T .Lang "expiry.never"}}</option>
+          <option value="1">{{T .Lang "expiry.1h"}}</option>
+          <option value="24" selected>{{T .Lang "expiry.24h"}}</option>
+          <option value="168">{{T .Lang "expiry.7d"}}</option>
+          <option value="720">{{T .Lang "expiry.30d"}}</option>
+          <option value="custom">{{T .Lang "expiry.custom"}}</option>
+        </select>
+      </label>
+      <label class="opt" id="opt-expires-at-wrap" hidden>
+        <span>{{T .Lang "upload.expiry_at"}}</span>
+        <input id="opt-expires-at" type="datetime-local">
+      </label>
+      <label class="opt">
+        <span>{{T .Lang "upload.password"}}</span>
+        <input id="opt-password" name="password" type="text" placeholder="{{T .Lang "upload.password_ph"}}" autocomplete="off">
+      </label>
+      <label class="opt">
+        <span>{{T .Lang "upload.maxdl"}}</span>
+        <input id="opt-max" name="max_downloads" type="number" min="0" step="1" placeholder="{{T .Lang "upload.maxdl_ph"}}">
+      </label>
+    </fieldset>
+  </form>
+</section>
+
+<section class="session-uploads" id="session-uploads" hidden>
+  <div class="files-head">
+    <h2>{{T .Lang "upload.queue"}}</h2>
+    <a href="/history" class="view-all">{{T .Lang "upload.view_all"}}</a>
+  </div>
+  <div id="queue" class="queue"></div>
+</section>
+
+{{template "footer" .}}

@@ -1,0 +1,292 @@
+package main
+
+import (
+	"context"
+	"embed"
+	"errors"
+	"fmt"
+	"html/template"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+//go:embed web/templates/*.html
+var templatesFS embed.FS
+
+//go:embed web/static
+var staticFS embed.FS
+
+type App struct {
+	db           *pgxpool.Pool
+	filesDir     string
+	tmpl         *template.Template
+	maxUpload    int64
+	cookieSecure bool
+	unlockKey    []byte // HMAC key for per-file password-unlock cookies
+
+	oidcMu  sync.RWMutex
+	oidc    *OIDC
+	oidcCfg OIDCSettings
+}
+
+func main() {
+	dsn := mustEnv("DATABASE_URL")
+	filesDir := envOr("FILES_DIR", "/data/files")
+	listen := envOr("LISTEN_ADDR", ":8080")
+	maxUpload := envInt64("MAX_UPLOAD_BYTES", 512*1024*1024)
+	cookieSecure := envBool("COOKIE_SECURE", true)
+
+	envOIDCIssuer := os.Getenv("OIDC_ISSUER")
+	envOIDCClientID := os.Getenv("OIDC_CLIENT_ID")
+	envOIDCClientSecret := os.Getenv("OIDC_CLIENT_SECRET")
+	envOIDCRedirect := os.Getenv("OIDC_REDIRECT_URL")
+	envOIDCAllowedDomain := os.Getenv("OIDC_ALLOWED_DOMAIN")
+
+	adminUser := os.Getenv("ADMIN_USERNAME")
+	adminPass := os.Getenv("ADMIN_PASSWORD")
+
+	if err := os.MkdirAll(filesDir, 0o755); err != nil {
+		log.Fatalf("cannot create files dir %q: %v", filesDir, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pool, err := connectDB(ctx, dsn, 30, 2*time.Second)
+	if err != nil {
+		log.Fatalf("database connect: %v", err)
+	}
+	defer pool.Close()
+
+	mctx, mcancel := context.WithTimeout(ctx, 15*time.Second)
+	if err := runMigrations(mctx, pool); err != nil {
+		mcancel()
+		log.Fatalf("migrations: %v", err)
+	}
+	mcancel()
+
+	tmpl, err := loadTemplates()
+	if err != nil {
+		log.Fatalf("load templates: %v", err)
+	}
+
+	app := &App{
+		db:           pool,
+		filesDir:     filesDir,
+		tmpl:         tmpl,
+		maxUpload:    maxUpload,
+		cookieSecure: cookieSecure,
+		unlockKey:    randomBytes(32),
+	}
+
+	if err := app.bootstrapAdmin(ctx, adminUser, adminPass); err != nil {
+		log.Fatalf("admin bootstrap: %v", err)
+	}
+	if err := app.seedOIDCFromEnv(ctx, envOIDCIssuer, envOIDCClientID,
+		envOIDCClientSecret, envOIDCRedirect, envOIDCAllowedDomain); err != nil {
+		log.Fatalf("oidc seed: %v", err)
+	}
+	if err := app.loadAndApplyOIDC(ctx); err != nil {
+		log.Printf("oidc init: %v (continuing with OIDC disabled)", err)
+	}
+
+	app.startSweeper(ctx, time.Minute)
+
+	mux := http.NewServeMux()
+
+	// public
+	mux.HandleFunc("/healthz", app.handleHealth)
+	mux.HandleFunc("/files/", app.dispatchFileRoutes)
+	mux.HandleFunc("/lang", app.handleLang)
+	mux.HandleFunc("/theme", app.handleTheme)
+	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			app.handleLoginPage(w, r)
+		case http.MethodPost:
+			app.handleLoginPost(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/logout", app.handleLogout)
+	mux.HandleFunc("/auth/oidc/start", app.handleOIDCStart)
+	mux.HandleFunc("/auth/oidc/callback", app.handleOIDCCallback)
+
+	// static assets
+	staticSub, _ := fs.Sub(staticFS, "web/static")
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+
+	// gated (any user)
+	mux.Handle("/", app.requireUserHandler(app.handleUploadPage))
+	mux.Handle("/history", app.requireUserHandler(app.handleHistory))
+	mux.Handle("/upload", app.requireUserHandler(app.handleUpload))
+	mux.Handle("/delete/", app.requireUserHandler(app.handleDelete))
+	mux.Handle("/account", app.requireUserHandler(app.handleAccount))
+	mux.Handle("/account/password", app.requireUserHandler(app.handleAccountPassword))
+
+	// gated (admin)
+	mux.Handle("/admin/users", http.HandlerFunc(app.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			app.handleAdminUsers(w, r)
+		case http.MethodPost:
+			app.handleAdminCreateUser(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/admin/users/", http.HandlerFunc(app.requireAdmin(app.dispatchAdminUserAction)))
+	mux.Handle("/admin/settings", http.HandlerFunc(app.requireAdmin(app.handleAdminSettings)))
+	mux.Handle("/admin/settings/oidc", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsOIDC)))
+
+	handler := app.withOptionalUser(logRequests(mux))
+
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           handler,
+		ReadHeaderTimeout: 15 * time.Second,
+	}
+	log.Printf("fileshare listening on %s (files dir: %s, max upload: %d bytes)", listen, filesDir, maxUpload)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("server: %v", err)
+	}
+}
+
+func (a *App) requireUserHandler(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(a.requireUser(h))
+}
+
+func (a *App) dispatchAdminUserAction(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/password"):
+		a.handleAdminResetPassword(w, r)
+	case strings.HasSuffix(r.URL.Path, "/admin"):
+		a.handleAdminToggleAdmin(w, r)
+	case strings.HasSuffix(r.URL.Path, "/delete"):
+		a.handleAdminDeleteUser(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func loadTemplates() (*template.Template, error) {
+	funcs := template.FuncMap{
+		"humanSize": humanSize,
+		"T":         tr,
+		"formatTime": func(t time.Time) string {
+			return t.UTC().Format("2006-01-02 15:04 UTC")
+		},
+		"formatDate": func(t time.Time) string {
+			return t.UTC().Format("2006-01-02")
+		},
+		"rfc3339": func(t time.Time) string {
+			return t.UTC().Format(time.RFC3339)
+		},
+		"until": humanUntil,
+	}
+	tmpl := template.New("").Funcs(funcs)
+	return tmpl.ParseFS(templatesFS, "web/templates/*.html")
+}
+
+func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data map[string]any) {
+	a.renderStatus(w, r, http.StatusOK, name, data)
+}
+
+func (a *App) renderStatus(w http.ResponseWriter, r *http.Request, status int, name string, data map[string]any) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	lang := langFromRequest(r)
+	data["Lang"] = lang
+	data["I18N"] = jsStrings(lang)
+	data["Theme"] = themeFromRequest(r)
+	data["ReqPath"] = r.URL.RequestURI()
+	if _, ok := data["User"]; !ok {
+		data["User"] = userFromContext(r.Context())
+	}
+	if _, ok := data["Title"]; !ok {
+		data["Title"] = "k-fileshare"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	if err := a.tmpl.ExecuteTemplate(w, name, data); err != nil {
+		log.Printf("render %s: %v", name, err)
+	}
+}
+
+func logRequests(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		h.ServeHTTP(w, r)
+		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
+	})
+}
+
+func httpError(w http.ResponseWriter, err error, code int) {
+	log.Printf("error: %v", err)
+	http.Error(w, http.StatusText(code), code)
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func mustEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("%s is required", key)
+	}
+	return v
+}
+
+func envInt64(key string, fallback int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		log.Printf("invalid %s=%q, using default %d", key, v, fallback)
+		return fallback
+	}
+	return n
+}
+
+func envBool(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "":
+		return fallback
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}

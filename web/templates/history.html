@@ -1,0 +1,84 @@
+{{define "fileicon"}}<span class="ficon ficon-{{.}}" aria-hidden="true">
+  {{if eq . "image"}}<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></svg>
+  {{else if eq . "video"}}<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5l5 2.5-5 2.5z"/></svg>
+  {{else if eq . "audio"}}<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>
+  {{else if eq . "pdf"}}<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg>
+  {{else if eq . "text"}}<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 12h6M9 16h4"/></svg>
+  {{else if eq . "archive"}}<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M12 4v4m0 2v1m0 2v1"/><rect x="10.5" y="14" width="3" height="3" rx="0.5"/></svg>
+  {{else if eq . "doc"}}<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13l1.5 4L12 13l1.5 4L15 13"/></svg>
+  {{else}}<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>{{end}}
+</span>{{end}}
+
+{{template "header" .}}
+
+<div class="page-head">
+  <h1>{{T .Lang "files.heading"}}</h1>
+  <p class="page-sub">{{T .Lang "files.sub"}}</p>
+</div>
+
+<div class="stats-row">
+  <div class="stat-card">
+    <span class="stat-value">{{len .Files}}</span>
+    <span class="stat-label">{{T .Lang "files.stat_count"}}</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-value">{{humanSize .TotalSize}}</span>
+    <span class="stat-label">{{T .Lang "files.stat_size"}}</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-value">{{.TotalDL}}</span>
+    <span class="stat-label">{{T .Lang "files.stat_dl"}}</span>
+  </div>
+</div>
+
+{{if .Files}}
+<div class="search-row">
+  <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+  <input type="search" id="file-search" class="search-input" placeholder="{{T .Lang "files.search"}}" autocomplete="off">
+</div>
+
+<ul class="file-list" id="file-list">
+  {{range .Files}}
+  <li class="file-item" data-search="{{.OriginalName}} {{.ContentType}} {{.UploaderName}}">
+    {{template "fileicon" .IconKind}}
+    <div class="file-main">
+      <div class="file-name-row">
+        <a class="file-name" href="/files/{{.ID}}">{{.OriginalName}}</a>
+        {{if .HasPassword}}<span class="chip chip-lock" title="{{T $.Lang "js.protected"}}">
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          {{T $.Lang "files.protected"}}</span>{{end}}
+        {{if .ExpiresAt}}<span class="chip chip-expiry" title="{{formatTime .ExpiresAt.UTC}}">{{T $.Lang "files.expires_in" (until $.Lang .ExpiresAt.UTC)}}</span>{{end}}
+        {{if .MaxDownloads}}<span class="chip">{{T $.Lang "files.dl_of" .DownloadCount .MaxDownloads}}</span>
+        {{else if eq .DownloadCount 1}}<span class="chip">{{T $.Lang "files.dl_one"}}</span>
+        {{else if gt .DownloadCount 0}}<span class="chip">{{T $.Lang "files.dl_count" .DownloadCount}}</span>{{end}}
+      </div>
+      <div class="file-meta">
+        <span>{{humanSize .Size}}</span>
+        <span class="dot">·</span>
+        <time data-ts="{{rfc3339 .UploadedAt}}">{{formatDate .UploadedAt}}</time>
+        {{if .UploaderName}}<span class="dot">·</span><span>{{T $.Lang "files.by" .UploaderName}}</span>{{end}}
+      </div>
+    </div>
+    <div class="file-actions">
+      <button type="button" class="btn btn-ghost btn-sm btn-copy" data-copy="/files/{{.ID}}">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        {{T $.Lang "js.copy"}}
+      </button>
+      <a class="btn btn-ghost btn-sm" href="/files/{{.ID}}" target="_blank" rel="noopener">{{T $.Lang "files.open"}}</a>
+      {{if .CanDelete}}
+      <form class="file-delete" action="/delete/{{.ID}}" method="post" data-confirm="{{T $.Lang "js.confirm_delete" .OriginalName}}">
+        <button type="submit" class="btn btn-danger btn-sm" title="{{T $.Lang "files.delete"}}">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+        </button>
+      </form>
+      {{end}}
+    </div>
+  </li>
+  {{end}}
+</ul>
+<p class="empty" id="no-results" hidden>{{T .Lang "js.no_results"}}</p>
+{{else}}
+<p class="empty">{{T .Lang "files.empty"}}</p>
+{{end}}
+
+{{template "footer" .}}

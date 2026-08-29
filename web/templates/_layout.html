@@ -1,0 +1,127 @@
+{{define "head"}}<!doctype html>
+<html lang="{{.Lang}}" data-theme="{{.Theme}}">
+<head>
+<meta charset="utf-8">
+<title>{{.Title}}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="{{if eq .Theme "light"}}light{{else}}dark{{end}}">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<script>window.I18N = {{.I18N}}; window.LANG = {{.Lang}};</script>
+</head>
+{{end}}
+
+{{define "brand"}}
+<a href="/" class="brand">
+  <span class="brand-mark" aria-hidden="true">
+    <svg viewBox="0 0 32 32" width="18" height="18" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M16 6 L16 20"/>
+      <path d="M10 12 L16 6 L22 12"/>
+      <path d="M7 21 L7 24 A2 2 0 0 0 9 26 L23 26 A2 2 0 0 0 25 24 L25 21"/>
+    </svg>
+  </span>
+  <span class="brand-name">k&#8209;fileshare</span>
+</a>
+{{end}}
+
+{{define "langswitch"}}
+<div class="lang-switch" role="group" aria-label="Language">
+  <a href="/lang?to=en&amp;next={{urlquery .ReqPath}}" class="lang-opt{{if eq .Lang "en"}} lang-active{{end}}">EN</a>
+  <a href="/lang?to=de&amp;next={{urlquery .ReqPath}}" class="lang-opt{{if eq .Lang "de"}} lang-active{{end}}">DE</a>
+</div>
+{{end}}
+
+{{define "themeswitch"}}
+<div class="lang-switch" role="group" aria-label="Theme">
+  <a href="/theme?to=dark&amp;next={{urlquery .ReqPath}}" class="lang-opt lang-opt-icon{{if eq .Theme "dark"}} lang-active{{end}}" title="{{T .Lang "theme.dark"}}" aria-label="{{T .Lang "theme.dark"}}">
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.6 6.6 0 0 0 9.8 9.8z"/></svg>
+  </a>
+  <a href="/theme?to=light&amp;next={{urlquery .ReqPath}}" class="lang-opt lang-opt-icon{{if eq .Theme "light"}} lang-active{{end}}" title="{{T .Lang "theme.light"}}" aria-label="{{T .Lang "theme.light"}}">
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+  </a>
+</div>
+{{end}}
+
+{{define "header"}}{{template "head" .}}
+<body class="has-sidebar">
+<div class="shell">
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      {{template "brand" .}}
+      <button type="button" class="sidebar-toggle" id="sidebar-toggle" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+    </div>
+    <nav class="side-nav" id="side-nav">
+      <span class="nav-section">{{T .Lang "nav.section.share"}}</span>
+      <a href="/" class="side-link{{if eq .Active "upload"}} side-active{{end}}">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        {{T .Lang "nav.upload"}}
+      </a>
+      <a href="/history" class="side-link{{if eq .Active "files"}} side-active{{end}}">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        {{T .Lang "nav.files"}}
+      </a>
+      {{if .User}}{{if .User.IsAdmin}}
+      <span class="nav-section">{{T .Lang "nav.section.admin"}}</span>
+      <a href="/admin/users" class="side-link{{if eq .Active "users"}} side-active{{end}}">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14.5c2.8 0 4.5 1.9 4.5 4.5"/></svg>
+        {{T .Lang "nav.users"}}
+      </a>
+      <a href="/admin/settings" class="side-link{{if eq .Active "settings"}} side-active{{end}}">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h.01a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        {{T .Lang "nav.settings"}}
+      </a>
+      {{end}}{{end}}
+    </nav>
+    <div class="sidebar-foot" id="sidebar-foot">
+      {{if .User}}
+      <a href="/account" class="side-user{{if eq .Active "account"}} side-active{{end}}">
+        <span class="avatar" aria-hidden="true">{{slice .User.Username 0 1}}</span>
+        <span class="side-user-name">{{.User.Username}}</span>
+        {{if .User.IsSuperAdmin}}<span class="badge badge-super">{{T .Lang "badge.super"}}</span>
+        {{else if .User.IsAdmin}}<span class="badge">{{T .Lang "badge.admin"}}</span>{{end}}
+      </a>
+      {{end}}
+      <div class="foot-row">
+        {{template "langswitch" .}}
+        {{template "themeswitch" .}}
+      </div>
+      {{if .User}}
+      <a href="/logout" class="btn btn-ghost btn-sm logout-btn" title="{{T .Lang "nav.logout"}}">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+        {{T .Lang "nav.logout"}}
+      </a>
+      {{end}}
+    </div>
+  </aside>
+  <main class="main">
+{{end}}
+
+{{define "footer"}}
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}
+
+{{define "bare_header"}}{{template "head" .}}
+<body class="bare">
+<header class="bare-top">
+  {{template "brand" .}}
+  <div class="switch-row">
+    {{template "langswitch" .}}
+    {{template "themeswitch" .}}
+  </div>
+</header>
+<main class="bare-main">
+{{end}}
+
+{{define "bare_footer"}}
+</main>
+<footer class="bare-foot">{{T .Lang "dl.footer" "k-fileshare"}}</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}
