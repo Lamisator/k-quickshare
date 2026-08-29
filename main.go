@@ -266,6 +266,13 @@ func (a *App) renderStatus(w http.ResponseWriter, r *http.Request, status int, n
 	if _, ok := data["User"]; !ok {
 		data["User"] = userFromContext(r.Context())
 	}
+	// The shell pages show a disk-usage bar; a statfs call is cheap enough to
+	// do per render and always reflects reality (including the sweeper).
+	if u, _ := data["User"].(*User); u != nil {
+		if _, ok := data["Disk"]; !ok {
+			data["Disk"] = a.diskStats()
+		}
+	}
 	if _, ok := data["Title"]; !ok {
 		data["Title"] = "k-fileshare"
 	}

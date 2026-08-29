@@ -74,6 +74,41 @@ func (a *App) quotaViolation(user *User, u usageSnapshot, incoming int64) error 
 	return nil
 }
 
+// DiskStats describes the filesystem holding the uploads.
+type DiskStats struct {
+	Total   int64
+	Used    int64
+	Free    int64
+	Percent float64
+	OK      bool
+}
+
+// diskStats reports usage of the files volume the way `df` reports Use%:
+// against the capacity actually usable by this (unprivileged) process, i.e.
+// used + available. Filesystems such as ext4 hold back ~5% for root, which is
+// neither usable nor meaningful here — counting it would make the bar read
+// several points lower than df and every monitoring dashboard.
+func (a *App) diskStats() DiskStats {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(a.filesDir, &st); err != nil {
+		return DiskStats{}
+	}
+	bs := int64(st.Bsize)
+	free := int64(st.Bavail) * bs
+	used := int64(st.Blocks-st.Bfree) * bs
+	total := used + free
+	if total <= 0 {
+		return DiskStats{}
+	}
+	return DiskStats{
+		Total:   total,
+		Used:    used,
+		Free:    free,
+		Percent: float64(used) / float64(total) * 100,
+		OK:      true,
+	}
+}
+
 func (a *App) checkDiskFree(incoming int64) error {
 	if a.quota.MinFreeBytes <= 0 {
 		return nil

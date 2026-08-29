@@ -41,6 +41,8 @@ func TestTemplatesRender(t *testing.T) {
 		return map[string]any{
 			"Lang": lang, "I18N": jsStrings(lang), "ReqPath": "/", "Title": "t",
 			"Theme": "light", "User": user, "Active": "upload",
+			"Disk": DiskStats{Total: 500 << 30, Used: 142 << 30, Free: 358 << 30,
+				Percent: 28.4, OK: true},
 		}
 	}
 	merge := func(lang string, extra map[string]any) map[string]any {

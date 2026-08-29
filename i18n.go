@@ -28,6 +28,9 @@ var translations = map[string]map[string]string{
 	"badge.admin":       {"en": "admin", "de": "Admin"},
 	"badge.super":       {"en": "super", "de": "Super"},
 	"badge.you":         {"en": "you", "de": "du"},
+	"disk.label":        {"en": "Disk usage", "de": "Speicherbelegung"},
+	"disk.of":           {"en": "of", "de": "von"},
+	"disk.free":         {"en": "%s free", "de": "%s frei"},
 	"theme.dark":        {"en": "Dark mode", "de": "Dunkler Modus"},
 	"theme.light":       {"en": "Light mode", "de": "Heller Modus"},
 

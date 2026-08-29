@@ -54,6 +54,14 @@
     });
   }
 
+  // ---- disk usage bar ----------------------------------------------------------
+  // Width is applied here rather than as an inline style attribute, which the
+  // Content-Security-Policy (style-src 'self') deliberately forbids.
+  document.querySelectorAll('.disk-fill[data-pct]').forEach((el) => {
+    const pct = parseFloat(el.getAttribute('data-pct'));
+    if (!isNaN(pct)) el.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  });
+
   // ---- localized timestamps --------------------------------------------------
 
   document.querySelectorAll('time[data-ts]').forEach((el) => {
