@@ -161,6 +161,39 @@ func TestE2EScriptIncluded(t *testing.T) {
 	}
 }
 
+// TestSwitcherLinkShape pins the URL shape app.js keys off when it re-attaches
+// the fragment to the language/theme switchers. On a share page that fragment
+// is the decryption key: if these links stop starting with "/lang?" / "/theme?"
+// the selector silently stops matching, switching language drops the key, and
+// nothing else fails. The share pages use the bare shell, so it is checked there.
+func TestSwitcherLinkShape(t *testing.T) {
+	tmpl, err := loadTemplates()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	data := map[string]any{
+		"Lang": "en", "I18N": jsStrings("en"), "ReqPath": "/b/abc", "Title": "t",
+		"Theme": "dark", "User": (*User)(nil), "State": "gone", "Gone": "g",
+		"Disk": DiskStats{OK: true},
+	}
+	var sb strings.Builder
+	if err := tmpl.ExecuteTemplate(&sb, "download.html", data); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	out := sb.String()
+	for _, want := range []string{`href="/lang?`, `href="/theme?`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("bare shell has no link starting %s — app.js cannot re-attach "+
+				"the URL fragment, so switching language would drop the share key", want)
+		}
+	}
+	// The key must never ride in `next`: that is a query string, and reaches
+	// the server. The fragment is re-attached client-side instead.
+	if strings.Contains(out, "next=%2Fb%2Fabc%23") || strings.Contains(out, "next=/b/abc#") {
+		t.Error("switcher link puts a fragment in `next`, sending it to the server")
+	}
+}
+
 // TestJSStringsResolve catches a key listed in jsStrings but absent from the
 // translations map. tr() falls back to the key itself, so the mistake shows up
 // only as a raw "reason_network" rendered in the UI — never as a failure.

@@ -164,3 +164,31 @@ func TestFailLimiter(t *testing.T) {
 		t.Fatal("reset did not unblock")
 	}
 }
+
+// TestIsSafeNextRejectsFragment guards the redirect contract behind the
+// language and theme switchers. `next` is a query parameter, so anything in it
+// reaches the server — and on a share link the fragment is the decryption key.
+// Refusing a fragment also keeps the redirect's Location fragment-free, which
+// is what lets the browser re-attach the caller's own fragment afterwards.
+func TestIsSafeNextRejectsFragment(t *testing.T) {
+	bad := []string{
+		"/b/abc#s3cret",
+		"/files/abc#key",
+		"/#x",
+		"//evil.example/#x",
+		"https://evil.example/",
+		"evil",
+		"",
+	}
+	for _, s := range bad {
+		if isSafeNext(s) {
+			t.Errorf("isSafeNext(%q) = true, want false", s)
+		}
+	}
+	good := []string{"/", "/b/abc", "/history", "/files/abc?x=1"}
+	for _, s := range good {
+		if !isSafeNext(s) {
+			t.Errorf("isSafeNext(%q) = false, want true", s)
+		}
+	}
+}

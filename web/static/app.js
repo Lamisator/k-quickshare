@@ -62,6 +62,25 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 30000);
   }
 
+  // ---- keep the URL fragment across the language / theme switch ------------
+  //
+  // Those switchers are ordinary links to a server redirect. On a share page
+  // the fragment is the decryption KEY, and a plain navigation drops it — so
+  // switching language on /b/{id}#key landed the visitor on a keyless link and
+  // the files became unopenable.
+  //
+  // The key cannot be carried in `next`: that is a query parameter and would
+  // be sent to the server, which is the one thing this design never does.
+  // Instead the fragment is re-attached to the switcher's own URL. A redirect
+  // whose Location has no fragment inherits the request's (RFC 7231 §7.1.2),
+  // so the browser restores it on arrival — and it is still never transmitted,
+  // because browsers do not send fragments at all.
+  if (location.hash.length > 1) {
+    document.querySelectorAll('a[href^="/lang?"], a[href^="/theme?"]').forEach((a) => {
+      a.setAttribute('href', a.getAttribute('href').split('#')[0] + location.hash);
+    });
+  }
+
   // human-readable transfer rate, localized decimal (e.g. "3.2 MB/s" / "3,2 MB/s")
   const rateFmt = new Intl.NumberFormat(LANG === 'de' ? 'de-DE' : 'en-GB', {
     maximumFractionDigits: 1,

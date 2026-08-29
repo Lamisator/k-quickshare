@@ -372,6 +372,15 @@ func isSafeNext(s string) bool {
 	if s == "" || len(s) > 1024 || s[0] != '/' {
 		return false
 	}
+	// A fragment is refused outright. On a share link the fragment IS the
+	// decryption key, and `next` travels in a query string — so anything that
+	// put a fragment here would have handed the key to the server on the way.
+	// Refusing also guarantees the redirect's Location carries no fragment,
+	// which is what lets the browser re-attach the caller's own fragment
+	// (RFC 7231 §7.1.2) and keeps share links intact across the switch.
+	if strings.Contains(s, "#") {
+		return false
+	}
 	u, err := url.Parse(s)
 	if err != nil {
 		return false
