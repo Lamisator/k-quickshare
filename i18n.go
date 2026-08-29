@@ -86,6 +86,8 @@ var translations = map[string]map[string]string{
 	"js.e2e_failed":      {"en": "Decryption failed", "de": "Entschlüsselung fehlgeschlagen"},
 	"js.e2e_wrong_pw":    {"en": "Wrong password — please try again.", "de": "Falsches Passwort — bitte erneut versuchen."},
 	"js.e2e_unsupported": {"en": "This browser cannot decrypt the file (WebCrypto unavailable over an insecure connection).", "de": "Dieser Browser kann die Datei nicht entschlüsseln (WebCrypto ist über eine unsichere Verbindung nicht verfügbar)."},
+	"js.e2e_unavailable": {"en": "Encryption unavailable — upload refused", "de": "Verschlüsselung nicht verfügbar — Upload abgelehnt"},
+	"js.e2e_insecure":    {"en": "Nothing was sent: encryption requires a secure (HTTPS) connection.", "de": "Es wurde nichts gesendet: Die Verschlüsselung erfordert eine sichere (HTTPS-)Verbindung."},
 
 	// --- files / history page ---
 	"files.heading":       {"en": "My files", "de": "Meine Dateien"},
@@ -368,6 +370,7 @@ func jsStrings(lang string) map[string]string {
 		"js.quota", "js.rate_limited", "js.qr_title",
 		"js.e2e_encrypting", "js.e2e_decrypting", "js.e2e_downloading",
 		"js.e2e_deriving", "js.e2e_failed", "js.e2e_wrong_pw", "js.e2e_unsupported",
+		"js.e2e_unavailable", "js.e2e_insecure",
 	}
 	out := make(map[string]string, len(keys))
 	for _, k := range keys {

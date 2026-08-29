@@ -490,9 +490,15 @@
         return;
       }
     } else {
-      // No WebCrypto (insecure context): fall back to server-side encryption.
-      fd.append('file', file);
-      fd.append('password', password || '');
+      // Fail closed. WebCrypto is missing precisely in insecure contexts
+      // (plain HTTP), so falling back to a server-side upload would ship the
+      // plaintext file and the password over the very connection that can't
+      // be trusted — and would do it without telling anyone.
+      row.classList.add('queue-error');
+      status.textContent = t('e2e_unavailable');
+      fill.style.width = '100%';
+      toast(t('e2e_insecure'));
+      return;
     }
 
     const xhr = new XMLHttpRequest();
