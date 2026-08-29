@@ -203,6 +203,7 @@ code {
   gap: 0.5rem;
 }
 
+.logout-form { width: 100%; }
 .logout-btn { gap: 0.4rem; width: 100%; }
 
 .switch-row { display: flex; align-items: center; gap: 0.5rem; }
@@ -638,6 +639,52 @@ code {
 }
 .file-actions form { display: inline; }
 .btn-copy.copied { color: var(--success); border-color: var(--success); }
+
+.file-archived { opacity: 0.55; }
+.file-archived .ficon { color: var(--text-dim); background: var(--surface-2); }
+.file-archived .file-name { color: var(--text-muted); }
+.chip-archived { color: var(--danger); background: var(--danger-soft); border-color: transparent; }
+
+/* ---- QR modal ---- */
+.qr-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 11, 15, 0.7);
+  padding: 1.5rem;
+}
+.qr-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 1.5rem;
+  text-align: center;
+  max-width: 360px;
+  width: 100%;
+}
+.qr-box img {
+  width: 100%;
+  max-width: 280px;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  padding: 10px;
+  box-sizing: border-box;
+}
+.qr-box .qr-title {
+  margin: 0 0 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.qr-box .qr-url {
+  margin: 0.8rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  word-break: break-all;
+}
 
 .empty {
   padding: 2.75rem 1rem;

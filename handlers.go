@@ -31,8 +31,10 @@ type File struct {
 	UploaderName  string
 	ExpiresAt     *time.Time
 	HasPassword   bool
-	MaxDownloads  *int
+	HasLimit      bool
+	MaxDL         int // dereferenced max_downloads; templates must never format the pointer
 	DownloadCount int
+	Archived      bool
 	CanDelete     bool
 	IconKind      string
 }
@@ -56,13 +58,14 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	// Share IDs are bearer secrets: a regular user must only ever see their
 	// own uploads. Admins intentionally get the instance-wide view.
+	// Archived rows (blob deleted, metadata kept 30 days) stay listed.
 	const baseQuery = `SELECT f.id::text, f.original_name, f.stored_name, f.size_bytes, f.content_type,
 		        f.uploaded_at, f.uploaded_by::text, u.username,
 		        f.expires_at, (f.password_hash IS NOT NULL),
-		        f.max_downloads, f.download_count
+		        f.max_downloads, f.download_count, f.archived_at
 		 FROM files f
 		 LEFT JOIN users u ON u.id = f.uploaded_by
-		 WHERE (f.expires_at IS NULL OR f.expires_at > NOW())`
+		 WHERE (f.archived_at IS NOT NULL OR f.expires_at IS NULL OR f.expires_at > NOW())`
 	var (
 		rows pgx.Rows
 		err  error
@@ -82,9 +85,10 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	var (
-		files     []File
-		totalSize int64
-		totalDL   int
+		files       []File
+		activeCount int
+		totalSize   int64
+		totalDL     int
 	)
 	for rows.Next() {
 		var (
@@ -93,10 +97,11 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 			uploader   *string
 			expires    *time.Time
 			maxDL      *int
+			archivedAt *time.Time
 		)
 		if err := rows.Scan(&f.ID, &f.OriginalName, &f.StoredName, &f.Size, &f.ContentType,
 			&f.UploadedAt, &uploaderID, &uploader,
-			&expires, &f.HasPassword, &maxDL, &f.DownloadCount); err != nil {
+			&expires, &f.HasPassword, &maxDL, &f.DownloadCount, &archivedAt); err != nil {
 			httpError(w, err, http.StatusInternalServerError)
 			return
 		}
@@ -105,10 +110,19 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 			f.UploaderName = *uploader
 		}
 		f.ExpiresAt = expires
-		f.MaxDownloads = maxDL
+		if maxDL != nil {
+			f.HasLimit = true
+			f.MaxDL = *maxDL
+		}
+		f.Archived = archivedAt != nil ||
+			(expires != nil && time.Now().After(*expires)) ||
+			(f.HasLimit && f.DownloadCount >= f.MaxDL)
 		f.CanDelete = user.IsAdmin || (uploaderID != nil && *uploaderID == user.ID.String())
 		f.IconKind = iconKind(f.ContentType, f.OriginalName)
-		totalSize += f.Size
+		if !f.Archived {
+			activeCount++
+			totalSize += f.Size
+		}
 		totalDL += f.DownloadCount
 		files = append(files, f)
 	}
@@ -118,11 +132,12 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.render(w, r, "history.html", map[string]any{
-		"Title":     a.tr(r, "title.files") + " · k-fileshare",
-		"Active":    "files",
-		"Files":     files,
-		"TotalSize": totalSize,
-		"TotalDL":   totalDL,
+		"Title":       a.tr(r, "title.files") + " · k-fileshare",
+		"Active":      "files",
+		"Files":       files,
+		"ActiveCount": activeCount,
+		"TotalSize":   totalSize,
+		"TotalDL":     totalDL,
 	})
 }
 
@@ -157,7 +172,7 @@ func (a *App) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		a.renderLoginError(w, r, a.tr(r, "login.err_empty"), next)
 		return
 	}
-	limitKey := clientIP(r) + "|" + strings.ToLower(username)
+	limitKey := a.clientIP(r) + "|" + strings.ToLower(username)
 	if !a.loginLimiter.allow(limitKey) {
 		a.renderStatus(w, r, http.StatusTooManyRequests, "login.html", map[string]any{
 			"Title":       a.tr(r, "title.login") + " · k-fileshare",
@@ -197,6 +212,13 @@ func (a *App) renderLoginError(w http.ResponseWriter, r *http.Request, msg, next
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// POST-only: logout mutates state, and the same-origin middleware only
+	// covers non-GET methods — a GET logout would remain CSRF-triggerable
+	// via a simple cross-site <img> tag.
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	sid := readSessionCookie(r)
 	a.deleteSession(r.Context(), sid)
 	clearSessionCookie(w, a.cookieSecure)
@@ -245,9 +267,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cheap pre-check before writing anything to disk; the exact size is
-	// enforced again below once it is known.
-	if err := a.checkQuota(r.Context(), user, 0); err != nil {
+	// Reserve quota atomically BEFORE writing anything to disk. The request
+	// Content-Length is a slight overestimate of the file size (multipart
+	// overhead), which is exactly the conservative direction we want; when
+	// it's unknown the full per-file maximum is reserved.
+	resID, err := a.reserveUpload(r.Context(), user, r.ContentLength)
+	if err != nil {
 		if errors.Is(err, errQuotaExceeded) {
 			http.Error(w, err.Error(), http.StatusInsufficientStorage)
 			return
@@ -255,6 +280,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
+	reserved := true
+	defer func() {
+		if reserved {
+			a.releaseReservation(resID)
+		}
+	}()
 
 	id := uuid.New()
 	storedName := id.String()
@@ -301,7 +332,29 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file exceeds max size", http.StatusRequestEntityTooLarge)
 		return
 	}
-	if err := a.checkQuota(r.Context(), user, written); err != nil {
+
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	origName := sanitizeName(header.Filename)
+
+	// Swap the reservation for the real row under the quota lock, re-checking
+	// against the actual size.
+	err = a.finalizeUpload(r.Context(), user, resID, written, func(tx pgx.Tx) error {
+		_, err := tx.Exec(r.Context(),
+			`INSERT INTO files (id, original_name, stored_name, size_bytes, content_type,
+			                    uploaded_by, expires_at, password_hash, max_downloads,
+			                    enc_version, enc_key)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			id.String(), origName, storedName, written, contentType,
+			user.ID.String(), expiresAt, passwordHash, maxDownloads,
+			encVersion, wrappedDEK)
+		return err
+	})
+	if err != nil {
+		// The rollback restored the reservation row; the deferred release
+		// removes it.
 		_ = os.Remove(dstPath)
 		if errors.Is(err, errQuotaExceeded) {
 			http.Error(w, err.Error(), http.StatusInsufficientStorage)
@@ -310,26 +363,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-
-	contentType := header.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	origName := sanitizeName(header.Filename)
-
-	_, err = a.db.Exec(r.Context(),
-		`INSERT INTO files (id, original_name, stored_name, size_bytes, content_type,
-		                    uploaded_by, expires_at, password_hash, max_downloads,
-		                    enc_version, enc_key)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		id.String(), origName, storedName, written, contentType,
-		user.ID.String(), expiresAt, passwordHash, maxDownloads,
-		encVersion, wrappedDEK)
-	if err != nil {
-		_ = os.Remove(dstPath)
-		httpError(w, err, http.StatusInternalServerError)
-		return
-	}
+	reserved = false // reservation row consumed by finalizeUpload
 
 	shareURL := "/files/" + id.String()
 	if wantsJSON(r) {
@@ -361,6 +395,7 @@ type fileMeta struct {
 	DownloadCount int
 	EncVersion    int
 	EncKey        []byte
+	ArchivedAt    *time.Time
 }
 
 // dispatchFileRoutes handles /files/{id}, /files/{id}/download, /files/{id}/preview.
@@ -382,12 +417,12 @@ func (a *App) dispatchFileRoutes(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	if fm.ExpiresAt != nil && time.Now().After(*fm.ExpiresAt) {
-		a.renderGone(w, r, http.StatusGone, "dl.gone_expired")
-		return
-	}
 	if fm.MaxDownloads != nil && fm.DownloadCount >= *fm.MaxDownloads {
 		a.renderGone(w, r, http.StatusGone, "dl.gone_limit")
+		return
+	}
+	if fm.ArchivedAt != nil || (fm.ExpiresAt != nil && time.Now().After(*fm.ExpiresAt)) {
+		a.renderGone(w, r, http.StatusGone, "dl.gone_expired")
 		return
 	}
 
@@ -422,11 +457,11 @@ func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	err := a.db.QueryRow(r.Context(),
 		`SELECT original_name, stored_name, size_bytes, content_type, uploaded_at,
 		        expires_at, password_hash, max_downloads, download_count,
-		        enc_version, enc_key
+		        enc_version, enc_key, archived_at
 		 FROM files WHERE id = $1`, id.String()).
 		Scan(&fm.OriginalName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
 			&fm.ExpiresAt, &fm.PasswordHash, &fm.MaxDownloads, &fm.DownloadCount,
-			&fm.EncVersion, &fm.EncKey)
+			&fm.EncVersion, &fm.EncKey, &fm.ArchivedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +482,7 @@ func (a *App) handleFileLanding(w http.ResponseWriter, r *http.Request, fm *file
 	locked := fm.PasswordHash != nil && !a.isUnlocked(r, fm)
 
 	if r.Method == http.MethodPost && locked {
-		limitKey := clientIP(r) + "|" + fm.ID
+		limitKey := a.clientIP(r) + "|" + fm.ID
 		if !a.shareLimiter.allow(limitKey) {
 			a.renderStatus(w, r, http.StatusTooManyRequests, "download.html", map[string]any{
 				"Title": a.tr(r, "title.download") + " · k-fileshare",
@@ -526,7 +561,7 @@ func (a *App) checkFileAccess(w http.ResponseWriter, r *http.Request, fm *fileMe
 		return true
 	}
 	if submitted := r.Header.Get("X-Share-Password"); submitted != "" {
-		limitKey := clientIP(r) + "|" + fm.ID
+		limitKey := a.clientIP(r) + "|" + fm.ID
 		if !a.shareLimiter.allow(limitKey) {
 			http.Error(w, "too many attempts", http.StatusTooManyRequests)
 			return false
@@ -559,6 +594,12 @@ func (a *App) handleFileDownload(w http.ResponseWriter, r *http.Request, fm *fil
 		return
 	}
 	a.serveFileBlob(w, r, fm, true)
+
+	// If this consumed the final download slot, retire the blob right away:
+	// the row stays listed as expired for 30 days, but the bytes are gone.
+	if fm.MaxDownloads != nil && fm.DownloadCount+1 >= *fm.MaxDownloads {
+		a.archiveFile(r.Context(), fm.ID, fm.StoredName)
+	}
 }
 
 // handleFilePreview streams the file inline for the landing-page preview.

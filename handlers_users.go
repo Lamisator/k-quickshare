@@ -97,12 +97,13 @@ func (a *App) renderAdminUsers(w http.ResponseWriter, r *http.Request, status in
 	}
 	me := userFromContext(r.Context())
 	a.renderStatus(w, r, status, "admin_users.html", map[string]any{
-		"Title":   a.tr(r, "title.users") + " · k-fileshare",
-		"Active":  "users",
-		"Users":   users,
-		"MeID":    me.ID.String(),
-		"Error":   errMsg,
-		"Success": okMsg,
+		"Title":     a.tr(r, "title.users") + " · k-fileshare",
+		"Active":    "users",
+		"Users":     users,
+		"MeID":      me.ID.String(),
+		"MeIsSuper": me.IsSuperAdmin,
+		"Error":     errMsg,
+		"Success":   okMsg,
 	})
 }
 
@@ -145,6 +146,24 @@ func (a *App) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseAdminUserID(w, r, "/password")
 	if !ok {
+		return
+	}
+	// Resetting a password takes over the account. The super-admin is
+	// protected from demotion and deletion by ordinary admins; without this
+	// guard, a credential reset would be a trivial way around both.
+	me := userFromContext(r.Context())
+	var targetIsSuper bool
+	if err := a.db.QueryRow(r.Context(),
+		`SELECT is_super_admin FROM users WHERE id = $1`, id.String()).Scan(&targetIsSuper); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	if targetIsSuper && !me.IsSuperAdmin {
+		a.renderAdminUsers(w, r, http.StatusForbidden, a.tr(r, "msg.super_pw"), "")
 		return
 	}
 	if err := r.ParseForm(); err != nil {

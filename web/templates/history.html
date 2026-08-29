@@ -18,7 +18,7 @@
 
 <div class="stats-row">
   <div class="stat-card">
-    <span class="stat-value">{{len .Files}}</span>
+    <span class="stat-value">{{.ActiveCount}}</span>
     <span class="stat-label">{{T .Lang "files.stat_count"}}</span>
   </div>
   <div class="stat-card">
@@ -39,16 +39,18 @@
 
 <ul class="file-list" id="file-list">
   {{range .Files}}
-  <li class="file-item" data-search="{{.OriginalName}} {{.ContentType}} {{.UploaderName}}">
+  <li class="file-item{{if .Archived}} file-archived{{end}}" data-search="{{.OriginalName}} {{.ContentType}} {{.UploaderName}}">
     {{template "fileicon" .IconKind}}
     <div class="file-main">
       <div class="file-name-row">
-        <a class="file-name" href="/files/{{.ID}}">{{.OriginalName}}</a>
+        {{if .Archived}}<span class="file-name">{{.OriginalName}}</span>
+        {{else}}<a class="file-name" href="/files/{{.ID}}">{{.OriginalName}}</a>{{end}}
+        {{if .Archived}}<span class="chip chip-archived">{{T $.Lang "files.archived"}}</span>{{end}}
         {{if .HasPassword}}<span class="chip chip-lock" title="{{T $.Lang "js.protected"}}">
           <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
           {{T $.Lang "files.protected"}}</span>{{end}}
-        {{if .ExpiresAt}}<span class="chip chip-expiry" title="{{formatTime .ExpiresAt.UTC}}">{{T $.Lang "files.expires_in" (until $.Lang .ExpiresAt.UTC)}}</span>{{end}}
-        {{if .MaxDownloads}}<span class="chip">{{T $.Lang "files.dl_of" .DownloadCount .MaxDownloads}}</span>
+        {{if and .ExpiresAt (not .Archived)}}<span class="chip chip-expiry" title="{{formatTime .ExpiresAt.UTC}}">{{T $.Lang "files.expires_in" (until $.Lang .ExpiresAt.UTC)}}</span>{{end}}
+        {{if .HasLimit}}<span class="chip">{{T $.Lang "files.dl_of" .DownloadCount .MaxDL}}</span>
         {{else if eq .DownloadCount 1}}<span class="chip">{{T $.Lang "files.dl_one"}}</span>
         {{else if gt .DownloadCount 0}}<span class="chip">{{T $.Lang "files.dl_count" .DownloadCount}}</span>{{end}}
       </div>
@@ -60,11 +62,17 @@
       </div>
     </div>
     <div class="file-actions">
+      {{if not .Archived}}
       <button type="button" class="btn btn-ghost btn-sm btn-copy" data-copy="/files/{{.ID}}">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         {{T $.Lang "js.copy"}}
       </button>
+      <button type="button" class="btn btn-ghost btn-sm btn-qr" data-qr-img="/qr/{{.ID}}" data-qr-url="/files/{{.ID}}" title="{{T $.Lang "files.qr"}}">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14h1M14 20h1M18 18h3v3h-3z"/></svg>
+        QR
+      </button>
       <a class="btn btn-ghost btn-sm" href="/files/{{.ID}}" target="_blank" rel="noopener">{{T $.Lang "files.open"}}</a>
+      {{end}}
       {{if .CanDelete}}
       <form class="file-delete" action="/delete/{{.ID}}" method="post" data-confirm="{{T $.Lang "js.confirm_delete" .OriginalName}}">
         <button type="submit" class="btn btn-danger btn-sm" title="{{T $.Lang "files.delete"}}">

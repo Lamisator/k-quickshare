@@ -74,11 +74,16 @@ func (a *App) handleAdminSettingsOIDC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	encSecret, err := a.encryptSecret(clientSecret)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
 	if err := a.saveSettings(r.Context(), map[string]string{
 		"oidc.enabled":        boolStr(enabled),
 		"oidc.issuer":         issuer,
 		"oidc.client_id":      clientID,
-		"oidc.client_secret":  a.encryptSecret(clientSecret),
+		"oidc.client_secret":  encSecret,
 		"oidc.redirect_url":   redirect,
 		"oidc.allowed_domain": allowedDomain,
 	}); err != nil {

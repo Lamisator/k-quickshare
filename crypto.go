@@ -195,19 +195,21 @@ func (r *encReader) Seek(offset int64, whence int) (int64, error) {
 
 // --- small-secret encryption (settings values) ------------------------------
 
-// encryptSecret protects a short string with the KEK; returns the input
-// unchanged when no KEK is configured.
-func (a *App) encryptSecret(s string) string {
+// encryptSecret protects a short string with the KEK. It returns the input
+// unchanged only when at-rest encryption is disabled entirely (no KEK, which
+// requires the explicit ALLOW_UNENCRYPTED_STORAGE opt-out at startup); any
+// cryptographic failure is an error, never a silent plaintext fallback.
+func (a *App) encryptSecret(s string) (string, error) {
 	if len(a.fileKEK) == 0 || s == "" {
-		return s
+		return s, nil
 	}
 	aead, err := newAEAD(a.fileKEK)
 	if err != nil {
-		return s
+		return "", fmt.Errorf("encrypt secret: %w", err)
 	}
 	nonce := randomBytes(aead.NonceSize())
 	blob := append(nonce, aead.Seal(nil, nonce, []byte(s), nil)...)
-	return secretPrefix + base64.StdEncoding.EncodeToString(blob)
+	return secretPrefix + base64.StdEncoding.EncodeToString(blob), nil
 }
 
 // decryptSecret reverses encryptSecret; plaintext legacy values pass through.

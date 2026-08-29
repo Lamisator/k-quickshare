@@ -24,12 +24,12 @@ func TestTemplatesRender(t *testing.T) {
 	files := []File{
 		{ID: uuid.NewString(), OriginalName: "photo.jpg", Size: 12345, ContentType: "image/jpeg",
 			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid, ExpiresAt: &exp,
-			HasPassword: true, DownloadCount: 3, CanDelete: true, IconKind: "image"},
+			HasPassword: true, HasLimit: true, MaxDL: 3, DownloadCount: 3, CanDelete: true, IconKind: "image"},
 		{ID: uuid.NewString(), OriginalName: "notes.txt", Size: 42, ContentType: "text/plain",
 			UploadedAt: now, DownloadCount: 1, IconKind: "text"},
+		{ID: uuid.NewString(), OriginalName: "old.zip", Size: 99, ContentType: "application/zip",
+			UploadedAt: now, DownloadCount: 5, Archived: true, CanDelete: true, IconKind: "archive"},
 	}
-	three := 3
-	files[0].MaxDownloads = &three
 
 	userRows := []UserRow{
 		{ID: uid, Username: "marius", Email: "m@example.com", IsAdmin: true,
@@ -52,12 +52,13 @@ func TestTemplatesRender(t *testing.T) {
 	}
 
 	cases := map[string]map[string]any{
-		"index.html":   {"MaxUpload": int64(1 << 30)},
-		"history.html": {"Active": "files", "Files": files, "TotalSize": int64(999), "TotalDL": 4},
+		"index.html": {"MaxUpload": int64(1 << 30)},
+		"history.html": {"Active": "files", "Files": files, "ActiveCount": 2,
+			"TotalSize": int64(999), "TotalDL": 4},
 		"login.html":   {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
 		"account.html": {"Active": "account", "Error": "", "Success": "ok"},
 		"admin_users.html": {"Active": "users", "Users": userRows, "MeID": uid,
-			"Error": "", "Success": ""},
+			"MeIsSuper": false, "Error": "", "Success": ""},
 		"admin_settings.html": {"Active": "settings", "OIDC": OIDCSettings{Issuer: "https://x"},
 			"OIDCLive": false, "Error": "", "Success": ""},
 		"oidc_denied.html": {"User": (*User)(nil), "AllowedDomain": "a.example", "ActualDomain": "b.example"},

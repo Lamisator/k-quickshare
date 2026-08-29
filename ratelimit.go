@@ -80,18 +80,53 @@ func (l *failLimiter) cleanupLoop() {
 	}
 }
 
-// clientIP extracts the caller address. The app is only reachable through the
-// reverse proxy (no published ports), so the first X-Forwarded-For hop is
-// trustworthy; RemoteAddr is the fallback.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, ok := strings.Cut(xff, ","); ok || first != "" {
-			return strings.TrimSpace(first)
+// parseTrustedProxies parses the TRUSTED_PROXY_CIDRS env value (comma-
+// separated CIDRs). An empty list means X-Forwarded-For is never trusted.
+func parseTrustedProxies(v string) ([]*net.IPNet, error) {
+	var nets []*net.IPNet
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
 		}
+		_, n, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, err
+		}
+		nets = append(nets, n)
 	}
+	return nets, nil
+}
+
+// clientIP extracts the caller address for rate-limit keying. X-Forwarded-For
+// is client-controlled, so it is honored ONLY when the direct peer is inside
+// a configured trusted-proxy network — and then the LAST entry is used (the
+// one our own proxy appended), never attacker-prefixed earlier hops. In all
+// other cases the TCP peer address is used.
+func (a *App) clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	peer := net.ParseIP(host)
+	if peer == nil || len(a.trustedProxies) == 0 {
+		return host
+	}
+	trusted := false
+	for _, n := range a.trustedProxies {
+		if n.Contains(peer) {
+			trusted = true
+			break
+		}
+	}
+	if !trusted {
+		return host
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	parts := strings.Split(xff, ",")
+	last := strings.TrimSpace(parts[len(parts)-1])
+	if net.ParseIP(last) != nil {
+		return last
 	}
 	return host
 }

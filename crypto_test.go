@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,7 +91,10 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 
 func TestSecretRoundTrip(t *testing.T) {
 	app := &App{fileKEK: randomBytes(32)}
-	enc := app.encryptSecret("hunter2-client-secret")
+	enc, err := app.encryptSecret("hunter2-client-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if enc == "hunter2-client-secret" {
 		t.Fatal("secret not encrypted")
 	}
@@ -101,10 +106,45 @@ func TestSecretRoundTrip(t *testing.T) {
 	if v, err := app.decryptSecret("plain"); err != nil || v != "plain" {
 		t.Fatalf("legacy passthrough: %q %v", v, err)
 	}
-	// No KEK → identity.
+	// No KEK (explicit unencrypted opt-out) → identity.
 	nokek := &App{}
-	if nokek.encryptSecret("x") != "x" {
-		t.Fatal("no-KEK encrypt should be identity")
+	if v, err := nokek.encryptSecret("x"); err != nil || v != "x" {
+		t.Fatalf("no-KEK encrypt should be identity: %q %v", v, err)
+	}
+}
+
+func TestClientIPTrustedProxy(t *testing.T) {
+	nets, err := parseTrustedProxies("172.16.0.0/12, 10.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{trustedProxies: nets}
+	req := func(remote, xff string) *http.Request {
+		r := httptest.NewRequest("POST", "/login", nil)
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+
+	// Trusted proxy peer: the LAST XFF entry (appended by our proxy) wins,
+	// attacker-prefixed earlier entries are ignored.
+	if got := app.clientIP(req("172.18.0.5:1234", "1.1.1.1, 9.9.9.9")); got != "9.9.9.9" {
+		t.Errorf("trusted proxy: got %q, want 9.9.9.9", got)
+	}
+	// Untrusted peer: XFF is ignored entirely.
+	if got := app.clientIP(req("203.0.113.7:5555", "1.1.1.1")); got != "203.0.113.7" {
+		t.Errorf("untrusted peer: got %q, want 203.0.113.7", got)
+	}
+	// No trusted proxies configured: XFF never honored.
+	bare := &App{}
+	if got := bare.clientIP(req("172.18.0.5:1234", "1.1.1.1")); got != "172.18.0.5" {
+		t.Errorf("no proxies: got %q, want 172.18.0.5", got)
+	}
+	// Garbage XFF from a trusted peer falls back to the peer address.
+	if got := app.clientIP(req("172.18.0.5:1234", "not-an-ip")); got != "172.18.0.5" {
+		t.Errorf("garbage XFF: got %q, want 172.18.0.5", got)
 	}
 }
 

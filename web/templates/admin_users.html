@@ -60,6 +60,9 @@
       </td>
       <td><span class="muted"><time data-ts="{{rfc3339 .CreatedAt}}">{{formatDate .CreatedAt}}</time></span></td>
       <td class="row-actions">
+        {{if and .IsSuperAdmin (not $.MeIsSuper)}}
+        <button type="button" class="btn btn-ghost btn-sm" disabled title="{{T $.Lang "users.t_super_pw"}}">{{T $.Lang "users.reset_pw"}}</button>
+        {{else}}
         <details class="row-action">
           <summary class="btn btn-ghost btn-sm">{{T $.Lang "users.reset_pw"}}</summary>
           <form method="post" action="/admin/users/{{.ID}}/password" class="inline-form" autocomplete="off">
@@ -67,6 +70,7 @@
             <button type="submit" class="btn btn-primary btn-sm">{{T $.Lang "users.save"}}</button>
           </form>
         </details>
+        {{end}}
         <form method="post" action="/admin/users/{{.ID}}/admin" class="inline-form">
           <input type="hidden" name="value" value="{{if .IsAdmin}}off{{else}}on{{end}}">
           <button type="submit" class="btn btn-ghost btn-sm"

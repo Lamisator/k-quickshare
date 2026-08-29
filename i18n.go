@@ -77,6 +77,7 @@ var translations = map[string]map[string]string{
 	"js.no_results":     {"en": "No files match your search.", "de": "Keine Dateien entsprechen deiner Suche."},
 	"js.quota":          {"en": "Storage limit reached", "de": "Speicherlimit erreicht"},
 	"js.rate_limited":   {"en": "Too many attempts", "de": "Zu viele Versuche"},
+	"js.qr_title":       {"en": "Scan to open the share link", "de": "Scannen, um den Freigabe-Link zu öffnen"},
 
 	// --- files / history page ---
 	"files.heading":       {"en": "My files", "de": "Meine Dateien"},
@@ -95,6 +96,8 @@ var translations = map[string]map[string]string{
 	"files.dl_count":      {"en": "%d downloads", "de": "%d Downloads"},
 	"files.dl_one":        {"en": "1 download", "de": "1 Download"},
 	"files.by":            {"en": "by %s", "de": "von %s"},
+	"files.archived":      {"en": "expired", "de": "abgelaufen"},
+	"files.qr":            {"en": "Show QR code", "de": "QR-Code anzeigen"},
 
 	// --- relative time ---
 	"time.expired": {"en": "expired", "de": "abgelaufen"},
@@ -184,6 +187,7 @@ var translations = map[string]map[string]string{
 	"users.t_super_revoke": {"en": "Super-admin rights can't be revoked", "de": "Super-Admin-Rechte können nicht entzogen werden"},
 	"users.t_self_revoke":  {"en": "You can't revoke your own admin rights", "de": "Du kannst dir deine Admin-Rechte nicht selbst entziehen"},
 	"users.t_super_delete": {"en": "Super-admin can't be deleted", "de": "Der Super-Admin kann nicht gelöscht werden"},
+	"users.t_super_pw":     {"en": "Only a super-admin can reset a super-admin's password", "de": "Nur ein Super-Admin kann das Passwort eines Super-Admins zurücksetzen"},
 	"users.t_self_delete":  {"en": "You can't delete yourself", "de": "Du kannst dich nicht selbst löschen"},
 	"users.confirm_delete": {"en": "Delete user “%s”?", "de": "Benutzer „%s“ löschen?"},
 	"msg.user_required":    {"en": "Username is required.", "de": "Benutzername ist erforderlich."},
@@ -191,6 +195,7 @@ var translations = map[string]map[string]string{
 	"msg.user_exists":      {"en": "A user with that username already exists.", "de": "Ein Benutzer mit diesem Namen existiert bereits."},
 	"msg.user_created":     {"en": "Created user %s.", "de": "Benutzer %s angelegt."},
 	"msg.pw_reset":         {"en": "Password reset.", "de": "Passwort zurückgesetzt."},
+	"msg.super_pw":         {"en": "Only a super-admin can reset a super-admin's password.", "de": "Nur ein Super-Admin kann das Passwort eines Super-Admins zurücksetzen."},
 	"msg.super_revoke":     {"en": "The super-admin's admin rights can't be revoked.", "de": "Die Admin-Rechte des Super-Admins können nicht entzogen werden."},
 	"msg.self_revoke":      {"en": "You can't revoke your own admin rights.", "de": "Du kannst dir deine Admin-Rechte nicht selbst entziehen."},
 	"msg.last_admin":       {"en": "Can't revoke the last admin.", "de": "Der letzte Admin kann nicht entzogen werden."},
@@ -347,7 +352,7 @@ func jsStrings(lang string) map[string]string {
 		"js.done", "js.failed", "js.too_large", "js.login", "js.network",
 		"js.copy", "js.copied", "js.toast_copied", "js.toast_copyerr",
 		"js.confirm_delete", "js.protected", "js.no_results",
-		"js.quota", "js.rate_limited",
+		"js.quota", "js.rate_limited", "js.qr_title",
 	}
 	out := make(map[string]string, len(keys))
 	for _, k := range keys {

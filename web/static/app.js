@@ -83,6 +83,42 @@
     }
   });
 
+  // ---- QR share modal ----------------------------------------------------------
+
+  function showQR(imgSrc, shareUrl) {
+    const overlay = document.createElement('div');
+    overlay.className = 'qr-modal';
+    const box = document.createElement('div');
+    box.className = 'qr-box';
+    const title = document.createElement('p');
+    title.className = 'qr-title';
+    title.textContent = t('qr_title');
+    const img = document.createElement('img');
+    img.src = imgSrc;
+    img.alt = 'QR';
+    const urlP = document.createElement('p');
+    urlP.className = 'qr-url';
+    urlP.textContent = shareUrl;
+    box.appendChild(title);
+    box.appendChild(img);
+    box.appendChild(urlP);
+    overlay.appendChild(box);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+    });
+    document.body.appendChild(overlay);
+  }
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-qr');
+    if (!btn) return;
+    e.preventDefault();
+    const shareUrl = new URL(btn.getAttribute('data-qr-url'), location.href).toString();
+    showQR(btn.getAttribute('data-qr-img'), shareUrl);
+  });
+
   // ---- localized delete confirmations -----------------------------------------
 
   document.querySelectorAll('form[data-confirm]').forEach((form) => {
@@ -283,8 +319,16 @@
     btn.setAttribute('data-copy', res.url);
     btn.textContent = t('copy');
 
+    const qrBtn = document.createElement('button');
+    qrBtn.type = 'button';
+    qrBtn.className = 'btn btn-ghost btn-sm btn-qr';
+    qrBtn.setAttribute('data-qr-img', '/qr/' + res.id);
+    qrBtn.setAttribute('data-qr-url', res.url);
+    qrBtn.textContent = 'QR';
+
     wrap.appendChild(input);
     wrap.appendChild(btn);
+    wrap.appendChild(qrBtn);
     if (res.hasPassword) {
       const chip = document.createElement('span');
       chip.className = 'chip chip-lock';

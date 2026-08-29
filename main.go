@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,6 +37,8 @@ type App struct {
 	fileKEK      []byte // key-encryption key for at-rest file encryption (nil = disabled)
 
 	quota QuotaConfig
+
+	trustedProxies []*net.IPNet // networks whose X-Forwarded-For is honored
 
 	loginLimiter *failLimiter
 	shareLimiter *failLimiter
@@ -100,7 +103,13 @@ func main() {
 		log.Fatalf("file encryption key: %v", err)
 	}
 	if fileKEK == nil {
-		log.Print("WARNING: FILE_ENCRYPTION_KEY not set — uploads will be stored UNENCRYPTED")
+		// Fail closed: missing security configuration must never silently
+		// downgrade storage to plaintext.
+		if !envBool("ALLOW_UNENCRYPTED_STORAGE", false) {
+			log.Fatal("FILE_ENCRYPTION_KEY is required (generate one with `openssl rand -hex 32`; " +
+				"set ALLOW_UNENCRYPTED_STORAGE=true to explicitly run without at-rest encryption)")
+		}
+		log.Print("WARNING: ALLOW_UNENCRYPTED_STORAGE=true — uploads will be stored UNENCRYPTED")
 	}
 
 	app := &App{
@@ -119,6 +128,10 @@ func main() {
 		},
 		loginLimiter: newFailLimiter(10, 10*time.Minute),
 		shareLimiter: newFailLimiter(10, 10*time.Minute),
+	}
+	app.trustedProxies, err = parseTrustedProxies(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		log.Fatalf("TRUSTED_PROXY_CIDRS: %v", err)
 	}
 
 	if err := app.bootstrapAdmin(ctx, adminUser, adminPass); err != nil {
@@ -163,6 +176,7 @@ func main() {
 	// gated (any user)
 	mux.Handle("/", app.requireUserHandler(app.handleUploadPage))
 	mux.Handle("/history", app.requireUserHandler(app.handleHistory))
+	mux.Handle("/qr/", app.requireUserHandler(app.handleQR))
 	mux.Handle("/upload", app.requireUserHandler(app.handleUpload))
 	mux.Handle("/delete/", app.requireUserHandler(app.handleDelete))
 	mux.Handle("/account", app.requireUserHandler(app.handleAccount))

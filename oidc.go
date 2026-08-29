@@ -93,8 +93,12 @@ func (a *App) loadAndApplyOIDC(ctx context.Context) error {
 	}
 	// One-time migration: re-persist a legacy plaintext secret encrypted.
 	if secret != "" && stored == secret && len(a.fileKEK) > 0 {
+		enc, err := a.encryptSecret(secret)
+		if err != nil {
+			return err
+		}
 		if err := a.saveSettings(ctx, map[string]string{
-			"oidc.client_secret": a.encryptSecret(secret),
+			"oidc.client_secret": enc,
 		}); err != nil {
 			log.Printf("oidc: re-encrypt stored client secret: %v", err)
 		} else {
@@ -158,11 +162,15 @@ func (a *App) seedOIDCFromEnv(ctx context.Context, issuer, clientID, clientSecre
 	if issuer == "" && clientID == "" && clientSecret == "" && redirect == "" {
 		return nil
 	}
+	encSecret, err := a.encryptSecret(clientSecret)
+	if err != nil {
+		return err
+	}
 	kv := map[string]string{
 		"oidc.enabled":        "true",
 		"oidc.issuer":         issuer,
 		"oidc.client_id":      clientID,
-		"oidc.client_secret":  a.encryptSecret(clientSecret),
+		"oidc.client_secret":  encSecret,
 		"oidc.redirect_url":   redirect,
 		"oidc.allowed_domain": allowedDomain,
 	}

@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS files (
 );
 ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_key BYTEA;
+ALTER TABLE files ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS upload_reservations (
+	id         UUID PRIMARY KEY,
+	user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	bytes      BIGINT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 CREATE INDEX IF NOT EXISTS files_uploaded_at_idx ON files (uploaded_at DESC);
 CREATE INDEX IF NOT EXISTS files_expires_at_idx  ON files (expires_at) WHERE expires_at IS NOT NULL;
 `
