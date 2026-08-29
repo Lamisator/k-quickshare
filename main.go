@@ -103,13 +103,15 @@ func main() {
 		log.Fatalf("file encryption key: %v", err)
 	}
 	if fileKEK == nil {
-		// Fail closed: missing security configuration must never silently
-		// downgrade storage to plaintext.
-		if !envBool("ALLOW_UNENCRYPTED_STORAGE", false) {
+		// The KEK no longer touches uploaded files — those arrive already
+		// encrypted under a key the server never sees. It now protects short
+		// secrets in the settings table, principally the OIDC client secret,
+		// and a missing key must not silently downgrade those to plaintext.
+		if !envBool("ALLOW_UNENCRYPTED_SECRETS", false) {
 			log.Fatal("FILE_ENCRYPTION_KEY is required (generate one with `openssl rand -hex 32`; " +
-				"set ALLOW_UNENCRYPTED_STORAGE=true to explicitly run without at-rest encryption)")
+				"set ALLOW_UNENCRYPTED_SECRETS=true to explicitly store settings secrets in plaintext)")
 		}
-		log.Print("WARNING: ALLOW_UNENCRYPTED_STORAGE=true — uploads will be stored UNENCRYPTED")
+		log.Print("WARNING: ALLOW_UNENCRYPTED_SECRETS=true — the OIDC client secret will be stored UNENCRYPTED")
 	}
 
 	app := &App{
@@ -146,7 +148,6 @@ func main() {
 	}
 
 	app.startSweeper(ctx, time.Minute)
-	app.encryptLegacyFiles(ctx)
 
 	mux := http.NewServeMux()
 

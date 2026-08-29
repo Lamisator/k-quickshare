@@ -69,7 +69,7 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	const baseQuery = `SELECT f.id::text, f.original_name, f.stored_name, f.size_bytes, f.content_type,
 		        f.uploaded_at, f.uploaded_by::text, u.username,
 		        COALESCE(b.expires_at, f.expires_at),
-		        (f.password_hash IS NOT NULL OR f.key_mode = 4),
+		        (f.key_mode = 4),
 		        COALESCE(b.max_downloads, f.max_downloads),
 		        COALESCE(b.download_count, f.download_count),
 		        COALESCE(b.archived_at, f.archived_at),
@@ -122,7 +122,7 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err, http.StatusInternalServerError)
 			return
 		}
-		f.Keyed = keyMode == keyModeURL || keyMode == keyModeE2EURL
+		f.Keyed = keyMode == keyModeE2EURL
 		if batchKeyMode != nil {
 			// The batch, not the member, decides how the share is unlocked: a
 			// password batch has a reproducible link, a fragment batch does not.
@@ -275,16 +275,6 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	password := r.FormValue("password")
-	var passwordHash *string
-	if password != "" {
-		h, err := hashPassword(password)
-		if err != nil {
-			httpError(w, err, http.StatusInternalServerError)
-			return
-		}
-		passwordHash = &h
-	}
 	maxDownloads, err := parseMaxDownloads(r.FormValue("max_downloads"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -327,7 +317,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid wrapped_key", http.StatusBadRequest)
 			return
 		}
-		expiresAt, maxDownloads, passwordHash = nil, nil, nil
+		expiresAt, maxDownloads = nil, nil
 	}
 
 	// Reserve quota atomically BEFORE writing anything to disk. The request
@@ -360,85 +350,54 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Two upload flavors, both leaving the server unable to decrypt at rest:
-	//
-	// End-to-end (e2e=1, the browser UI): the client already encrypted the
-	// blob in the shared chunk format and holds all key material. The server
-	// only validates the ciphertext geometry and stores it. For password
-	// links the client sends a separately-derived auth token whose hash
-	// gates the ciphertext; the password itself never reaches the server.
-	//
-	// Server-assisted (API/curl uploads of plaintext): the server encrypts
-	// with a fresh DEK wrapped either by an HKDF of the URL-fragment secret
-	// or by an Argon2id derivation of the password.
+	// Uploads are ciphertext, always. The browser encrypted the file under a
+	// key the server never sees, so all the server can check is that the
+	// blob's length is consistent with a well-formed container — the only
+	// statement possible about a payload nobody on this side can read.
 	var (
-		keyMode      = keyModeURL
-		urlSecret    []byte
+		keyMode      = keyModeE2EURL
 		salt         []byte
-		wrappedDEK   []byte
 		authVerifier []byte
 		written      int64
 		copyErr      error
 	)
-	if r.FormValue("e2e") == "1" {
-		plainSize, perr := strconv.ParseInt(r.FormValue("plain_size"), 10, 64)
-		token, terr := base64.RawURLEncoding.DecodeString(r.FormValue("auth_verifier"))
-		salt, _ = base64.RawURLEncoding.DecodeString(r.FormValue("auth_salt"))
-		keyMode = keyModeE2EURL
-		// A batch member's key is wrapped under the batch key, so it carries no
-		// auth material of its own — the batch row holds the password verifier.
-		if batch != nil {
-			token, salt = nil, nil
-		}
-		if len(token) > 0 {
-			if terr != nil || len(token) != 32 || len(salt) != encSaltLen {
-				dst.Close()
-				_ = os.Remove(dstPath)
-				http.Error(w, "invalid auth material", http.StatusBadRequest)
-				return
-			}
-			keyMode = keyModeE2EPassword
-			sum := sha256.Sum256(token)
-			authVerifier = sum[:]
-		}
-		if perr != nil || plainSize < 0 || plainSize > a.maxUpload {
-			dst.Close()
-			_ = os.Remove(dstPath)
-			http.Error(w, "invalid plain_size", http.StatusRequestEntityTooLarge)
-			return
-		}
-		var ctWritten int64
-		ctWritten, copyErr = io.Copy(dst, file)
-		if copyErr == nil && ctWritten != e2eCipherLen(plainSize) {
-			copyErr = fmt.Errorf("ciphertext length %d does not match plain_size %d", ctWritten, plainSize)
-		}
-		written = plainSize
-	} else {
-		salt = randomBytes(encSaltLen)
-		var wrapKey []byte
-		if password != "" {
-			keyMode = keyModePassword
-			wrapKey = derivePasswordWrapKey(password, salt)
-		} else {
-			urlSecret = randomBytes(urlSecretLen)
-			wrapKey, err = deriveURLWrapKey(urlSecret, salt)
-			if err != nil {
-				dst.Close()
-				_ = os.Remove(dstPath)
-				httpError(w, err, http.StatusInternalServerError)
-				return
-			}
-		}
-		dek := randomBytes(32)
-		wrappedDEK, err = wrapKeyWith(wrapKey, dek)
-		if err != nil {
-			dst.Close()
-			_ = os.Remove(dstPath)
-			httpError(w, err, http.StatusInternalServerError)
-			return
-		}
-		written, copyErr = encryptStream(dst, file, dek)
+	if r.FormValue("e2e") != "1" {
+		dst.Close()
+		_ = os.Remove(dstPath)
+		http.Error(w, "uploads must be end-to-end encrypted", http.StatusBadRequest)
+		return
 	}
+	plainSize, perr := strconv.ParseInt(r.FormValue("plain_size"), 10, 64)
+	token, terr := base64.RawURLEncoding.DecodeString(r.FormValue("auth_verifier"))
+	salt, _ = base64.RawURLEncoding.DecodeString(r.FormValue("auth_salt"))
+	// A batch member's key is wrapped under the batch key, so it carries no
+	// auth material of its own — the batch row holds the password verifier.
+	if batch != nil {
+		token, salt = nil, nil
+	}
+	if len(token) > 0 {
+		if terr != nil || len(token) != 32 || len(salt) != encSaltLen {
+			dst.Close()
+			_ = os.Remove(dstPath)
+			http.Error(w, "invalid auth material", http.StatusBadRequest)
+			return
+		}
+		keyMode = keyModeE2EPassword
+		sum := sha256.Sum256(token)
+		authVerifier = sum[:]
+	}
+	if perr != nil || plainSize < 0 || plainSize > a.maxUpload {
+		dst.Close()
+		_ = os.Remove(dstPath)
+		http.Error(w, "invalid plain_size", http.StatusRequestEntityTooLarge)
+		return
+	}
+	ctWritten, copyErr := io.Copy(dst, file)
+	if copyErr == nil && ctWritten != e2eCipherLen(plainSize) {
+		copyErr = fmt.Errorf("ciphertext length %d does not match plain_size %d", ctWritten, plainSize)
+	}
+	written = plainSize
+
 	closeErr := dst.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(dstPath)
@@ -459,13 +418,9 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contentType := header.Header.Get("Content-Type")
-	if keyMode == keyModeE2EURL || keyMode == keyModeE2EPassword {
-		// The blob arrives as opaque ciphertext; the client passes the real
-		// MIME type separately. Passwords are never sent on E2E uploads.
-		contentType = r.FormValue("content_type")
-		passwordHash = nil
-	}
+	// The blob is opaque ciphertext; the client passes the real MIME type
+	// separately, since the server cannot sniff what it cannot read.
+	contentType := r.FormValue("content_type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -480,14 +435,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err := tx.Exec(r.Context(),
 			`INSERT INTO files (id, original_name, stored_name, size_bytes, content_type,
-			                    uploaded_by, expires_at, password_hash, max_downloads,
-			                    enc_version, enc_key, key_mode, enc_salt, auth_verifier,
-			                    batch_id, wrapped_key)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+			                    uploaded_by, expires_at, max_downloads,
+			                    key_mode, enc_salt, auth_verifier, batch_id, wrapped_key)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 			id.String(), origName, storedName, written, contentType,
-			user.ID.String(), expiresAt, passwordHash, maxDownloads,
-			encVersionGCM, wrappedDEK, keyMode, salt, authVerifier,
-			batchID, wrappedKey)
+			user.ID.String(), expiresAt, maxDownloads,
+			keyMode, salt, authVerifier, batchID, wrappedKey)
 		return err
 	})
 	if err != nil {
@@ -508,12 +461,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// mode the client generated the key itself and appends its own fragment.
 	// A batch member has no link of its own: the batch link is the share, and
 	// the client already holds its fragment from when it created the batch.
+	// The fragment is generated in the browser and never reaches the server,
+	// so the URL returned here is always fragment-less; the client appends its
+	// own key material.
 	shareURL := "/files/" + id.String()
-	switch {
-	case batch != nil:
+	if batch != nil {
 		shareURL = "/b/" + batch.ID
-	case keyMode == keyModeURL:
-		shareURL += "#" + base64.RawURLEncoding.EncodeToString(urlSecret)
 	}
 	if wantsJSON(r) {
 		res := map[string]any{
@@ -522,8 +475,8 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			"size":        written,
 			"url":         shareURL,
 			"expiresAt":   expiresAt,
-			"hasPassword": passwordHash != nil || keyMode == keyModeE2EPassword,
-			"keyed":       keyMode == keyModeURL || keyMode == keyModeE2EURL,
+			"hasPassword": keyMode == keyModeE2EPassword,
+			"keyed":       keyMode == keyModeE2EURL,
 		}
 		if batch != nil {
 			res["batchId"] = batch.ID
@@ -546,20 +499,13 @@ type fileMeta struct {
 	ContentType   string
 	UploadedAt    time.Time
 	ExpiresAt     *time.Time
-	PasswordHash  *string
 	MaxDownloads  *int
 	DownloadCount int
-	EncVersion    int
-	EncKey        []byte
 	KeyMode       int
 	EncSalt       []byte
 	AuthVerifier  []byte
 	ArchivedAt    *time.Time
 	BatchID       *string
-}
-
-func (fm *fileMeta) isE2E() bool {
-	return fm.KeyMode == keyModeE2EURL || fm.KeyMode == keyModeE2EPassword
 }
 
 // dispatchFileRoutes handles /files/{id}, /files/{id}/download, /files/{id}/preview.
@@ -609,21 +555,9 @@ func (a *App) dispatchFileRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.handleFileLanding(w, r, fm)
-	case "download":
+	case "raw":
 		// GET only: a download is consumed exactly by a counted GET. HEAD
 		// probes and other methods must not burn scarce download slots.
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		a.handleFileDownload(w, r, fm)
-	case "preview":
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		a.handleFilePreview(w, r, fm)
-	case "raw":
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -638,14 +572,12 @@ func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	fm := &fileMeta{ID: id.String()}
 	err := a.db.QueryRow(r.Context(),
 		`SELECT original_name, stored_name, size_bytes, content_type, uploaded_at,
-		        expires_at, password_hash, max_downloads, download_count,
-		        enc_version, enc_key, key_mode, enc_salt, auth_verifier, archived_at,
-		        batch_id
+		        expires_at, max_downloads, download_count,
+		        key_mode, enc_salt, auth_verifier, archived_at, batch_id
 		 FROM files WHERE id = $1`, id.String()).
 		Scan(&fm.OriginalName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
-			&fm.ExpiresAt, &fm.PasswordHash, &fm.MaxDownloads, &fm.DownloadCount,
-			&fm.EncVersion, &fm.EncKey, &fm.KeyMode, &fm.EncSalt, &fm.AuthVerifier, &fm.ArchivedAt,
-			&fm.BatchID)
+			&fm.ExpiresAt, &fm.MaxDownloads, &fm.DownloadCount,
+			&fm.KeyMode, &fm.EncSalt, &fm.AuthVerifier, &fm.ArchivedAt, &fm.BatchID)
 	if err != nil {
 		return nil, err
 	}
@@ -658,47 +590,6 @@ func (a *App) renderGone(w http.ResponseWriter, r *http.Request, status int, msg
 		"State": "gone",
 		"Gone":  a.tr(r, msgKey),
 	})
-}
-
-// keyCookieName names the per-file cookie that carries the client-held key
-// material (URL secret for keyModeURL, derived wrap key for keyModePassword).
-func keyCookieName(id string) string {
-	return "fsk_" + strings.ReplaceAll(id, "-", "")
-}
-
-func (a *App) setKeyCookie(w http.ResponseWriter, fm *fileMeta, value []byte, httpOnly bool) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     keyCookieName(fm.ID),
-		Value:    base64.RawURLEncoding.EncodeToString(value),
-		Path:     "/files/" + fm.ID,
-		Expires:  time.Now().Add(6 * time.Hour),
-		HttpOnly: httpOnly,
-		Secure:   a.cookieSecure,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
-func readKeyCookie(r *http.Request, fm *fileMeta) []byte {
-	c, err := r.Cookie(keyCookieName(fm.ID))
-	if err != nil {
-		return nil
-	}
-	b, err := base64.RawURLEncoding.DecodeString(c.Value)
-	if err != nil {
-		return nil
-	}
-	return b
-}
-
-// passwordUnlocked reports whether the request carries key material that
-// actually unwraps the DEK of a password-protected (keyModePassword) file.
-func (a *App) passwordUnlocked(r *http.Request, fm *fileMeta) bool {
-	wk := readKeyCookie(r, fm)
-	if len(wk) != 32 {
-		return false
-	}
-	_, err := unwrapKeyWith(wk, fm.EncKey)
-	return err == nil
 }
 
 // handleE2EUnlock verifies the client-derived auth token for an E2E password
@@ -725,112 +616,15 @@ func (a *App) handleE2EUnlock(w http.ResponseWriter, r *http.Request, fm *fileMe
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
-// handleFileLanding renders the share landing page (details + preview +
-// download button), or the password gate for protected files.
+// handleFileLanding renders the share landing page, or handles the unlock
+// POST for a password share. Every file is end-to-end encrypted, so this is
+// always the client-side landing page — the server has nothing to decrypt.
 func (a *App) handleFileLanding(w http.ResponseWriter, r *http.Request, fm *fileMeta) {
 	if fm.KeyMode == keyModeE2EPassword && r.Method == http.MethodPost {
 		a.handleE2EUnlock(w, r, fm)
 		return
 	}
-	if fm.isE2E() {
-		a.renderE2ELanding(w, r, fm)
-		return
-	}
-
-	locked := fm.PasswordHash != nil
-	if locked {
-		switch fm.KeyMode {
-		case keyModePassword:
-			locked = !a.passwordUnlocked(r, fm)
-		default:
-			locked = !a.isUnlocked(r, fm)
-		}
-	}
-
-	if r.Method == http.MethodPost && locked {
-		limitKey := a.clientIP(r) + "|" + fm.ID
-		if !a.shareLimiter.allow(limitKey) {
-			a.renderStatus(w, r, http.StatusTooManyRequests, "download.html", map[string]any{
-				"Title": a.tr(r, "title.download") + " · k-fileshare",
-				"State": "locked",
-				"ID":    fm.ID,
-				"Name":  fm.OriginalName,
-				"Size":  fm.Size,
-				"Error": a.tr(r, "dl.too_many"),
-			})
-			return
-		}
-		_ = r.ParseForm()
-		submitted := r.PostFormValue("password")
-		if submitted != "" && checkPassword(*fm.PasswordHash, submitted) {
-			a.shareLimiter.reset(limitKey)
-			if fm.KeyMode == keyModePassword {
-				// Hand the browser the Argon2id-derived wrap key so follow-up
-				// preview/download requests can unwrap the DEK without the
-				// server ever holding a stored copy.
-				wk := derivePasswordWrapKey(submitted, fm.EncSalt)
-				if _, err := unwrapKeyWith(wk, fm.EncKey); err != nil {
-					httpError(w, fmt.Errorf("password verified but DEK unwrap failed: %w", err),
-						http.StatusInternalServerError)
-					return
-				}
-				a.setKeyCookie(w, fm, wk, true)
-			} else {
-				a.setUnlockCookie(w, fm)
-			}
-			http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
-			return
-		}
-		a.shareLimiter.fail(limitKey)
-		a.renderStatus(w, r, http.StatusUnauthorized, "download.html", map[string]any{
-			"Title": a.tr(r, "title.download") + " · k-fileshare",
-			"State": "locked",
-			"ID":    fm.ID,
-			"Name":  fm.OriginalName,
-			"Size":  fm.Size,
-			"Error": a.tr(r, "dl.wrong_pw"),
-		})
-		return
-	}
-
-	if locked {
-		a.render(w, r, "download.html", map[string]any{
-			"Title": a.tr(r, "title.download") + " · k-fileshare",
-			"State": "locked",
-			"ID":    fm.ID,
-			"Name":  fm.OriginalName,
-			"Size":  fm.Size,
-		})
-		return
-	}
-
-	data := map[string]any{
-		"Title":       fm.OriginalName + " · k-fileshare",
-		"State":       "ready",
-		"ID":          fm.ID,
-		"Name":        fm.OriginalName,
-		"Size":        fm.Size,
-		"ContentType": fm.ContentType,
-		"UploadedAt":  fm.UploadedAt,
-		"HasLimit":    false,
-		"PreviewKind": previewKind(fm.ContentType, fm.Size),
-		"IconKind":    iconKind(fm.ContentType, fm.OriginalName),
-		"Keyed":       fm.KeyMode == keyModeURL,
-		"KeyCookie":   keyCookieName(fm.ID),
-	}
-	if fm.ExpiresAt != nil {
-		data["ExpiresAt"] = fm.ExpiresAt.UTC()
-	}
-	if fm.MaxDownloads != nil {
-		data["HasLimit"] = true
-		data["MaxDL"] = *fm.MaxDownloads
-		data["DownloadsLeft"] = *fm.MaxDownloads - fm.DownloadCount
-		// Previews stream the original bytes without consuming a download
-		// slot, which would let recipients bypass the limit — so download-
-		// limited files get no preview.
-		data["PreviewKind"] = ""
-	}
-	a.render(w, r, "download.html", data)
+	a.renderE2ELanding(w, r, fm)
 }
 
 // renderE2ELanding renders the landing page for end-to-end encrypted files.
@@ -899,10 +693,6 @@ func (a *App) archiveIfSpent(r *http.Request, fm *fileMeta) {
 // handleFileRaw serves the stored ciphertext of an end-to-end encrypted file
 // verbatim; the browser decrypts locally. Counts as a download.
 func (a *App) handleFileRaw(w http.ResponseWriter, r *http.Request, fm *fileMeta) {
-	if !fm.isE2E() {
-		http.NotFound(w, r)
-		return
-	}
 	if fm.KeyMode == keyModeE2EPassword && !a.isUnlocked(r, fm) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -925,162 +715,6 @@ func (a *App) handleFileRaw(w http.ResponseWriter, r *http.Request, fm *fileMeta
 	a.archiveIfSpent(r, fm)
 }
 
-// resolveDEK authorizes the request AND produces the file's decryption key.
-// Key material arrives via the per-file cookie or, for curl/API use, via the
-// X-Share-Key (URL secret) / X-Share-Password headers — never query strings,
-// which end up in browser history, proxy logs and monitoring systems. On
-// failure it has already written a response (redirect to the landing page,
-// or 429). For plaintext legacy files it returns (nil, true).
-func (a *App) resolveDEK(w http.ResponseWriter, r *http.Request, fm *fileMeta) ([]byte, bool) {
-	limitKey := a.clientIP(r) + "|" + fm.ID
-
-	switch fm.KeyMode {
-	case keyModeURL:
-		secret := readKeyCookie(r, fm)
-		if secret == nil {
-			if h := r.Header.Get("X-Share-Key"); h != "" {
-				secret, _ = base64.RawURLEncoding.DecodeString(h)
-			}
-		}
-		if len(secret) != urlSecretLen {
-			http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
-			return nil, false
-		}
-		if !a.shareLimiter.allow(limitKey) {
-			http.Error(w, "too many attempts", http.StatusTooManyRequests)
-			return nil, false
-		}
-		wk, err := deriveURLWrapKey(secret, fm.EncSalt)
-		if err != nil {
-			httpError(w, err, http.StatusInternalServerError)
-			return nil, false
-		}
-		dek, err := unwrapKeyWith(wk, fm.EncKey)
-		if err != nil {
-			a.shareLimiter.fail(limitKey)
-			http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
-			return nil, false
-		}
-		a.shareLimiter.reset(limitKey)
-		return dek, true
-
-	case keyModePassword:
-		if wk := readKeyCookie(r, fm); len(wk) == 32 {
-			if dek, err := unwrapKeyWith(wk, fm.EncKey); err == nil {
-				return dek, true
-			}
-		}
-		if pw := r.Header.Get("X-Share-Password"); pw != "" {
-			if !a.shareLimiter.allow(limitKey) {
-				http.Error(w, "too many attempts", http.StatusTooManyRequests)
-				return nil, false
-			}
-			wk := derivePasswordWrapKey(pw, fm.EncSalt)
-			if dek, err := unwrapKeyWith(wk, fm.EncKey); err == nil {
-				a.shareLimiter.reset(limitKey)
-				return dek, true
-			}
-			a.shareLimiter.fail(limitKey)
-		}
-		http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
-		return nil, false
-
-	default: // keyModeKEK: legacy files, server-held key, bcrypt password gate
-		if fm.PasswordHash != nil && !a.isUnlocked(r, fm) {
-			if submitted := r.Header.Get("X-Share-Password"); submitted != "" {
-				if !a.shareLimiter.allow(limitKey) {
-					http.Error(w, "too many attempts", http.StatusTooManyRequests)
-					return nil, false
-				}
-				if !checkPassword(*fm.PasswordHash, submitted) {
-					a.shareLimiter.fail(limitKey)
-					http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
-					return nil, false
-				}
-				a.shareLimiter.reset(limitKey)
-			} else {
-				http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
-				return nil, false
-			}
-		}
-		if fm.EncVersion == encVersionPlain {
-			return nil, true
-		}
-		dek, err := a.unwrapDEK(fm.EncKey)
-		if err != nil {
-			httpError(w, err, http.StatusInternalServerError)
-			return nil, false
-		}
-		return dek, true
-	}
-}
-
-func (a *App) handleFileDownload(w http.ResponseWriter, r *http.Request, fm *fileMeta) {
-	if fm.isE2E() {
-		// Plaintext exists only client-side; the landing page drives the
-		// decrypting download via /raw.
-		http.Redirect(w, r, "/files/"+fm.ID, http.StatusSeeOther)
-		return
-	}
-	dek, ok := a.resolveDEK(w, r, fm)
-	if !ok {
-		return
-	}
-	if !a.consumeDownload(w, r, fm) {
-		return
-	}
-	a.serveFileBlob(w, r, fm, dek, true)
-
-	// If this consumed the final download slot, retire the blob right away:
-	// the row stays listed as expired for 30 days, but the bytes are gone.
-	a.archiveIfSpent(r, fm)
-}
-
-// handleFilePreview streams the file inline for the landing-page preview.
-// Previews don't consume download slots, so files with a download limit are
-// never previewable (the bytes would bypass the limit). Script execution is
-// blocked via a sandboxing CSP so user uploads can't run code on this origin.
-func (a *App) handleFilePreview(w http.ResponseWriter, r *http.Request, fm *fileMeta) {
-	if fm.MaxDownloads != nil || fm.isE2E() {
-		http.NotFound(w, r)
-		return
-	}
-	dek, ok := a.resolveDEK(w, r, fm)
-	if !ok {
-		return
-	}
-	if previewKind(fm.ContentType, fm.Size) == "" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; media-src 'self'; img-src 'self'; object-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'")
-	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	a.serveFileBlob(w, r, fm, dek, false)
-}
-
-func (a *App) serveFileBlob(w http.ResponseWriter, r *http.Request, fm *fileMeta, dek []byte, attachment bool) {
-	content, closer, err := a.openFileBlob(fm, dek)
-	if err != nil {
-		httpError(w, err, http.StatusInternalServerError)
-		return
-	}
-	defer closer.Close()
-
-	contentType := fm.ContentType
-	disposition := "inline"
-	if attachment {
-		disposition = "attachment"
-	} else if previewKind(fm.ContentType, fm.Size) == "text" {
-		// Never render user-supplied markup (e.g. text/html) on this origin.
-		contentType = "text/plain; charset=utf-8"
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`%s; filename="%s"`, disposition, quoteForHeader(fm.OriginalName)))
-	http.ServeContent(w, r, fm.OriginalName, fm.UploadedAt, content)
-}
-
 // --- unlock cookies ---------------------------------------------------------
 
 func (a *App) unlockCookieName(id string) string {
@@ -1091,11 +725,7 @@ func (a *App) unlockToken(fm *fileMeta) string {
 	mac := hmac.New(sha256.New, a.unlockKey)
 	mac.Write([]byte(fm.ID))
 	mac.Write([]byte{0})
-	if fm.PasswordHash != nil {
-		mac.Write([]byte(*fm.PasswordHash))
-	} else if len(fm.AuthVerifier) > 0 {
-		mac.Write(fm.AuthVerifier)
-	}
+	mac.Write(fm.AuthVerifier)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 

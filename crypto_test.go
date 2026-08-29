@@ -11,8 +11,11 @@ import (
 	"time"
 )
 
-func TestEncryptDecryptRoundTrip(t *testing.T) {
-	app := &App{fileKEK: randomBytes(32)}
+// TestChunkFormatRoundTrip exercises the Go reference implementation of the
+// end-to-end container format, including the seekable reader the format was
+// designed to allow. e2e_interop_test.go pins the same implementation against
+// vectors from a real WebCrypto.
+func TestChunkFormatRoundTrip(t *testing.T) {
 	dek := randomBytes(32)
 
 	// Odd size crossing several chunk boundaries.
@@ -68,25 +71,6 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	if !bytes.Equal(buf, plain[off:off+100]) {
 		t.Fatal("ranged read mismatch")
 	}
-
-	// DEK wrap/unwrap.
-	wrapped, err := app.wrapDEK(dek)
-	if err != nil {
-		t.Fatal(err)
-	}
-	back, err := app.unwrapDEK(wrapped)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(back, dek) {
-		t.Fatal("DEK wrap round trip mismatch")
-	}
-
-	// Tampering must fail authentication.
-	wrapped[len(wrapped)-1] ^= 0xff
-	if _, err := app.unwrapDEK(wrapped); err == nil {
-		t.Fatal("tampered DEK unwrap succeeded")
-	}
 }
 
 func TestSecretRoundTrip(t *testing.T) {
@@ -110,52 +94,6 @@ func TestSecretRoundTrip(t *testing.T) {
 	nokek := &App{}
 	if v, err := nokek.encryptSecret("x"); err != nil || v != "x" {
 		t.Fatalf("no-KEK encrypt should be identity: %q %v", v, err)
-	}
-}
-
-func TestKeyModeWrapRoundTrips(t *testing.T) {
-	dek := randomBytes(32)
-	salt := randomBytes(encSaltLen)
-
-	// URL-secret mode: HKDF(secret) wraps the DEK.
-	secret := randomBytes(urlSecretLen)
-	wk, err := deriveURLWrapKey(secret, salt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	blob, err := wrapKeyWith(wk, dek)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := unwrapKeyWith(wk, blob)
-	if err != nil || !bytes.Equal(got, dek) {
-		t.Fatalf("url-mode round trip: %v", err)
-	}
-	wrongWK, _ := deriveURLWrapKey(randomBytes(urlSecretLen), salt)
-	if _, err := unwrapKeyWith(wrongWK, blob); err == nil {
-		t.Fatal("wrong URL secret unwrapped the DEK")
-	}
-
-	// Password mode: Argon2id(password) wraps the DEK; must be deterministic
-	// for the same password+salt and fail for a wrong password.
-	pw1 := derivePasswordWrapKey("correct horse", salt)
-	pw1again := derivePasswordWrapKey("correct horse", salt)
-	if !bytes.Equal(pw1, pw1again) {
-		t.Fatal("argon2 derivation not deterministic")
-	}
-	blob2, err := wrapKeyWith(pw1, dek)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, err := unwrapKeyWith(pw1, blob2); err != nil || !bytes.Equal(got, dek) {
-		t.Fatalf("password-mode round trip: %v", err)
-	}
-	if _, err := unwrapKeyWith(derivePasswordWrapKey("wrong", salt), blob2); err == nil {
-		t.Fatal("wrong password unwrapped the DEK")
-	}
-	// Different salt → different key even with the same password.
-	if bytes.Equal(pw1, derivePasswordWrapKey("correct horse", randomBytes(encSaltLen))) {
-		t.Fatal("salt has no effect on derivation")
 	}
 }
 

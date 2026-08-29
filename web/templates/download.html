@@ -9,25 +9,7 @@
   <p class="dl-sub">{{.Gone}}</p>
 </div>
 
-{{else if eq .State "locked"}}
-<div class="dl-card">
-  <div class="dl-icon" aria-hidden="true">
-    <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-  </div>
-  <h1>{{T .Lang "dl.pw_required"}}</h1>
-  <p class="dl-file-line"><strong>{{.Name}}</strong> <span class="muted">· {{humanSize .Size}}</span></p>
-  <p class="dl-sub">{{T .Lang "dl.pw_hint"}}</p>
-  {{if .Error}}<p class="alert">{{.Error}}</p>{{end}}
-  <form method="post" action="/files/{{.ID}}" class="auth-form">
-    <label>
-      <span>{{T .Lang "dl.password"}}</span>
-      <input name="password" type="password" required autofocus autocomplete="off">
-    </label>
-    <button type="submit" class="btn btn-primary btn-block">{{T .Lang "dl.unlock"}}</button>
-  </form>
-</div>
-
-{{else if eq .State "e2e"}}
+{{else}}
 <div class="dl-card dl-card-wide" id="dl-root" data-e2e="1" data-mode="{{.E2EMode}}" data-file="{{.ID}}"
      data-name="{{.Name}}" data-size="{{.Size}}" data-type="{{.ContentType}}"
      data-preview-kind="{{.PreviewKind}}"{{if .AuthSalt}} data-salt="{{.AuthSalt}}"{{end}}{{if .HasLimit}} data-limited="1"{{end}}>
@@ -90,70 +72,6 @@
   </div>
 </div>
 
-{{else}}
-<div class="dl-card dl-card-wide" id="dl-root"{{if .Keyed}} data-keyed="1" data-cookie="{{.KeyCookie}}" data-file="{{.ID}}"{{end}}>
-  <p class="dl-kicker">{{T .Lang "dl.wants_to_share"}}</p>
-
-  <div class="dl-file-head">
-    {{template "fileicon" .IconKind}}
-    <div class="dl-file-title">
-      <h1>{{.Name}}</h1>
-      <span class="muted">{{humanSize .Size}} · {{.ContentType}}</span>
-    </div>
-  </div>
-
-  {{if .Keyed}}
-  <p class="alert" id="key-missing" hidden>{{T .Lang "dl.key_missing"}}</p>
-  <noscript><p class="alert">{{T .Lang "dl.js_required"}}</p></noscript>
-  {{end}}
-
-  {{if .PreviewKind}}
-  <div class="dl-preview dl-preview-{{.PreviewKind}}">
-    {{if .Keyed}}
-      {{if eq .PreviewKind "image"}}
-        <img data-preview-src="/files/{{.ID}}/preview" alt="{{T .Lang "dl.preview"}}">
-      {{else if eq .PreviewKind "video"}}
-        <video data-preview-src="/files/{{.ID}}/preview" controls preload="metadata"></video>
-      {{else if eq .PreviewKind "audio"}}
-        <audio data-preview-src="/files/{{.ID}}/preview" controls preload="metadata"></audio>
-      {{else}}
-        <iframe data-preview-src="/files/{{.ID}}/preview" title="{{T .Lang "dl.preview"}}"></iframe>
-      {{end}}
-    {{else}}
-      {{if eq .PreviewKind "image"}}
-        <img src="/files/{{.ID}}/preview" alt="{{T .Lang "dl.preview"}}">
-      {{else if eq .PreviewKind "video"}}
-        <video src="/files/{{.ID}}/preview" controls preload="metadata"></video>
-      {{else if eq .PreviewKind "audio"}}
-        <audio src="/files/{{.ID}}/preview" controls preload="metadata"></audio>
-      {{else}}
-        <iframe src="/files/{{.ID}}/preview" title="{{T .Lang "dl.preview"}}"></iframe>
-      {{end}}
-    {{end}}
-  </div>
-  {{else}}
-  <p class="dl-nopreview">{{T .Lang "dl.no_preview"}}</p>
-  {{end}}
-
-  <dl class="dl-details">
-    <dt>{{T .Lang "dl.size"}}</dt><dd>{{humanSize .Size}}</dd>
-    <dt>{{T .Lang "dl.type"}}</dt><dd>{{.ContentType}}</dd>
-    <dt>{{T .Lang "dl.uploaded"}}</dt><dd><time data-ts="{{rfc3339 .UploadedAt}}">{{formatTime .UploadedAt}}</time></dd>
-    <dt>{{T .Lang "dl.expires"}}</dt>
-    <dd>{{if .ExpiresAt}}<time data-ts="{{rfc3339 .ExpiresAt}}">{{formatTime .ExpiresAt}}</time>
-        <span class="chip chip-expiry">{{T .Lang "files.expires_in" (until .Lang .ExpiresAt)}}</span>
-        {{else}}{{T .Lang "dl.never"}}{{end}}</dd>
-    {{if .HasLimit}}
-    <dt>{{T .Lang "files.stat_dl"}}</dt>
-    <dd>{{T .Lang "dl.downloads_left" .DownloadsLeft .MaxDL}}</dd>
-    {{end}}
-  </dl>
-
-  <a href="/files/{{.ID}}/download" class="btn btn-primary btn-block btn-download" download>
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>
-    {{T .Lang "dl.button"}}
-  </a>
-</div>
 {{end}}
 
 {{template "bare_footer" .}}

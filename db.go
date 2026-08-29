@@ -49,12 +49,23 @@ CREATE TABLE IF NOT EXISTS files (
 	max_downloads   INTEGER,
 	download_count  INTEGER NOT NULL DEFAULT 0
 );
-ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_version INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_key BYTEA;
 ALTER TABLE files ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
-ALTER TABLE files ADD COLUMN IF NOT EXISTS key_mode INTEGER NOT NULL DEFAULT 0;
+-- key_mode is 3 (key in the URL fragment) or 4 (key derived from the share
+-- password in the browser). Both are end-to-end; the server holds no key for
+-- either. Modes 0-2, where the server could unwrap a file's key, are gone.
+ALTER TABLE files ADD COLUMN IF NOT EXISTS key_mode INTEGER NOT NULL DEFAULT 3;
+-- enc_salt holds the PBKDF2 salt for a key_mode 4 share. The name predates
+-- end-to-end encryption; it has never held a server-usable secret since.
 ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_salt BYTEA;
 ALTER TABLE files ADD COLUMN IF NOT EXISTS auth_verifier BYTEA;
+
+-- Dropped with the server-side key modes: password_hash gated legacy share
+-- passwords, enc_key held a DEK the server could unwrap, and enc_version
+-- distinguished plaintext from server-encrypted blobs. Every blob is now
+-- client-side ciphertext and the server can decrypt none of them.
+ALTER TABLE files DROP COLUMN IF EXISTS password_hash;
+ALTER TABLE files DROP COLUMN IF EXISTS enc_key;
+ALTER TABLE files DROP COLUMN IF EXISTS enc_version;
 
 -- A batch is one share link covering many files. Expiry, download limit and
 -- password live here, not on the member rows: the batch is the shareable unit

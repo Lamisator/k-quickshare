@@ -70,6 +70,21 @@ func TestTemplatesRender(t *testing.T) {
 			"OIDCLive": false, "Error": "", "Success": ""},
 		"oidc_denied.html": {"User": (*User)(nil), "AllowedDomain": "a.example", "ActualDomain": "b.example"},
 	}
+	// Only two states survive: "gone", and the end-to-end landing page. The
+	// server-decrypted and server-password-gated states went with key modes 0-2.
+	dlCases := []map[string]any{
+		{"State": "gone", "Gone": "gone msg", "User": (*User)(nil)},
+		{"State": "e2e", "E2EMode": "url", "ID": "id1", "Name": "photo.jpg", "Size": int64(5),
+			"ContentType": "image/jpeg", "UploadedAt": now, "ExpiresAt": exp.UTC(),
+			"HasLimit": true, "MaxDL": 3, "DownloadsLeft": 2,
+			"PreviewKind": "", "IconKind": "image", "User": (*User)(nil)},
+		{"State": "e2e", "E2EMode": "url", "ID": "id1", "Name": "blob.bin", "Size": int64(5),
+			"ContentType": "application/octet-stream", "UploadedAt": now,
+			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil)},
+		{"State": "e2e", "E2EMode": "password", "ID": "id1", "Name": "secret.txt", "Size": int64(5),
+			"ContentType": "text/plain", "UploadedAt": now, "AuthSalt": "c2FsdHNhbHRzYWx0c2E",
+			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil)},
+	}
 	batchCases := []map[string]any{
 		{"State": "batch", "E2EMode": "url", "Unlocked": true, "ID": uuid.NewString(),
 			"FileCount": 3, "TotalSize": int64(4096), "UploadedAt": now,
@@ -79,27 +94,6 @@ func TestTemplatesRender(t *testing.T) {
 		{"State": "batch", "E2EMode": "password", "Unlocked": false, "ID": uuid.NewString(),
 			"FileCount": 0, "TotalSize": int64(0), "UploadedAt": now,
 			"AuthSalt": "c2FsdHNhbHRzYWx0c2E", "HasLimit": false, "User": (*User)(nil)},
-	}
-	dlCases := []map[string]any{
-		{"State": "gone", "Gone": "gone msg", "User": (*User)(nil)},
-		{"State": "locked", "ID": "id1", "Name": "f.bin", "Size": int64(5), "Error": "bad", "User": (*User)(nil)},
-		{"State": "ready", "ID": "id1", "Name": "photo.jpg", "Size": int64(5),
-			"ContentType": "image/jpeg", "UploadedAt": now, "ExpiresAt": exp.UTC(),
-			"HasLimit": true, "MaxDL": 3, "DownloadsLeft": 2,
-			"PreviewKind": "image", "IconKind": "image", "User": (*User)(nil),
-			"Keyed": false, "KeyCookie": "fsk_x"},
-		{"State": "ready", "ID": "id1", "Name": "blob.bin", "Size": int64(5),
-			"ContentType": "application/octet-stream", "UploadedAt": now,
-			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil),
-			"Keyed": false, "KeyCookie": "fsk_x"},
-		{"State": "ready", "ID": "id1", "Name": "keyed.png", "Size": int64(5),
-			"ContentType": "image/png", "UploadedAt": now,
-			"HasLimit": false, "PreviewKind": "image", "IconKind": "image", "User": (*User)(nil),
-			"Keyed": true, "KeyCookie": "fsk_x"},
-		{"State": "ready", "ID": "id1", "Name": "keyed.txt", "Size": int64(5),
-			"ContentType": "text/plain", "UploadedAt": now,
-			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil),
-			"Keyed": true, "KeyCookie": "fsk_x"},
 	}
 
 	for _, lang := range supportedLangs {

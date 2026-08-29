@@ -53,29 +53,20 @@ dependencies beyond the two containers.
 
 ## How the encryption works
 
-There are two independent layers. They solve different problems and both are on.
+**The server holds no key for any file, in any mode.** There is exactly one
+encryption scheme, and it runs entirely in the browser.
 
-### Layer 1 — end-to-end (what protects your files)
-
-The browser encrypts before anything is sent, using WebCrypto. Payload format is
+Files are encrypted with WebCrypto before anything is sent. Payload format is
 **chunked AES-256-GCM**: 64 KiB plaintext chunks, each sealed under a 12-byte
 nonce of `4 zero bytes || big-endian uint64 chunk index`. Chunking keeps memory
-bounded and makes range requests possible.
-
-Key material never reaches the server:
+bounded and makes the ciphertext seekable.
 
 | `key_mode` | Name | Where the key comes from |
 |---|---|---|
-| `0` | KEK (legacy) | Server key — **the server can decrypt these alone** |
-| `1` | URL secret | `HKDF(secret from URL fragment, enc_salt)`, server-assisted |
-| `2` | Password | `Argon2id(password, salt, 19 MiB, t=2, p=1)`, server-assisted |
-| `3` | E2E URL | `HKDF(fragment secret, "", "k-fileshare-e2e-url-v1")`, browser-side |
-| `4` | E2E password | `PBKDF2-SHA256(password, salt, 600k)` → HKDF split, browser-side |
+| `3` | E2E URL | `HKDF(fragment secret, "", "k-fileshare-e2e-url-v1")` |
+| `4` | E2E password | `PBKDF2-SHA256(password, salt, 600k)` → HKDF split |
 
-Modes 3 and 4 are what the web UI produces today. Modes 0–2 exist for older rows
-and for API/curl uploads of plaintext.
-
-For an **E2E password** share the password itself is never transmitted. PBKDF2
+For a **password** share the password itself is never transmitted. PBKDF2
 produces a master secret, which HKDF splits down two branches:
 
 - `enc` — the file key. Stays in the browser.
@@ -85,16 +76,16 @@ produces a master secret, which HKDF splits down two branches:
 Knowing the auth branch cannot yield the encryption branch, so the stored
 verifier is useless for decryption even to someone holding the database.
 
-### Layer 2 — at rest (what protects the disk)
+Uploads that are not end-to-end encrypted are **rejected** (HTTP 400). There is
+no server-side encryption path to fall back to, and no code left that could
+decrypt a stored file.
 
-Anything the server *does* hold a key for — legacy blobs, server-assisted
-uploads, the OIDC client secret — is encrypted at rest with a per-file DEK wrapped
-by a KEK derived from `FILE_ENCRYPTION_KEY`. This defends the disk and backups,
-not against the server itself. The reader is seekable, so range requests still work.
+### The application KEK
 
-> **Back up `FILE_ENCRYPTION_KEY`.** It lives only in the server's `.env`.
-> Losing it makes every at-rest-encrypted file unrecoverable. The app refuses to
-> start without it (`ALLOW_UNENCRYPTED_STORAGE=true` opts out, for development only).
+`FILE_ENCRYPTION_KEY` still exists, but it no longer touches uploaded files. It
+protects short secrets in the `settings` table — principally the OIDC client
+secret. **Losing it does not lose any file**, because the server could not read
+those files with it anyway.
 
 ### Fail-closed
 
@@ -103,7 +94,20 @@ origin — the upload is **refused**. It does not fall back to sending the
 plaintext file and password to the server. The download side fails closed the
 same way.
 
----
+### What this does and does not protect against
+
+It defends against **passive** compromise: a stolen disk, leaked backups, an
+operator reading the filesystem, a subpoena of stored data. The bytes on disk
+are unreadable without a key that only ever existed in a browser.
+
+It does **not** defend against an actively hostile server, because the server
+ships the JavaScript that performs the crypto. A compromised deployment could
+serve a modified `e2e.js` that exfiltrates keys. That is inherent to
+browser-delivered end-to-end encryption and cannot be fixed with more
+client-side crypto.
+
+One practical consequence: for a URL-key share, **the link is the key**. Anyone
+who obtains it has the file.
 
 ## Batch shares
 
@@ -213,9 +217,9 @@ Every setting is an environment variable. Only `DATABASE_URL` and
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | — | **Required.** PostgreSQL DSN. |
-| `FILE_ENCRYPTION_KEY` | — | **Required.** 32-byte hex KEK for at-rest encryption. |
+| `FILE_ENCRYPTION_KEY` | — | **Required.** 32-byte hex KEK protecting settings secrets (not files). |
 | `FILE_ENCRYPTION_KEY_FILE` | — | Read the KEK from a file instead (Docker secrets). |
-| `ALLOW_UNENCRYPTED_STORAGE` | `false` | Start without a KEK. Development only. |
+| `ALLOW_UNENCRYPTED_SECRETS` | `false` | Start without a KEK; settings secrets stored in plaintext. Development only. |
 | `FILES_DIR` | `/data/files` | Blob storage directory. |
 | `LISTEN_ADDR` | `:8080` | Bind address. |
 | `COOKIE_SECURE` | `true` | Set `false` only for local plain-HTTP work. |
@@ -248,9 +252,7 @@ when clients connect directly.
 | `POST /b/{id}/unlock` | Submit the derived auth token for a password batch |
 | `GET /b/{id}/f/{fileID}/raw` | One member's ciphertext; counts one download |
 | `GET /files/{id}` | Single-file landing page |
-| `GET /files/{id}/raw` | Ciphertext for an E2E file; counts one download |
-| `GET /files/{id}/download` | Server-decrypted download (non-E2E only) |
-| `GET /files/{id}/preview` | Inline preview (non-E2E only); does not count |
+| `GET /files/{id}/raw` | Ciphertext for a single-file share; counts one download |
 | `GET /healthz` | Health check |
 
 **Authenticated**
@@ -265,9 +267,10 @@ when clients connect directly.
 | `GET /account`, `POST /account/password` | Self-service account |
 | `/admin/users`, `/admin/settings` | Admin only |
 
-For scripted use, `X-Share-Key` (URL secret) and `X-Share-Password` carry
-credentials as headers. Query strings are deliberately not accepted — they end up
-in browser history, proxy logs and monitoring.
+There is no API for uploading plaintext. A client must encrypt in the browser
+container format and POST the ciphertext with `e2e=1`; anything else is
+rejected. `web/static/e2e.js` is the reference implementation, and
+`chunkformat_test.go` mirrors it in Go.
 
 ---
 
@@ -284,7 +287,7 @@ handlers_users.go    admin user management
 handlers_settings.go OIDC settings
 auth.go              sessions, password auth, guards
 oidc.go              OIDC login
-crypto.go            at-rest encryption, key wrapping, key modes
+crypto.go            container geometry, settings-secret encryption
 storage.go           quotas, reservations, finalisation
 sweeper.go           expiry, archiving, purging
 db.go                schema and migrations
@@ -311,7 +314,10 @@ Two rules the codebase enforces and that are easy to break:
 go test ./...
 ```
 
-- `crypto_test.go` — at-rest encryption, key wrapping, seekable reads.
+- `chunkformat_test.go` — a Go reference implementation of the container
+  format. Nothing in the shipped binary encrypts or decrypts a file, so this
+  lives in test scope purely as an oracle.
+- `crypto_test.go` — the container round-trip, including seekable reads.
 - `e2e_interop_test.go` — **byte-exact vectors** proving Go and browser WebCrypto
   produce identical ciphertext. Regenerate these if the chunk size, nonce layout
   or any HKDF info string ever changes.
@@ -329,8 +335,10 @@ can be tested against each other rather than against assumptions.
 
 ## Operational notes
 
-**Backups.** Back up `data/postgres`, `data/files` and `FILE_ENCRYPTION_KEY`
-together. The first two are useless without the third.
+**Backups.** Back up `data/postgres` and `data/files`. Neither contains
+anything the server can decrypt, so a backup leaks no file contents — but it is
+also unrecoverable without the share links, which live only with recipients.
+`FILE_ENCRYPTION_KEY` matters only for the OIDC client secret in `settings`.
 
 **Lifecycle.** A link that expires or exhausts its downloads is archived
 immediately: the blob is deleted, the metadata row survives 30 days listed as
@@ -363,3 +371,8 @@ reservations expire after 15 minutes.
   the rest of the batch intact.
 - **Batch members have no standalone page**, so they get no per-file preview URL —
   previews happen inside the batch page after client-side decryption.
+- **No plaintext upload path at all.** Scripted clients must implement the
+  browser container format; there is no server-side encryption to fall back on.
+  This is deliberate, but it makes `curl` uploads considerably more work.
+- **A browser without WebCrypto cannot use this app**, for upload or download.
+  In practice that means it requires HTTPS.

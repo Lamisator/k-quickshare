@@ -152,30 +152,6 @@
     }
   });
 
-  // ---- keyed share links (decryption secret in the URL fragment) ---------------
-  // The fragment never reaches the server in requests; move it into a
-  // path-scoped cookie so the preview/download endpoints can unwrap the DEK.
-
-  const dlRoot = document.getElementById('dl-root');
-  if (dlRoot && dlRoot.getAttribute('data-keyed') === '1') {
-    const fileId = dlRoot.getAttribute('data-file');
-    const cookieName = dlRoot.getAttribute('data-cookie');
-    const secret = (location.hash || '').replace(/^#/, '');
-    if (/^[A-Za-z0-9_-]{40,50}$/.test(secret)) {
-      let cookie = cookieName + '=' + secret + '; path=/files/' + fileId + '; max-age=21600; samesite=lax';
-      if (location.protocol === 'https:') cookie += '; secure';
-      document.cookie = cookie;
-      document.querySelectorAll('[data-preview-src]').forEach((el) => {
-        el.src = el.getAttribute('data-preview-src');
-      });
-    } else {
-      const warn = document.getElementById('key-missing');
-      if (warn) warn.hidden = false;
-      const dlBtn = document.querySelector('.btn-download');
-      if (dlBtn) dlBtn.classList.add('btn-disabled');
-    }
-  }
-
   // ---- end-to-end encrypted landing page ---------------------------------------
   // The ciphertext is fetched as-is and decrypted here; the plaintext never
   // exists outside this tab.
