@@ -120,6 +120,17 @@
 
   form.addEventListener('submit', (e) => e.preventDefault());
 
+  // Browsers restore form state on reload/back-forward; always start clean.
+  function resetOptions() {
+    form.reset();
+    if (expiresAtInput) expiresAtInput.value = '';
+    if (expiresAtWrap) expiresAtWrap.hidden = true;
+  }
+  resetOptions();
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) resetOptions();
+  });
+
   // custom expiry date picker
   if (expiresSel && expiresAtWrap && expiresAtInput) {
     expiresSel.addEventListener('change', () => {
