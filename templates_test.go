@@ -73,8 +73,9 @@ func TestTemplatesRender(t *testing.T) {
 		"index.html": {"MaxUpload": int64(1 << 30)},
 		"history.html": {"Active": "files", "Files": files, "ActiveCount": 2,
 			"TotalSize": int64(999), "TotalDL": 4},
-		"login.html":   {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
-		"account.html": {"Active": "account", "Error": "", "Success": "ok"},
+		"login.html": {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
+		"account.html": {"Active": "account", "Error": "", "Success": "ok",
+			"StepUpRequired": false, "MinPasswordLen": minPasswordLen},
 		"admin_users.html": {"Active": "users", "Users": userRows, "MeID": uid,
 			"MeIsSuper": false, "Error": "", "Success": ""},
 		"admin_settings.html": {"Active": "settings", "OIDC": OIDCSettings{Issuer: "https://x"},
@@ -89,18 +90,32 @@ func TestTemplatesRender(t *testing.T) {
 		{"State": "e2e", "E2EMode": "url", "ID": "id1", "Name": "photo.jpg", "Size": int64(5),
 			"ContentType": "image/jpeg", "UploadedAt": now, "ExpiresAt": exp.UTC(),
 			"HasLimit": true, "MaxDL": 3, "DownloadsLeft": 2,
-			"PreviewKind": "", "IconKind": "image", "User": (*User)(nil)},
+			"PreviewKind": "", "IconKind": "image", "User": (*User)(nil),
+			"E2EVersion": e2eVersionV2, "Manifest": "eyJ2IjoyfQ"},
 		{"State": "e2e", "E2EMode": "url", "ID": "id1", "Name": "blob.bin", "Size": int64(5),
 			"ContentType": "application/octet-stream", "UploadedAt": now,
-			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil)},
+			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil),
+			// A share from before the manifest existed: version 1, no manifest.
+			"E2EVersion": e2eVersionLegacy, "Manifest": ""},
 		{"State": "e2e", "E2EMode": "password", "ID": "id1", "Name": "secret.txt", "Size": int64(5),
 			"ContentType": "text/plain", "UploadedAt": now, "AuthSalt": "c2FsdHNhbHRzYWx0c2E",
-			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil)},
+			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil),
+			"E2EVersion": e2eVersionV2, "Manifest": "eyJ2IjoyfQ"},
 	}
 	// Shapes of the shell quota bar that the case above never reaches: a file
 	// limit with no byte limit (the bar then tracks files), an entirely
 	// unlimited user (no bar at all), a custom allowance, and Usage missing
 	// because the summary query failed.
+	// The account page has two shapes now: the password form, and the step-up
+	// prompt an SSO-only account sees instead of it.
+	accountCases := []map[string]any{
+		{"Active": "account", "StepUpRequired": false, "MinPasswordLen": minPasswordLen,
+			"Error": "", "Success": ""},
+		{"Active": "account", "StepUpRequired": true, "MinPasswordLen": minPasswordLen,
+			"Error": "", "Success": "",
+			"User": &User{ID: uuid.New(), Username: "sso", OIDCSubject: "s",
+				OIDCIssuer: "https://idp.example"}},
+	}
 	shellCases := []map[string]any{
 		{"Usage": UsageSummary{UsedBytes: 1 << 30, UsedFiles: 900,
 			Quota: UserQuota{Files: 1000}}},
@@ -133,8 +148,16 @@ func TestTemplatesRender(t *testing.T) {
 				t.Errorf("download.html case %d [%s]: %v", i, lang, err)
 			}
 		}
+		for i, extra := range accountCases {
+			var sb strings.Builder
+			if err := tmpl.ExecuteTemplate(&sb, "account.html", merge(lang, extra)); err != nil {
+				t.Errorf("account.html case %d [%s]: %v", i, lang, err)
+			}
+		}
 		for i, extra := range shellCases {
 			var sb strings.Builder
+			extra["StepUpRequired"] = false
+			extra["MinPasswordLen"] = minPasswordLen
 			if err := tmpl.ExecuteTemplate(&sb, "account.html", merge(lang, extra)); err != nil {
 				t.Errorf("shell quota bar case %d [%s]: %v", i, lang, err)
 			}

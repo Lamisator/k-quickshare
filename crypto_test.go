@@ -2,13 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // TestChunkFormatRoundTrip exercises the Go reference implementation of the
@@ -17,6 +22,7 @@ import (
 // vectors from a real WebCrypto.
 func TestChunkFormatRoundTrip(t *testing.T) {
 	dek := randomBytes(32)
+	manifest := []byte(`{"v":2,"id":"x","batch":"","size":209273,"chunks":4,"chunk":65536,"name":"a","type":"t"}`)
 
 	// Odd size crossing several chunk boundaries.
 	plain := randomBytes(3*chunkPlainSize + 12345)
@@ -26,7 +32,7 @@ func TestChunkFormatRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := encryptStream(f, bytes.NewReader(plain), dek)
+	n, err := encryptStream(f, bytes.NewReader(plain), dek, manifest)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
@@ -46,7 +52,7 @@ func TestChunkFormatRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rf.Close()
-	r, err := newEncReader(rf, dek, int64(len(plain)))
+	r, err := newEncReader(rf, dek, manifest, int64(len(plain)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,20 +154,163 @@ func TestRedactPath(t *testing.T) {
 }
 
 func TestFailLimiter(t *testing.T) {
+	ctx := context.Background()
+	// No db: the limiter falls back to its process-local counter, which is the
+	// half that has to keep working when the shared one is unavailable.
 	l := &failLimiter{entries: map[string]*failEntry{}, maxFails: 3, window: time.Minute}
 	key := "1.2.3.4|x"
 	for i := 0; i < 3; i++ {
-		if !l.allow(key) {
+		if !l.allow(ctx, key) {
 			t.Fatalf("blocked too early at %d", i)
 		}
-		l.fail(key)
+		l.fail(ctx, key)
 	}
-	if l.allow(key) {
+	if l.allow(ctx, key) {
 		t.Fatal("not blocked after max failures")
 	}
-	l.reset(key)
-	if !l.allow(key) {
+	l.reset(ctx, key)
+	if !l.allow(ctx, key) {
 		t.Fatal("reset did not unblock")
+	}
+}
+
+// TestPasswordHashing covers the Argon2id migration. Bcrypt hashes written by
+// earlier versions must keep verifying — otherwise an upgrade locks every local
+// account out — while new ones are Argon2id and are flagged for rehash.
+func TestPasswordHashing(t *testing.T) {
+	const pw = "correct horse battery staple"
+
+	hash, err := hashPassword(pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(hash, "$argon2id$") {
+		t.Fatalf("new hashes must be argon2id, got %q", hash)
+	}
+	if !checkPassword(hash, pw) {
+		t.Error("argon2id hash did not verify its own password")
+	}
+	if checkPassword(hash, pw+"!") {
+		t.Error("argon2id hash verified the wrong password")
+	}
+	if isLegacyHash(hash) {
+		t.Error("a fresh argon2id hash was flagged for rehash")
+	}
+
+	// Two hashes of the same password must differ: the salt is random.
+	other, err := hashPassword(pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == hash {
+		t.Error("two hashes of the same password are identical — the salt is not random")
+	}
+
+	// A bcrypt hash of the same password, as written before this change.
+	legacy, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !checkPassword(string(legacy), pw) {
+		t.Error("an existing bcrypt hash stopped verifying")
+	}
+	if checkPassword(string(legacy), "wrong") {
+		t.Error("bcrypt hash verified the wrong password")
+	}
+	if !isLegacyHash(string(legacy)) {
+		t.Error("a bcrypt hash was not flagged for rehash")
+	}
+
+	// Malformed and hostile stored values must fail closed, not panic and not
+	// pass. The parameter fields are attacker-controlled if the database is.
+	for _, bad := range []string{
+		"", "not-a-hash", "$argon2id$", "$argon2id$v=19$m=19456,t=2,p=1$$",
+		"$argon2id$v=13$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaA",
+		"$argon2id$v=19$m=99999999,t=2,p=1$c2FsdHNhbHQ$aGFzaA",
+		"$argon2id$v=19$m=19456,t=0,p=1$c2FsdHNhbHQ$aGFzaA",
+		"$argon2id$v=19$m=x,t=2,p=1$c2FsdHNhbHQ$aGFzaA",
+	} {
+		if checkPassword(bad, pw) {
+			t.Errorf("malformed hash %q verified a password", bad)
+		}
+	}
+}
+
+// TestSessionKeyHashing pins the property the sessions table depends on: what
+// is stored is not what is presented, so a leaked row cannot be replayed as a
+// cookie.
+func TestSessionKeyHashing(t *testing.T) {
+	token := randomToken(32)
+	key := sessionKey(token)
+	if key == token {
+		t.Fatal("the session key is the token itself — a database leak would hand over live sessions")
+	}
+	if len(key) != sha256.Size*2 {
+		t.Fatalf("session key is %d chars, want %d hex chars", len(key), sha256.Size*2)
+	}
+	if sessionKey(token) != key {
+		t.Error("session key is not deterministic")
+	}
+	if sessionKey(randomToken(32)) == key {
+		t.Error("two tokens produced the same key")
+	}
+}
+
+// TestReauthFreshness covers the step-up window used before an SSO-only account
+// may set a local password.
+func TestReauthFreshness(t *testing.T) {
+	recent := time.Now().Add(-time.Minute)
+	stale := time.Now().Add(-2 * reauthWindow)
+
+	cases := []struct {
+		name    string
+		user    User
+		stepUp  bool
+		freshOK bool
+	}{
+		{"sso-only, never re-authenticated",
+			User{OIDCSubject: "s"}, true, false},
+		{"sso-only, just re-authenticated",
+			User{OIDCSubject: "s", ReauthAt: &recent}, false, true},
+		{"sso-only, step-up expired",
+			User{OIDCSubject: "s", ReauthAt: &stale}, true, false},
+		{"already has a password: gated on that password instead",
+			User{OIDCSubject: "s", HasPassword: true}, false, false},
+		{"local-only account",
+			User{HasPassword: true}, false, false},
+		// No password and no external identity: nothing to step up with, and
+		// nothing this gate could ask for.
+		{"neither credential", User{}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := tc.user
+			if got := needsPasswordStepUp(&u); got != tc.stepUp {
+				t.Errorf("needsPasswordStepUp = %v, want %v", got, tc.stepUp)
+			}
+			if got := u.ReauthFresh(); got != tc.freshOK {
+				t.Errorf("ReauthFresh = %v, want %v", got, tc.freshOK)
+			}
+		})
+	}
+}
+
+// TestHSTSOnlyWhenSecure pins the header to the flag that declares the
+// deployment is HTTPS: pinning a plain-HTTP dev instance would make it
+// unreachable in that browser until the max-age ran out.
+func TestHSTSOnlyWhenSecure(t *testing.T) {
+	for _, secure := range []bool{true, false} {
+		app := &App{cookieSecure: secure}
+		rec := httptest.NewRecorder()
+		app.securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).
+			ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+		got := rec.Header().Get("Strict-Transport-Security")
+		if secure && got == "" {
+			t.Error("no HSTS header on an HTTPS deployment")
+		}
+		if !secure && got != "" {
+			t.Errorf("HSTS sent on a plain-HTTP deployment: %q", got)
+		}
 	}
 }
 

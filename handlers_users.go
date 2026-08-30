@@ -11,7 +11,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const minPasswordLen = 8
+// minPasswordLen is a length floor, not a policy: it exists to stop the
+// obviously hopeless. Twelve characters rather than eight because eight is now
+// within reach of offline guessing even against a memory-hard hash, and every
+// local password here can also be an administrator's.
+const minPasswordLen = 12
 
 // --- self-service /account ------------------------------------------------
 
@@ -19,14 +23,30 @@ func (a *App) handleAccount(w http.ResponseWriter, r *http.Request) {
 	a.renderAccount(w, r, http.StatusOK, "", "")
 }
 
+// needsPasswordStepUp reports whether this user must re-authenticate with the
+// identity provider before a local password can be set.
+//
+// The case that matters is an SSO-only account: it has no local credential, so
+// nothing about the request proves anything beyond possession of a session
+// cookie. Letting that establish a permanent password turns a stolen session —
+// a transient thing that expires and can be revoked — into standing access that
+// survives revocation at the provider. An account that already has a password
+// is not affected: it proves itself with that password instead.
+func needsPasswordStepUp(u *User) bool {
+	return !u.HasPassword && u.HasOIDC() && !u.ReauthFresh()
+}
+
 func (a *App) renderAccount(w http.ResponseWriter, r *http.Request, status int, errMsg, okMsg string) {
 	// The quota panel that used to live here is now the shell's quota bar, so
 	// it is on this page too — renderStatus fills in Usage for every page.
+	user := userFromContext(r.Context())
 	a.renderStatus(w, r, status, "account.html", map[string]any{
-		"Title":   a.tr(r, "title.account") + " · Pyxis",
-		"Active":  "account",
-		"Error":   errMsg,
-		"Success": okMsg,
+		"Title":          a.tr(r, "title.account") + " · Pyxis",
+		"Active":         "account",
+		"Error":          errMsg,
+		"Success":        okMsg,
+		"StepUpRequired": user != nil && needsPasswordStepUp(user),
+		"MinPasswordLen": minPasswordLen,
 	})
 }
 
@@ -61,6 +81,12 @@ func (a *App) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 				a.tr(r, "msg.pw_wrong"), "")
 			return
 		}
+	} else if needsPasswordStepUp(user) {
+		// The form is not offered in this state, so reaching here is a direct
+		// POST. Refuse it and point at the step-up rather than accepting a new
+		// permanent credential on the strength of a session cookie alone.
+		a.renderAccount(w, r, http.StatusForbidden, a.tr(r, "msg.stepup_required"), "")
+		return
 	}
 	if err := a.updatePassword(r.Context(), user.ID, next); err != nil {
 		httpError(w, err, http.StatusInternalServerError)
@@ -70,6 +96,11 @@ func (a *App) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 	// suspected compromise, and stolen session cookies must die with it.
 	if err := a.deleteUserSessions(r.Context(), user.ID, readSessionCookie(r)); err != nil {
 		log.Printf("revoke sessions after password change: %v", err)
+	}
+	// Spend the step-up. It authorised this one change; leaving it standing
+	// would let the rest of its window authorise another.
+	if err := a.clearSessionReauth(r.Context(), user.ID); err != nil {
+		log.Printf("clear step-up after password change: %v", err)
 	}
 	log.Printf("password changed: %s", user.Username)
 	a.renderAccount(w, r, http.StatusOK, "", a.tr(r, "msg.pw_updated"))

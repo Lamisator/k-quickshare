@@ -657,6 +657,18 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A member the sealed roster does not vouch for. It is still downloadable and
+   its own bytes are still authenticated — only its membership of this link is
+   unproven — so it is flagged, not hidden. */
+.batch-row-warn {
+  align-self: flex-start;
+  font-size: 0.72rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: rgba(224, 178, 110, 0.14);
+  color: var(--warn, #e0b26e);
+  border: 1px solid rgba(224, 178, 110, 0.3);
+}
 .batch-row .btn { flex-shrink: 0; }
 .batch-empty {
   padding: 1rem;
@@ -1134,6 +1146,13 @@ body.bare {
   background: rgba(110, 201, 154, 0.12);
   color: var(--success);
   border-color: rgba(110, 201, 154, 0.25);
+}
+/* Not an error: the download worked, but something about it could not be
+   verified and the recipient should see that without the page looking broken. */
+.alert-warn {
+  background: rgba(224, 178, 110, 0.12);
+  color: var(--warn, #e0b26e);
+  border-color: rgba(224, 178, 110, 0.3);
 }
 
 .divider {

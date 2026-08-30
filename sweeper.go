@@ -38,6 +38,9 @@ func (a *App) sweepOnce(ctx context.Context) {
 	if err := a.sweepStaleReservations(ctx); err != nil {
 		log.Printf("sweeper: reservations: %v", err)
 	}
+	if err := a.sweepAuthFailures(ctx); err != nil {
+		log.Printf("sweeper: auth failures: %v", err)
+	}
 }
 
 // sweepStaleReservations removes reservation rows abandoned by crashed or

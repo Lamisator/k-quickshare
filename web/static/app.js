@@ -180,10 +180,10 @@
     const E2E = window.PYXIS_E2E;
     const fileId = e2eRoot.getAttribute('data-file');
     const mode = e2eRoot.getAttribute('data-mode');
-    const fileName = e2eRoot.getAttribute('data-name');
     const fileType = e2eRoot.getAttribute('data-type');
     const previewKind = e2eRoot.getAttribute('data-preview-kind');
     const errBox = document.getElementById('e2e-error');
+    const warnBox = document.getElementById('e2e-warning');
     const keyMissing = document.getElementById('key-missing');
     const mainBox = document.getElementById('e2e-main');
     const dlBtn = document.getElementById('e2e-download');
@@ -191,6 +191,19 @@
     const statusEl = document.getElementById('e2e-status');
     const pctEl = document.getElementById('e2e-pct');
     const fillEl = document.getElementById('e2e-fill');
+
+    // Container version and the authenticated manifest. Everything the page
+    // shows before decryption came from the server's database columns, which
+    // nothing binds to the ciphertext; after decryption the manifest is the
+    // authority and any disagreement is reported rather than smoothed over.
+    const e2eVersion = Number(e2eRoot.getAttribute('data-e2e-version')) || 1;
+    const manifestAttr = e2eRoot.getAttribute('data-manifest') || '';
+    const manifestBytes = manifestAttr ? E2E.b64uDecode(manifestAttr) : null;
+
+    // The name used for the saved file. Starts as the server's copy so the page
+    // has something to show, and is replaced by the authenticated one as soon
+    // as a decryption succeeds.
+    let fileName = e2eRoot.getAttribute('data-name');
 
     let fileKey = null;
     let plainBlob = null;
@@ -200,6 +213,11 @@
       errBox.textContent = msg;
       errBox.hidden = false;
       progress.hidden = true;
+    };
+    const warn = (msg) => {
+      if (!warnBox) return;
+      warnBox.textContent = msg;
+      warnBox.hidden = false;
     };
     const setProgress = (label, frac) => {
       progress.hidden = false;
@@ -235,12 +253,36 @@
           buf = await res.arrayBuffer();
         }
         setProgress(t('e2e_decrypting'), 0);
-        plainBlob = await E2E.decryptBuffer(buf, fileKey, fileType,
-          (f) => setProgress(t('e2e_decrypting'), f));
+        const onProgress = (f) => setProgress(t('e2e_decrypting'), f);
+        if (e2eVersion >= 2) {
+          // A version 2 share without its manifest cannot be authenticated at
+          // all, so it is refused rather than quietly decrypted the old way —
+          // "the metadata went missing" is exactly what a tampering server
+          // would look like.
+          if (!manifestBytes) throw new Error('missing manifest');
+          const out = await E2E.decryptFile(buf, fileKey, manifestBytes, onProgress);
+          plainBlob = out.blob;
+          adoptManifest(out.manifest);
+        } else {
+          plainBlob = await E2E.decryptLegacy(buf, fileKey, fileType, onProgress);
+          warn(t('e2e_legacy'));
+        }
         progress.hidden = true;
         return plainBlob;
       })();
       return inFlight;
+    }
+
+    // adoptManifest switches the page over to the values the decryption just
+    // authenticated. A mismatch is not fatal — the bytes are genuine either
+    // way — but the recipient is told, because a file that arrives under a
+    // different name than the sender gave it is worth knowing about.
+    function adoptManifest(m) {
+      if (!m || !m.name || m.name === fileName) return;
+      warn(t('e2e_name_changed', fileName, m.name));
+      fileName = m.name;
+      const heading = document.querySelector('.dl-file-title h1');
+      if (heading) heading.textContent = m.name;
     }
 
     async function renderPreview() {
@@ -289,7 +331,7 @@
         keyMissing.hidden = false;
         dlBtn.classList.add('btn-disabled');
       } else {
-        E2E.deriveUrlKey(E2E.b64uDecode(secret))
+        E2E.deriveUrlKey(E2E.b64uDecode(secret), e2eVersion)
           .then((k) => { fileKey = k; return startSession(); })
           .catch(() => fail(t('e2e_failed')));
       }
@@ -304,7 +346,7 @@
         errBox.hidden = true;
         try {
           setProgress(t('e2e_deriving'), 0.5);
-          const { key, auth } = await E2E.derivePasswordKeys(pwInput.value, salt);
+          const { key, auth } = await E2E.derivePasswordKeys(pwInput.value, salt, e2eVersion);
           const res = await fetch('/files/' + fileId, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -341,6 +383,7 @@
     const batchId = batchRoot.getAttribute('data-batch');
     const mode = batchRoot.getAttribute('data-mode');
     const errBox = document.getElementById('batch-error');
+    const warnBox = document.getElementById('batch-warning');
     const keyMissing = document.getElementById('key-missing');
     const mainBox = document.getElementById('batch-main');
     const listEl = document.getElementById('batch-list');
@@ -352,12 +395,20 @@
     const fillEl = document.getElementById('batch-fill');
 
     let batchKey = null;
+    let rosterKey = null;
+    let batchVersion = 1;
     let members = [];
 
     const fail = (msg) => {
       errBox.textContent = msg;
       errBox.hidden = false;
       progress.hidden = true;
+    };
+    const warn = (msgs) => {
+      if (!warnBox) return;
+      const list = Array.isArray(msgs) ? msgs : [msgs];
+      warnBox.textContent = list.join(' ');
+      warnBox.hidden = list.length === 0;
     };
     const setProgress = (label, frac) => {
       progress.hidden = false;
@@ -373,7 +424,84 @@
         headers: { Accept: 'application/json' },
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      members = (await res.json()).files || [];
+      const data = await res.json();
+      members = data.files || [];
+      batchVersion = Number(data.e2eVersion) || 1;
+      await verifyRoster(data);
+    }
+
+    // verifyRoster checks the listing the server just returned against the
+    // sealed roster the uploader stored.
+    //
+    // Each member's own manifest proves that member's bytes and metadata; none
+    // of them says anything about WHICH members belong to the link. That is the
+    // server's answer, and without a roster it is unverifiable: a file can be
+    // withheld, or one from elsewhere spliced in, and every remaining file still
+    // decrypts flawlessly. So each served row is matched against a roster entry
+    // by id, name, size, type and manifest digest.
+    //
+    // Findings are reported, not silently repaired. A missing file has a benign
+    // explanation — the owner deleted it — and an extra one has a benign race:
+    // a member uploaded moments ago, before its roster update landed. Neither
+    // can be told apart from tampering here, so both are stated plainly and an
+    // unverified member is kept out of "Download all".
+    async function verifyRoster(data) {
+      const notes = [];
+      if (batchVersion < 2) {
+        // A pre-version-2 batch never had a roster. Say so once rather than
+        // implying a guarantee this link cannot give.
+        warn([t('batch_legacy')]);
+        return;
+      }
+      let roster;
+      try {
+        if (!data.roster) throw new Error('no roster');
+        roster = await E2E.openRoster(rosterKey, batchId, E2E.b64uDecode(data.roster));
+      } catch (err) {
+        // Either the server has no roster for a batch that must have one, or it
+        // does not open under this link's key. Both mean the member list is
+        // unverifiable, which is the strongest statement this page can make.
+        for (const m of members) m.unverified = true;
+        warn([t('batch_no_roster')]);
+        return;
+      }
+
+      const byID = new Map();
+      for (const f of roster.files || []) byID.set(f.id, f);
+
+      for (const m of members) {
+        const entry = byID.get(m.id);
+        if (!entry) {
+          m.unverified = true;
+          continue;
+        }
+        byID.delete(m.id);
+        const digest = m.manifest ? await E2E.sha256b64u(E2E.b64uDecode(m.manifest)) : '';
+        if (entry.manifest !== digest || entry.name !== m.name ||
+            Number(entry.size) !== Number(m.size) || entry.type !== m.contentType) {
+          m.unverified = true;
+          continue;
+        }
+        // The manifest must also name THIS batch. Unwrapping the member's key
+        // under another batch's key would already fail, so this cannot be the
+        // only line of defence — but it turns "decryption failed" into a
+        // statement about what actually went wrong.
+        try {
+          if (E2E.parseManifest(E2E.b64uDecode(m.manifest)).batch !== batchId) {
+            m.unverified = true;
+          }
+        } catch (err) {
+          m.unverified = true;
+        }
+      }
+
+      const extra = members.filter((m) => m.unverified).length;
+      if (extra > 0) notes.push(t('batch_unverified', extra));
+      if (byID.size > 0) {
+        notes.push(t('batch_missing', byID.size,
+          Array.from(byID.values()).map((f) => f.name).join(', ')));
+      }
+      warn(notes);
     }
 
     // Each member is sealed under its own key; the batch key only unwraps.
@@ -388,7 +516,15 @@
         const res = await fetch('/b/' + batchId + '/f/' + m.id + '/raw');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const buf = await res.arrayBuffer();
-        return E2E.decryptBuffer(buf, fileKey, m.contentType, onProgress);
+        if (Number(m.e2eVersion) >= 2) {
+          if (!m.manifest) throw new Error('missing manifest');
+          const out = await E2E.decryptFile(buf, fileKey, E2E.b64uDecode(m.manifest), onProgress);
+          // The manifest is the authenticated name, so it wins over the row the
+          // server sent — including for the file the browser then saves.
+          m.name = out.manifest.name || m.name;
+          return out.blob;
+        }
+        return E2E.decryptLegacy(buf, fileKey, m.contentType, onProgress);
       })();
       // A failed attempt must stay retryable, so only a success is kept.
       plainCache.set(m.id, p);
@@ -431,6 +567,16 @@
         sub.title = sub.textContent;
         meta.appendChild(name);
         meta.appendChild(sub);
+        if (m.unverified) {
+          // The row is still downloadable — its own manifest still has to
+          // authenticate its bytes — but nothing vouches for it belonging to
+          // this link, and the badge says exactly that.
+          const badge = document.createElement('span');
+          badge.className = 'batch-row-warn';
+          badge.textContent = t('batch_row_unverified');
+          badge.title = t('batch_row_unverified_hint');
+          meta.appendChild(badge);
+        }
 
         const actions = document.createElement('div');
         actions.className = 'batch-row-actions';
@@ -506,12 +652,23 @@
       try {
         // Members are decrypted one at a time and handed to the zip as blobs,
         // so only one file's plaintext is held as bytes at any moment.
+        //
+        // Unverified members are left out: the archive is a single artefact the
+        // recipient will treat as "the share", and a file nothing ties to this
+        // link must not ride into it unnoticed. They stay individually
+        // downloadable, where the badge is right next to the button.
+        const included = members.filter((m) => !m.unverified);
         const entries = [];
-        for (let i = 0; i < members.length; i++) {
-          const m = members[i];
-          setProgress(t('batch_fetching', m.name), i / members.length);
-          entries.push({ name: m.name, blob: await decryptMember(m) });
+        for (let i = 0; i < included.length; i++) {
+          const m = included[i];
+          setProgress(t('batch_fetching', m.name), i / included.length);
+          // Read the name AFTER decrypting: that is when the manifest's
+          // authenticated name replaces the server's, and an object literal
+          // would otherwise capture the old one before the await resolves.
+          const blob = await decryptMember(m);
+          entries.push({ name: m.name, blob: blob });
         }
+        if (entries.length === 0) throw new Error(t('batch_empty'));
         const zip = await ZIP.build(entries, (done, all) =>
           setProgress(t('batch_zipping'), done / all));
         saveBlob(zip, t('batch_zip_name'));
@@ -539,8 +696,8 @@
       if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) {
         keyMissing.hidden = false;
       } else {
-        E2E.deriveBatchKey(E2E.b64uDecode(secret))
-          .then((k) => { batchKey = k; return startBatch(); })
+        E2E.deriveBatchKeys(E2E.b64uDecode(secret), E2E.VERSION)
+          .then((k) => { batchKey = k.key; rosterKey = k.roster; return startBatch(); })
           .catch(() => fail(t('batch_failed')));
       }
     } else {
@@ -554,16 +711,17 @@
         errBox.hidden = true;
         try {
           setProgress(t('e2e_deriving'), 0.5);
-          const { key, auth } = await E2E.derivePasswordKeys(pwInput.value, salt);
+          const derived = await E2E.derivePasswordKeys(pwInput.value, salt, E2E.VERSION);
           const res = await fetch('/b/' + batchId + '/unlock', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'auth=' + encodeURIComponent(E2E.b64uEncode(auth)),
+            body: 'auth=' + encodeURIComponent(E2E.b64uEncode(derived.auth)),
           });
           clearProgress();
           if (res.status === 429) { fail(t('rate_limited')); return; }
           if (!res.ok) { fail(t('e2e_wrong_pw')); pwInput.value = ''; return; }
-          batchKey = key;
+          batchKey = derived.key;
+          rosterKey = derived.roster;
           lockBox.hidden = true;
           await startBatch();
         } catch (err) {
@@ -982,6 +1140,7 @@
     if (ctl.aborted) return;
     fd.append('batch_id', batch.id);
 
+    let manifestBytes;
     try {
       // Every member gets its own random key, sealed under the batch key. The
       // server stores the sealed blob and can open neither.
@@ -989,12 +1148,27 @@
       const key = await E2E.importAes(rawKey);
       fd.append('wrapped_key', E2E.b64uEncode(await E2E.wrapFileKey(batch.key, rawKey)));
 
-      const cipher = await E2E.encryptFile(file, key, (f) => {
+      // The manifest is built BEFORE encryption and fed to every chunk as
+      // additional authenticated data, which is what ties the bytes to their
+      // size, count, name, type and batch. The id is generated here rather than
+      // taken from the server's row: it has to exist before the upload, and it
+      // must be something the server cannot choose.
+      manifestBytes = E2E.buildManifest({
+        id: E2E.newFileId(),
+        batch: batch.id,
+        size: file.size,
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+      });
+
+      const cipher = await E2E.encryptFile(file, key, manifestBytes, (f) => {
         fill.style.width = Math.round(f * 100) + '%';
         status.textContent = t('e2e_encrypting');
       }, ctl);
       fd.append('file', cipher, file.name);
       fd.append('e2e', '1');
+      fd.append('e2e_version', String(E2E.VERSION));
+      fd.append('manifest', E2E.b64uEncode(manifestBytes));
       fd.append('plain_size', String(file.size));
       fd.append('content_type', file.type || 'application/octet-stream');
     } catch (err) {
@@ -1047,6 +1221,17 @@
         // No per-file link: the batch link covers every file in this visit.
         batchState.count++;
         renderBatchPanel();
+        let created = null;
+        try { created = JSON.parse(xhr.responseText); } catch (e) { /* handled below */ }
+        if (created && created.id) {
+          recordMember(created.id, file, manifestBytes);
+        } else {
+          // Without the server's row id the member cannot be entered into the
+          // roster, so the link would list a file nothing vouches for. Say so
+          // here rather than letting the recipient discover it as a warning.
+          reason.textContent = t('reason_roster');
+          reason.hidden = false;
+        }
       } else if (xhr.status === 401) {
         fail('login', t('reason_login'));
         setTimeout(() => (location.href = '/login?next=/'), 800);
@@ -1075,7 +1260,62 @@
   // editing them afterwards would silently redefine a link that may already
   // have been sent to somebody. "Start a new link" is the way out.
 
-  const batchState = { id: null, fragment: '', key: null, count: 0, creating: null };
+  const batchState = {
+    id: null, fragment: '', key: null, rosterKey: null,
+    count: 0, creating: null,
+    // The authenticated member list, rebuilt and re-sealed after every file so
+    // the link is verifiable at every moment of an upload session, not only
+    // once it ends — people copy the link and send it while files are still
+    // going up.
+    roster: [], rosterSeq: 0, rosterChain: Promise.resolve(),
+  };
+
+  // recordMember adds one uploaded file to the roster and pushes the re-sealed
+  // list to the server.
+  //
+  // Updates are chained rather than fired concurrently: each carries a sequence
+  // number and the server keeps only the highest, so two in flight at once
+  // would let the smaller list win and silently drop a member from the
+  // verified set.
+  function recordMember(fileID, file, manifestBytes) {
+    const E2E = window.PYXIS_E2E;
+    batchState.rosterChain = batchState.rosterChain.then(async () => {
+      if (!batchState.id || !batchState.rosterKey) return;
+      batchState.roster.push({
+        id: fileID,
+        name: file.name,
+        size: file.size,
+        type: file.type || 'application/octet-stream',
+        manifest: await E2E.sha256b64u(manifestBytes),
+      });
+      batchState.rosterSeq++;
+      const sealed = await E2E.sealRoster(batchState.rosterKey, batchState.id, {
+        v: E2E.VERSION,
+        batch: batchState.id,
+        seq: batchState.rosterSeq,
+        files: batchState.roster,
+      });
+      const body = new URLSearchParams();
+      body.set('roster', E2E.b64uEncode(sealed));
+      body.set('seq', String(batchState.rosterSeq));
+      await fetch('/batches/' + batchState.id + '/roster', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: body.toString(),
+      });
+    }).catch((err) => {
+      // A roster that failed to store is not a failed upload — the file is
+      // safely there and decryptable. It does mean the recipient will be told
+      // the member list could not be verified, so it is worth a toast.
+      toast(t('reason_roster'));
+      // eslint-disable-next-line no-console
+      console.warn('roster update failed', err);
+    });
+    return batchState.rosterChain;
+  }
 
   const batchShare = document.getElementById('batch-share');
   const batchShareUrl = document.getElementById('batch-share-url');
@@ -1105,11 +1345,13 @@
       body.set('max_downloads', opts.maxDownloads);
 
       let key;
+      let rosterKey;
       let fragment = '';
       if (opts.password) {
         const salt = E2E.randomBytes(E2E.SALT_LEN);
-        const derived = await E2E.derivePasswordKeys(opts.password, salt);
+        const derived = await E2E.derivePasswordKeys(opts.password, salt, E2E.VERSION);
         key = derived.key;
+        rosterKey = derived.roster;
         body.set('auth_salt', E2E.b64uEncode(salt));
         body.set('auth_verifier', E2E.b64uEncode(derived.auth));
       } else {
@@ -1117,7 +1359,9 @@
         // this tab — the server sees the batch id and nothing else.
         const secret = E2E.randomBytes(E2E.KEY_LEN);
         fragment = '#' + E2E.b64uEncode(secret);
-        key = await E2E.deriveBatchKey(secret);
+        const derived = await E2E.deriveBatchKeys(secret, E2E.VERSION);
+        key = derived.key;
+        rosterKey = derived.roster;
       }
 
       const res = await fetch('/batches', {
@@ -1135,6 +1379,9 @@
       batchState.id = data.id;
       batchState.fragment = fragment;
       batchState.key = key;
+      batchState.rosterKey = rosterKey;
+      batchState.roster = [];
+      batchState.rosterSeq = 0;
       setOptionsLocked(true);
       return batchState;
     })();
@@ -1168,6 +1415,9 @@
       batchState.id = null;
       batchState.fragment = '';
       batchState.key = null;
+      batchState.rosterKey = null;
+      batchState.roster = [];
+      batchState.rosterSeq = 0;
       batchState.count = 0;
       batchState.creating = null;
       setOptionsLocked(false);

@@ -20,6 +20,18 @@
   <h2 class="section-title">{{if .User.HasPassword}}{{T .Lang "account.change_pw"}}{{else}}{{T .Lang "account.set_pw"}}{{end}}</h2>
   {{if .Error}}<p class="alert">{{.Error}}</p>{{end}}
   {{if .Success}}<p class="alert alert-ok">{{.Success}}</p>{{end}}
+
+  {{/* Adding a FIRST local password to an SSO account creates a credential that
+       outlives the identity provider's control of it, so a stolen session must
+       not be enough. StepUpRequired means the person has to prove themselves at
+       the provider again before the form appears. Changing an EXISTING password
+       does not go through here: it is gated on the current password instead. */}}
+  {{if .StepUpRequired}}
+  <p class="dl-sub">{{T .Lang "account.stepup_hint"}}</p>
+  <a class="btn btn-primary btn-block" href="/auth/oidc/start?reauth=1&amp;next=%2Faccount">
+    {{T .Lang "account.stepup_button"}}
+  </a>
+  {{else}}
   <form method="post" action="/account/password" class="auth-form" autocomplete="off">
     {{if .User.HasPassword}}
     <label>
@@ -29,16 +41,17 @@
     {{end}}
     <label>
       <span>{{T .Lang "account.new"}}</span>
-      <input name="new_password" type="password" required minlength="8" autocomplete="new-password">
+      <input name="new_password" type="password" required minlength="{{.MinPasswordLen}}" autocomplete="new-password">
     </label>
     <label>
       <span>{{T .Lang "account.confirm"}}</span>
-      <input name="confirm_password" type="password" required minlength="8" autocomplete="new-password">
+      <input name="confirm_password" type="password" required minlength="{{.MinPasswordLen}}" autocomplete="new-password">
     </label>
     <button type="submit" class="btn btn-primary btn-block">
       {{if .User.HasPassword}}{{T .Lang "account.update"}}{{else}}{{T .Lang "account.set_pw"}}{{end}}
     </button>
   </form>
+  {{end}}
 </div>
 
 {{template "footer" .}}

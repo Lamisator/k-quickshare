@@ -124,6 +124,22 @@ func (a *App) handleAdminSettingsOIDC(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("oidc settings saved: enabled=%v issuer=%s allowed_domain=%q",
 		enabled, issuer, allowedDomain)
+
+	// Accounts are bound to (issuer, subject). Repointing the instance at a
+	// different provider therefore does NOT hand the existing accounts to
+	// whoever holds the same subject there — they become unreachable instead,
+	// and the next sign-in creates fresh accounts. That is the safe direction,
+	// but it is surprising enough to say out loud.
+	if current.Issuer != "" && issuer != current.Issuer {
+		var orphaned int
+		if err := a.db.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM users WHERE oidc_issuer = $1`, current.Issuer).Scan(&orphaned); err == nil && orphaned > 0 {
+			log.Printf("WARNING: issuer changed from %s to %s; %d account(s) remain bound to the "+
+				"old issuer and will not be matched by logins from the new one. Re-map them by hand "+
+				"if the two providers really represent the same people.",
+				current.Issuer, issuer, orphaned)
+		}
+	}
 	a.renderSettings(w, r, http.StatusOK, "", a.tr(r, "msg.oidc_saved"))
 }
 

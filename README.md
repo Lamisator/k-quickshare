@@ -80,11 +80,12 @@ bounded and makes the ciphertext seekable.
 | `4` | E2E password | `PBKDF2-SHA256(password, salt, 600k)` → HKDF split |
 
 For a **password** share the password itself is never transmitted. PBKDF2
-produces a master secret, which HKDF splits down two branches:
+produces a master secret, which HKDF splits down three branches:
 
-- `enc` — the file key. Stays in the browser.
+- `enc` — the file (or batch) key. Stays in the browser.
 - `auth` — a token sent once. The server stores only `SHA-256(auth)` in
   `auth_verifier` and uses it to gate access to the ciphertext.
+- `roster` — seals the batch's member list (below). Stays in the browser.
 
 Knowing the auth branch cannot yield the encryption branch, so the stored
 verifier is useless for decryption even to someone holding the database.
@@ -92,6 +93,73 @@ verifier is useless for decryption even to someone holding the database.
 Uploads that are not end-to-end encrypted are **rejected** (HTTP 400). There is
 no server-side encryption path to fall back to, and no code left that could
 decrypt a stored file.
+
+### The container is versioned — and the version is the point
+
+`files.e2e_version` and `batches.e2e_version` record which container a share
+was written with. This exists so a future change to the framing or to a KDF
+label cannot silently strand live shares again: old rows keep their version and
+keep decrypting through the routine that produced them. `web/static/e2e.js`
+holds the labels in a table indexed by version for exactly that reason.
+
+**Version 1** sealed the chunks and nothing else. Each chunk authenticated
+itself and said nothing about the file it belonged to — no plaintext length, no
+chunk count, no name, no type. "Every chunk is authenticated" sounds complete,
+and is not:
+
+- whole trailing chunks could be dropped and everything left still verified, so
+  a file could be truncated at a 64 KiB boundary without a single GCM failure;
+- a blob replaced with **zero bytes** decrypted to zero chunks — a valid empty
+  file, because there was nothing left to check;
+- the name, size and type shown to the recipient came from database columns
+  that nothing tied to the ciphertext.
+
+**Version 2** keeps the chunk layout byte for byte and adds a **manifest**:
+
+```json
+{"v":2,"id":"<32 random bytes, base64url>","batch":"<uuid or empty>",
+ "size":197842,"chunks":4,"chunk":65536,"name":"report.pdf","type":"application/pdf"}
+```
+
+Those bytes are passed to AES-GCM as **additional authenticated data for every
+chunk**. Truncation now fails (the count is authenticated), an empty blob fails
+(version 2 always emits at least one chunk, whose only content is the tag over
+the manifest), substitution fails, renaming fails, and moving a file into a
+different batch fails. The landing page shows the server's copy of the name
+until decryption succeeds, then replaces it with the manifest's and says so if
+the two disagree.
+
+The manifest is authenticated **as bytes**. The server stores exactly what the
+browser produced and returns it verbatim; re-serialising it — even into
+equivalent JSON — would make the file permanently undecryptable. The server
+still parses it, but only to *reject* one that contradicts the upload it
+arrived with (wrong size, wrong chunk count, a batch it does not belong to).
+
+### The batch roster
+
+Per-file manifests protect each file. They say nothing about *which* files a
+link resolves to — that is the server's answer, and on its own it is
+unverifiable: a member can be withheld, or one from elsewhere spliced in, and
+every remaining file still decrypts perfectly.
+
+So the uploader seals a **roster** — the member list, with each entry's id,
+name, size, type and manifest digest — under the `roster` HKDF branch of the
+batch secret, with the batch id as AAD so it cannot be replayed onto another
+batch. It is re-sealed after every file, carrying a sequence number the server
+will not let go backwards, so the link is verifiable while an upload session is
+still running.
+
+The download page checks the listing it was served against the roster and
+**reports** what it finds rather than repairing it:
+
+- a member the roster does not vouch for is badged *unverified* and left out of
+  "Download all" — it stays individually downloadable, because its own bytes are
+  still authenticated;
+- a member the roster names and the server did not offer is listed as missing.
+
+Both have innocent explanations (the owner deleted a file; a member was uploaded
+seconds ago and its roster update has not landed) and neither can be told apart
+from tampering in the browser, so both are stated plainly.
 
 ### The application KEK
 
@@ -113,11 +181,16 @@ It defends against **passive** compromise: a stolen disk, leaked backups, an
 operator reading the filesystem, a subpoena of stored data. The bytes on disk
 are unreadable without a key that only ever existed in a browser.
 
+Against a server that tampers with **stored data** — rewriting a blob, editing a
+row, dropping a file from a share — version 2 is the defence: the manifest and
+the roster make those changes fail or announce themselves rather than pass
+unnoticed.
+
 It does **not** defend against an actively hostile server, because the server
 ships the JavaScript that performs the crypto. A compromised deployment could
-serve a modified `e2e.js` that exfiltrates keys. That is inherent to
-browser-delivered end-to-end encryption and cannot be fixed with more
-client-side crypto.
+serve a modified `e2e.js` that exfiltrates keys, or one that simply does not
+check the manifest it was given. That is inherent to browser-delivered
+end-to-end encryption and cannot be fixed with more client-side crypto.
 
 One practical consequence: for a URL-key share, **the link is the key**. Anyone
 who obtains it has the file.
@@ -185,6 +258,11 @@ docker compose up -d --build
 The app listens on `${APP_PORT:-8080}`. `deploy/docker-compose.yml` is the
 production variant: no published port, Traefik labels for TLS termination, an
 external `proxy` network and absolute host paths under `/srv/docker/pyxis/`.
+Its build context is `..` — a relative build path in Compose resolves against
+the *compose file's* directory, not your shell's, so it has to point back at the
+repository root where the Dockerfile is. It also requires `FILE_ENCRYPTION_KEY`
+and `TRUSTED_PROXY_CIDRS` rather than defaulting them to empty: both are silent
+when wrong, and this stack always sits behind a proxy.
 
 Data lives in two bind mounts:
 
@@ -210,9 +288,8 @@ mkdir -p "$FILES_DIR"
 go run .
 ```
 
-Schema migrations run automatically at startup and are additive
-(`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`), so upgrading is just
-deploying the new binary.
+Schema migrations run automatically at startup. See
+[Upgrading](#upgrading) for what that actually does and how to roll back.
 
 ### First login
 
@@ -248,9 +325,27 @@ Every setting is an environment variable. Only `DATABASE_URL` and
 | `QUOTA_TOTAL_BYTES` | `0` | Instance-wide ceiling. `0` = unlimited. |
 | `DISK_MIN_FREE_BYTES` | `1073741824` | Refuse uploads below this free space. |
 
-`TRUSTED_PROXY_CIDRS` matters: rate limiting keys on client IP, and without it a
-forged `X-Forwarded-For` would let an attacker evade the limiter. Leave it empty
-when clients connect directly.
+`TRUSTED_PROXY_CIDRS` matters in **both** directions, which is why it has no
+safe default:
+
+- Set too widely, a forged `X-Forwarded-For` lets an attacker evade the limiter
+  by inventing a new client address per attempt.
+- Left empty behind a reverse proxy, every visitor keys to the proxy's address:
+  the login and share-password limits then apply to the whole instance at once,
+  so one person guessing a share password locks out everybody.
+
+Leave it empty only when clients reach the app directly. The app logs its
+choice at startup and warns once if a forwarding header arrives from a peer it
+does not trust — that combination is the signature of the second mistake.
+`deploy/docker-compose.yml` refuses to start without it.
+
+Rate limiting is 10 failures per 10 minutes per (source, account) and per
+(source, share), plus 30 failed logins per 10 minutes from any one source
+across all usernames — that last one bounds how much password hashing a single
+address can make the server do. Counters live in the `auth_failures` table as
+well as in process memory, so they survive a restart and are shared by every
+replica; a database error opens only the shared half, leaving the local counter
+in force.
 
 ---
 
@@ -274,16 +369,21 @@ when clients connect directly.
 |---|---|
 | `GET /` | Upload page |
 | `POST /batches` | Open a batch, returns its id |
+| `POST /batches/{id}/roster` | Store the sealed member list (owner only, monotonic `seq`) |
 | `POST /upload` | Upload one file, optionally into a batch |
 | `GET /history` | Your uploads (admins see all) |
 | `POST /delete/{id}` | Delete a file |
 | `GET /account`, `POST /account/password` | Self-service account |
 | `/admin/users`, `/admin/settings` | Admin only |
 
+`GET /healthz` also reports the schema version, and fails with 503 when the
+database is on a different one than the binary expects — a half-finished upgrade
+should take an instance out of the load balancer, not serve from it.
+
 There is no API for uploading plaintext. A client must encrypt in the browser
-container format and POST the ciphertext with `e2e=1`; anything else is
-rejected. `web/static/e2e.js` is the reference implementation, and
-`chunkformat_test.go` mirrors it in Go.
+container format and POST the ciphertext with `e2e=1`, `e2e_version=2` and a
+`manifest`; anything else is rejected. `web/static/e2e.js` is the reference
+implementation, and `chunkformat_test.go` mirrors it in Go.
 
 ---
 
@@ -308,6 +408,8 @@ i18n.go              EN/DE catalogue
 theme.go             theme cookie
 web/templates/       html/template pages
 web/static/          app.js, e2e.js, zip.js, qrlib.js, style.css
+.github/workflows/   CI: vet, gofmt, race tests against PostgreSQL,
+                     govulncheck, container build, secret scan
 ```
 
 Two rules the codebase enforces and that are easy to break:
@@ -325,24 +427,44 @@ Two rules the codebase enforces and that are easy to break:
 
 ```bash
 go test ./...
+
+# The tests that matter most are the ones written in SQL. Give them a database:
+export TEST_DATABASE_URL="postgres://pyxis:pyxis@localhost:5432/pyxis_test?sslmode=disable"
+go test -race ./...
 ```
 
+Everything below runs in CI on every push and pull request
+(`.github/workflows/ci.yml`), together with `go vet`, a `gofmt` check,
+`govulncheck ./...`, a container build, a `docker compose config` check of both
+compose files, and a secret scan. `govulncheck` also runs weekly, because
+advisories land without anyone pushing.
+
 - `chunkformat_test.go` — a Go reference implementation of the container
-  format. Nothing in the shipped binary encrypts or decrypts a file, so this
-  lives in test scope purely as an oracle.
-- `crypto_test.go` — the container round-trip, including seekable reads.
-- `e2e_interop_test.go` — **byte-exact vectors** proving Go and browser WebCrypto
-  produce identical ciphertext. Regenerate these if the chunk size, nonce layout
-  or any HKDF info string ever changes.
+  format, both versions. Nothing in the shipped binary encrypts or decrypts a
+  file, so this lives in test scope purely as an oracle.
+- `crypto_test.go` — the container round-trip including seekable reads, plus
+  password hashing (Argon2id, and that existing bcrypt hashes still verify),
+  session-token hashing, the step-up window and the HSTS gate.
+- `e2e_interop_test.go` — **byte-exact vectors** proving Go and browser
+  WebCrypto produce identical ciphertext, for version 1 and version 2, plus the
+  negative cases version 2 exists for: truncation, an emptied blob, a renamed
+  or retyped or resized manifest, and a file moved to another batch.
+  Regenerate these if the chunk size, nonce layout, AAD handling or any HKDF
+  info string ever changes.
+- `migrations_db_test.go` — needs `TEST_DATABASE_URL`. Migrations are recorded
+  and idempotent, sessions are stored hashed, usernames are case-unique *in the
+  database*, OIDC identities are scoped to their issuer (including the one-time
+  adoption of pre-issuer rows), and the rate limiter counts across replicas.
+- `quota_db_test.go` — needs `TEST_DATABASE_URL`. The quota rules decided in SQL.
 - `templates_test.go` — renders every template in both languages, checks
   translation completeness, verifies `e2e.js` is actually loaded (a missing script
   tag once broke every upload while all other tests passed), and that no
   `jsStrings` key silently falls back to its own name.
 
-For integration work against a real database, point the app at a local PostgreSQL
-and drive it over HTTP — the browser modules in `web/static/` load cleanly in Node
-(`globalThis.window = globalThis`, then evaluate the file), so client and server
-can be tested against each other rather than against assumptions.
+The browser modules in `web/static/` load cleanly in Node
+(`globalThis.window = globalThis`, then evaluate the file), which is how the
+interop vectors are produced — client and server are tested against each other
+rather than against assumptions.
 
 ---
 
@@ -361,6 +483,40 @@ cryptographic namespace, so it is a **breaking change**, not cosmetic:
   from `fsu_`/`fsb_` to `pxu_`/`pxb_`. Everyone is signed out once, and any
   in-flight share unlocks must be redone.
 - Containers, the database, its role and the deploy directory are all `pyxis`.
+
+### Upgrading
+
+Schema changes are **numbered and recorded**, in `db.go`, applied one
+transaction each under an advisory lock so two containers starting at once
+cannot race. `schema_migrations` says where a database stands, and `/healthz`
+refuses while the binary and the database disagree.
+
+Migration 1 is the historical baseline — the single idempotent script this
+replaced. It contains `DROP COLUMN IF EXISTS` statements from the removal of
+the server-side key modes; they are a no-op on any database that has already
+been through them, and they are the reason the old "migrations are additive"
+claim was wrong. Anything added from here is append-only: a migration that has
+shipped is immutable, and correcting one means adding another.
+
+**Before upgrading:**
+
+```bash
+docker compose exec -T db pg_dump -U pyxis pyxis | gzip > pre-upgrade.sql.gz
+```
+
+**Rolling back** means restoring that dump: the previous binary does not know
+the new columns, and there are no down-migrations. Nothing is lost by doing so
+except whatever was uploaded since — the blobs in `data/files` are untouched by
+any migration.
+
+Two migrations do more than add columns, and are worth knowing about:
+
+- **2 (`hash_session_tokens`)** rewrites `sessions.id` in place to
+  `SHA-256(token)`. Nobody is signed out; the cookies people already hold keep
+  working, because they hash to what is now stored.
+- **4 (`username_case_insensitive_unique`)** fails, with the offending names in
+  the message, if usernames that differ only in case already exist. Rename them
+  by hand and start the container again.
 
 **Backups.** Back up `data/postgres` and `data/files`. Neither contains
 anything the server can decrypt, so a backup leaks no file contents — but it is
@@ -398,9 +554,40 @@ override is read inside that transaction, so a quota change takes effect on the
 next upload rather than at the user's next sign-in. Abandoned reservations
 expire after 15 minutes.
 
-**Rate limiting** is 10 failures per 10 minutes on login and on share passwords.
+**Accounts and sessions.**
 
-**Sessions** are revoked on password and privilege changes.
+- Local passwords are hashed with **Argon2id** (19 MiB, t=2, p=1 — OWASP's
+  first recommended configuration; the heavier m=64MiB/p=4 variant would let
+  the public login form allocate that much per attempt). Bcrypt hashes from
+  earlier versions still verify and are rewritten as Argon2id on the next
+  successful sign-in. Minimum length is 12.
+- The session cookie is a bearer token, and only its **SHA-256** is stored. A
+  leaked `sessions` row proves a session exists; it cannot be replayed as one.
+  A plain hash is right here — the token is 32 bytes of CSPRNG output, so there
+  is no low-entropy guess to slow down.
+- Sessions are revoked on password and privilege changes.
+- An **SSO-only account must re-authenticate with the provider** before it can
+  set a first local password. That password would outlive the provider's
+  control of the account, so a stolen session cookie must not be enough to
+  create one. The flow asks for `prompt=login` and `max_age=0` and checks
+  `auth_time`; the resulting step-up is good for 10 minutes and is spent by the
+  change it authorises. Changing an *existing* password is unaffected — it is
+  gated on that password instead.
+- OIDC accounts are keyed on **(issuer, subject)**, never the subject alone.
+  OpenID Connect only guarantees uniqueness for the pair. Repointing the
+  instance at a different provider therefore does not hand existing accounts to
+  whoever holds the same subject there; they become unreachable instead, and the
+  settings page logs how many are affected. Accounts created before the issuer
+  was recorded are adopted, once, by the configured issuer.
+
+**HTTP.** HSTS (one year, `includeSubDomains`, no `preload`) is sent by the
+application whenever `COOKIE_SECURE` is on — it belongs with the code that
+assumes HTTPS, not only in a proxy config that can be replaced. The server sets
+an explicit `ReadHeaderTimeout`, `IdleTimeout` and `MaxHeaderBytes`, and
+shuts down gracefully on SIGINT/SIGTERM with 30 seconds for in-flight
+transfers. There is deliberately **no `WriteTimeout`**: Go measures it from the
+request headers, so it would cap the total duration of a large upload or
+download rather than bounding idleness.
 
 ---
 
@@ -425,3 +612,14 @@ expire after 15 minutes.
   This is deliberate, but it makes `curl` uploads considerably more work.
 - **A browser without WebCrypto cannot use this app**, for upload or download.
   In practice that means it requires HTTPS.
+- **Version 1 shares keep the version 1 guarantee.** They cannot be upgraded in
+  place — that would need the key — so until they expire their length and name
+  stay unauthenticated. The landing page says so rather than implying otherwise.
+- **The roster can be rolled back to an earlier version of itself** by a server
+  that keeps an old sealed copy. `seq` only stops replays through the API. The
+  effect is bounded: an older roster is a shorter list, so it can make a genuine
+  member look unverified, but it cannot make an injected one look verified.
+- **A batch member deleted by its owner shows as missing** on the download page
+  until a new file is uploaded to that batch and the roster is re-sealed. That
+  is the honest reading — the browser cannot distinguish a deletion from a
+  withheld file.

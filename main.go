@@ -14,9 +14,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -45,9 +47,11 @@ type App struct {
 	quotaDefaults UserQuota
 
 	trustedProxies []*net.IPNet // networks whose X-Forwarded-For is honored
+	proxyWarnOnce  sync.Once    // guards the "untrusted X-Forwarded-For" warning
 
-	loginLimiter *failLimiter
-	shareLimiter *failLimiter
+	loginLimiter       *failLimiter // per (source, username)
+	loginSourceLimiter *failLimiter // per source, across all usernames
+	shareLimiter       *failLimiter // per (source, share)
 
 	oidcMu  sync.RWMutex
 	oidc    *OIDC
@@ -140,12 +144,20 @@ func main() {
 			TotalBytes:   envInt64("QUOTA_TOTAL_BYTES", 0),
 			MinFreeBytes: envInt64("DISK_MIN_FREE_BYTES", 1024*1024*1024),
 		},
-		loginLimiter: newFailLimiter(10, 10*time.Minute),
-		shareLimiter: newFailLimiter(10, 10*time.Minute),
+		loginLimiter:       newFailLimiter(failMaxTries, failWindow).shared(pool, "login"),
+		loginSourceLimiter: newFailLimiter(failMaxPerSource, failWindow).shared(pool, "login-src"),
+		shareLimiter:       newFailLimiter(failMaxTries, failWindow).shared(pool, "share"),
 	}
 	app.trustedProxies, err = parseTrustedProxies(os.Getenv("TRUSTED_PROXY_CIDRS"))
 	if err != nil {
 		log.Fatalf("TRUSTED_PROXY_CIDRS: %v", err)
+	}
+	if len(app.trustedProxies) == 0 {
+		log.Print("TRUSTED_PROXY_CIDRS is empty: X-Forwarded-For is ignored and rate limits key " +
+			"on the TCP peer. Correct for direct client connections; behind a reverse proxy it " +
+			"makes every visitor share one limiter bucket — set it to the proxy's network.")
+	} else {
+		log.Printf("trusting X-Forwarded-For from %d network(s)", len(app.trustedProxies))
 	}
 
 	if err := app.loadQuotaDefaults(ctx, UserQuota{
@@ -219,21 +231,54 @@ func main() {
 	mux.Handle("/admin/settings/oidc", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsOIDC)))
 	mux.Handle("/admin/settings/quota", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsQuota)))
 
+	mux.Handle("/batches/", app.requireUserHandler(app.dispatchBatchOwnerRoutes))
+
 	var handler http.Handler = mux
 	handler = app.withOptionalUser(handler)
 	handler = sameOriginCheck(handler)
-	handler = securityHeaders(handler)
+	handler = app.securityHeaders(handler)
 	handler = logRequests(handler)
 
+	// Timeouts are explicit rather than left at Go's defaults of "none".
+	//
+	// WriteTimeout is deliberately absent: it is measured from the moment the
+	// request headers are read, so on this service it would cap how long a
+	// large upload or download may take in total, not how long the server may
+	// be idle — a 512 MiB transfer on a slow line would be cut off mid-body.
+	// The read side is bounded instead (headers, and the whole body through
+	// MaxBytesReader), and IdleTimeout reclaims kept-alive connections.
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
-	log.Printf("pyxis listening on %s (files dir: %s, max upload: %d bytes)", listen, filesDir, maxUpload)
+
+	// Shut down gracefully: in-flight uploads finish and the sweeper stops
+	// before the pool closes, instead of transfers dying with the process and
+	// leaving half-written blobs behind.
+	shutdownErr := make(chan error, 1)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-stop
+		log.Printf("received %s, shutting down (up to 30s for in-flight requests)", sig)
+		cancel() // stops the sweeper
+		sctx, scancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer scancel()
+		shutdownErr <- srv.Shutdown(sctx)
+	}()
+
+	log.Printf("pyxis listening on %s (files dir: %s, max upload: %d bytes, schema v%d)",
+		listen, filesDir, maxUpload, latestSchemaVersion())
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server: %v", err)
 	}
+	if err := <-shutdownErr; err != nil {
+		log.Printf("graceful shutdown: %v", err)
+	}
+	log.Print("stopped")
 }
 
 func (a *App) requireUserHandler(h http.HandlerFunc) http.Handler {
@@ -344,13 +389,31 @@ func redactPath(p string) string {
 	return prefix + id
 }
 
+// hstsMaxAge is one year, the value the preload list requires. Sent only when
+// the deployment is actually HTTPS-only, which COOKIE_SECURE already states.
+const hstsMaxAge = 365 * 24 * 60 * 60
+
 // securityHeaders sets browser-hardening defaults. Handlers that stream user
 // content (the preview endpoint) overwrite CSP/framing with stricter or
 // embedding-compatible values of their own.
-func securityHeaders(h http.Handler) http.Handler {
+func (a *App) securityHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hdr := w.Header()
 		hdr.Set("X-Content-Type-Options", "nosniff")
+		// HSTS belongs in the application, not only at the proxy: the whole
+		// design assumes HTTPS (WebCrypto is unavailable without it, and the
+		// share fragment must never cross a plaintext hop), and a header that
+		// depends on the proxy being configured correctly is a header that
+		// silently disappears the day someone puts a new proxy in front.
+		//
+		// Gated on COOKIE_SECURE, the flag that already declares "this instance
+		// is served over HTTPS", so a local plain-HTTP run cannot pin itself
+		// out of reach. No `preload`: that is a one-way commitment for the
+		// whole domain and is the operator's decision, not a default.
+		if a.cookieSecure {
+			hdr.Set("Strict-Transport-Security",
+				fmt.Sprintf("max-age=%d; includeSubDomains", hstsMaxAge))
+		}
 		// NOT "no-referrer": per the Fetch spec browsers then serialize the
 		// Origin header as "null" even on same-origin form POSTs, which the
 		// same-origin middleware would reject. "same-origin" keeps the

@@ -22,6 +22,10 @@
   <noscript><p class="alert">{{T .Lang "dl.js_required"}}</p></noscript>
   <p class="alert" id="key-missing" hidden>{{T .Lang "dl.key_missing"}}</p>
   <p class="alert" id="batch-error" hidden></p>
+  {{/* Filled in by app.js after it checks the served listing against the sealed
+       roster: a member the roster does not vouch for, or one the roster names
+       and the server did not send. */}}
+  <p class="alert alert-warn" id="batch-warning" hidden></p>
 
   {{if eq .E2EMode "password"}}
   <div id="batch-lock"{{if .Unlocked}} hidden{{end}}>

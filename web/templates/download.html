@@ -10,8 +10,14 @@
 </div>
 
 {{else}}
+{{/* data-manifest is the file's authenticated metadata, verbatim as stored. It
+     is the AAD of every chunk, so app.js can only decrypt if these bytes make
+     the round trip unchanged — and the name/size/type printed below come from
+     the database, which nothing binds to the ciphertext, so app.js replaces
+     them with the manifest's values once decryption has vouched for them. */}}
 <div class="dl-card dl-card-wide" id="dl-root" data-e2e="1" data-mode="{{.E2EMode}}" data-file="{{.ID}}"
      data-name="{{.Name}}" data-size="{{.Size}}" data-type="{{.ContentType}}"
+     data-e2e-version="{{.E2EVersion}}" data-manifest="{{.Manifest}}"
      data-preview-kind="{{.PreviewKind}}"{{if .AuthSalt}} data-salt="{{.AuthSalt}}"{{end}}{{if .HasLimit}} data-limited="1"{{end}}>
   <p class="dl-kicker">{{T .Lang "dl.wants_to_share"}} · <span class="e2e-badge">{{T .Lang "dl.e2e"}}</span></p>
 
@@ -26,6 +32,7 @@
   <noscript><p class="alert">{{T .Lang "dl.js_required"}}</p></noscript>
   <p class="alert" id="key-missing" hidden>{{T .Lang "dl.key_missing"}}</p>
   <p class="alert" id="e2e-error" hidden></p>
+  <p class="alert alert-warn" id="e2e-warning" hidden></p>
 
   {{if eq .E2EMode "password"}}
   <div id="e2e-lock">

@@ -197,8 +197,15 @@ func (a *App) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		a.renderLoginError(w, r, a.tr(r, "login.err_empty"), next)
 		return
 	}
-	limitKey := a.clientIP(r) + "|" + strings.ToLower(username)
-	if !a.loginLimiter.allow(limitKey) {
+	// Two counters gate a login attempt. The narrow one protects a single
+	// account from being guessed at; the per-source one bounds how much
+	// password hashing any one address can make the server do, which the
+	// narrow counter never sees because a new username starts a new key.
+	ip := a.clientIP(r)
+	limitKey := ip + "|" + strings.ToLower(username)
+	sourceKey := "src|" + ip
+	if !a.loginLimiter.allow(r.Context(), limitKey) ||
+		!a.loginSourceLimiter.allow(r.Context(), sourceKey) {
 		a.renderStatus(w, r, http.StatusTooManyRequests, "login.html", map[string]any{
 			"Title":       a.tr(r, "title.login") + " · Pyxis",
 			"OIDCEnabled": a.getOIDC() != nil,
@@ -212,12 +219,17 @@ func (a *App) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			log.Printf("login lookup: %v", err)
 		}
-		a.loginLimiter.fail(limitKey)
+		a.loginLimiter.fail(r.Context(), limitKey)
+		a.loginSourceLimiter.fail(r.Context(), sourceKey)
 		a.renderLoginError(w, r, a.tr(r, "login.err_invalid"), next)
 		return
 	}
-	a.loginLimiter.reset(limitKey)
-	sid, expires, err := a.createSession(r.Context(), user.ID)
+	a.loginLimiter.reset(r.Context(), limitKey)
+	a.loginSourceLimiter.reset(r.Context(), sourceKey)
+	// The stored hash may predate Argon2id. This is the only moment the plain
+	// password is available to rewrite it with, so take it.
+	a.rehashIfLegacy(r.Context(), user.ID, hash, password)
+	sid, expires, err := a.createSession(r.Context(), user.ID, nil)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
@@ -308,7 +320,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-	file, header, err := r.FormFile("file")
+	file, _, err := r.FormFile("file")
 	if err != nil {
 		httpError(w, err, http.StatusBadRequest)
 		return
@@ -445,8 +457,47 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			humanSize(plainSize), humanSize(a.maxUpload)), http.StatusRequestEntityTooLarge)
 		return
 	}
+
+	// Only the current container version is accepted for new uploads. Version 1
+	// is still read — old shares must keep opening — but writing it again would
+	// mean storing a file whose length, chunk count and name nothing
+	// authenticates, which is the whole reason version 2 exists.
+	//
+	// Checked after the size limit so an over-large file still gets told its
+	// size and the limit, which is the answer the person uploading can act on.
+	if v := r.FormValue("e2e_version"); v != strconv.Itoa(e2eVersionV2) {
+		dst.Close()
+		_ = os.Remove(dstPath)
+		http.Error(w, fmt.Sprintf("uploads must use e2e_version %d", e2eVersionV2),
+			http.StatusBadRequest)
+		return
+	}
+
+	// The manifest is the file's authenticated metadata: it is the AAD of every
+	// chunk, so it must be stored byte for byte and handed back unchanged.
+	// Re-encoding it — even into equivalent JSON — would make the file
+	// permanently undecryptable.
+	manifestRaw, merr := base64.RawURLEncoding.DecodeString(r.FormValue("manifest"))
+	if merr != nil {
+		dst.Close()
+		_ = os.Remove(dstPath)
+		http.Error(w, "manifest is not base64url", http.StatusBadRequest)
+		return
+	}
+	batchIDForManifest := ""
+	if batch != nil {
+		batchIDForManifest = batch.ID
+	}
+	manifest, merr := parseManifest(manifestRaw, plainSize, batchIDForManifest)
+	if merr != nil {
+		dst.Close()
+		_ = os.Remove(dstPath)
+		http.Error(w, merr.Error(), http.StatusBadRequest)
+		return
+	}
+
 	ctWritten, copyErr := io.Copy(dst, file)
-	if copyErr == nil && ctWritten != e2eCipherLen(plainSize) {
+	if copyErr == nil && ctWritten != e2eCipherLen(plainSize, e2eVersionV2) {
 		copyErr = fmt.Errorf("ciphertext length %d does not match plain_size %d", ctWritten, plainSize)
 	}
 	written = plainSize
@@ -472,13 +523,17 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The blob is opaque ciphertext; the client passes the real MIME type
-	// separately, since the server cannot sniff what it cannot read.
-	contentType := r.FormValue("content_type")
+	// Name and type come from the MANIFEST, not from the multipart headers or a
+	// side form field. Those are unauthenticated: a downloader has no way to
+	// tell whether the name it is shown is the one the sender chose. The
+	// manifest travels inside the AAD of every chunk, so taking the stored
+	// columns from it keeps what the history page and the landing page display
+	// in step with what the browser can actually verify after decrypting.
+	contentType := manifest.Type
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	origName := sanitizeName(header.Filename)
+	origName := sanitizeName(manifest.Name)
 
 	// Swap the reservation for the real row under the quota lock, re-checking
 	// against the actual size.
@@ -490,11 +545,13 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		_, err := tx.Exec(r.Context(),
 			`INSERT INTO files (id, original_name, stored_name, size_bytes, content_type,
 			                    uploaded_by, expires_at, max_downloads,
-			                    key_mode, enc_salt, auth_verifier, batch_id, wrapped_key)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			                    key_mode, enc_salt, auth_verifier, batch_id, wrapped_key,
+			                    e2e_version, manifest)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 			id.String(), origName, storedName, written, contentType,
 			user.ID.String(), expiresAt, maxDownloads,
-			keyMode, salt, authVerifier, batchID, wrappedKey)
+			keyMode, salt, authVerifier, batchID, wrappedKey,
+			e2eVersionV2, manifestRaw)
 		return err
 	})
 	if err != nil {
@@ -560,6 +617,8 @@ type fileMeta struct {
 	AuthVerifier  []byte
 	ArchivedAt    *time.Time
 	BatchID       *string
+	E2EVersion    int
+	Manifest      []byte // authenticated metadata, served back verbatim
 }
 
 // dispatchFileRoutes handles /files/{id}, /files/{id}/download, /files/{id}/preview.
@@ -627,11 +686,13 @@ func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	err := a.db.QueryRow(r.Context(),
 		`SELECT original_name, stored_name, size_bytes, content_type, uploaded_at,
 		        expires_at, max_downloads, download_count,
-		        key_mode, enc_salt, auth_verifier, archived_at, batch_id
+		        key_mode, enc_salt, auth_verifier, archived_at, batch_id,
+		        e2e_version, manifest
 		 FROM files WHERE id = $1`, id.String()).
 		Scan(&fm.OriginalName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
 			&fm.ExpiresAt, &fm.MaxDownloads, &fm.DownloadCount,
-			&fm.KeyMode, &fm.EncSalt, &fm.AuthVerifier, &fm.ArchivedAt, &fm.BatchID)
+			&fm.KeyMode, &fm.EncSalt, &fm.AuthVerifier, &fm.ArchivedAt, &fm.BatchID,
+			&fm.E2EVersion, &fm.Manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -651,7 +712,7 @@ func (a *App) renderGone(w http.ResponseWriter, r *http.Request, status int, msg
 // from it via a KDF branch that cannot yield the encryption key.
 func (a *App) handleE2EUnlock(w http.ResponseWriter, r *http.Request, fm *fileMeta) {
 	limitKey := a.clientIP(r) + "|" + fm.ID
-	if !a.shareLimiter.allow(limitKey) {
+	if !a.shareLimiter.allow(r.Context(), limitKey) {
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return
 	}
@@ -660,13 +721,13 @@ func (a *App) handleE2EUnlock(w http.ResponseWriter, r *http.Request, fm *fileMe
 	if err == nil && len(token) == 32 {
 		sum := sha256.Sum256(token)
 		if hmac.Equal(sum[:], fm.AuthVerifier) {
-			a.shareLimiter.reset(limitKey)
+			a.shareLimiter.reset(r.Context(), limitKey)
 			a.setUnlockCookie(w, fm)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 	}
-	a.shareLimiter.fail(limitKey)
+	a.shareLimiter.fail(r.Context(), limitKey)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
@@ -690,12 +751,16 @@ func (a *App) renderE2ELanding(w http.ResponseWriter, r *http.Request, fm *fileM
 		mode = "password"
 	}
 	data := map[string]any{
-		"Title":       fm.OriginalName + " · Pyxis",
-		"State":       "e2e",
-		"E2EMode":     mode,
-		"Unlocked":    fm.KeyMode == keyModeE2EPassword && a.isUnlocked(r, fm),
-		"ID":          fm.ID,
-		"Name":        fm.OriginalName,
+		"Title":      fm.OriginalName + " · Pyxis",
+		"State":      "e2e",
+		"E2EMode":    mode,
+		"Unlocked":   fm.KeyMode == keyModeE2EPassword && a.isUnlocked(r, fm),
+		"ID":         fm.ID,
+		"Name":       fm.OriginalName,
+		"E2EVersion": fm.E2EVersion,
+		// Verbatim, exactly as stored: this is the AAD of every chunk, so the
+		// browser can only decrypt if these bytes survive the round trip.
+		"Manifest":    base64.RawURLEncoding.EncodeToString(fm.Manifest),
 		"Size":        fm.Size,
 		"ContentType": fm.ContentType,
 		"UploadedAt":  fm.UploadedAt,
@@ -858,7 +923,20 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db unhealthy", http.StatusServiceUnavailable)
 		return
 	}
-	fmt.Fprintln(w, "ok")
+	// The schema version is what tells a deploy whether the migrations this
+	// binary expects actually ran. Reporting "ok" while the database is a
+	// version behind is how a half-finished upgrade goes unnoticed.
+	v, err := schemaVersion(r.Context(), a.db)
+	if err != nil {
+		http.Error(w, "schema unknown", http.StatusServiceUnavailable)
+		return
+	}
+	if v != latestSchemaVersion() {
+		http.Error(w, fmt.Sprintf("schema is v%d, this binary needs v%d",
+			v, latestSchemaVersion()), http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintf(w, "ok schema=v%d\n", v)
 }
 
 // --- helpers --------------------------------------------------------------

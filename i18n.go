@@ -97,6 +97,12 @@ var translations = map[string]map[string]string{
 	"js.e2e_unavailable": {"en": "Encryption unavailable — upload refused", "de": "Verschlüsselung nicht verfügbar — Upload abgelehnt"},
 	"js.e2e_insecure":    {"en": "Nothing was sent: encryption requires a secure (HTTPS) connection.", "de": "Es wurde nichts gesendet: Die Verschlüsselung erfordert eine sichere (HTTPS-)Verbindung."},
 
+	// --- integrity of the decrypted result ---
+	"js.e2e_legacy": {"en": "This link uses an older format: the contents are authenticated, but the file's length and name are not. It was shared before the current format existed.",
+		"de": "Dieser Link nutzt ein älteres Format: Der Inhalt ist authentifiziert, Länge und Name der Datei jedoch nicht. Er wurde vor dem aktuellen Format erstellt."},
+	"js.e2e_name_changed": {"en": "This page announced the file as “%s”, but the sender named it “%s”. The verified name is used.",
+		"de": "Diese Seite hat die Datei als „%s“ angekündigt, der Absender hat sie aber „%s“ genannt. Verwendet wird der verifizierte Name."},
+
 	// --- upload queue: cancel / retry / failure reasons ---
 	"js.cancel":    {"en": "Cancel", "de": "Abbrechen"},
 	"js.retry":     {"en": "Retry", "de": "Erneut versuchen"},
@@ -114,6 +120,8 @@ var translations = map[string]map[string]string{
 		"de": "Diese Datei ist %s groß. Das Maximum sind %s. Es wurde nichts hochgeladen."},
 	"js.reason_encrypt": {"en": "Encryption failed in this browser: %s",
 		"de": "Die Verschlüsselung ist in diesem Browser fehlgeschlagen: %s"},
+	"js.reason_roster": {"en": "Uploaded, but the signed file list could not be updated — recipients will see this file flagged as unverified.",
+		"de": "Hochgeladen, aber die signierte Dateiliste konnte nicht aktualisiert werden — Empfänger sehen diese Datei als nicht verifiziert markiert."},
 
 	// --- batch strings used by app.js ---
 	"js.batch_link":         {"en": "Share link for all files", "de": "Freigabe-Link für alle Dateien"},
@@ -133,6 +141,19 @@ var translations = map[string]map[string]string{
 	"js.batch_options_locked": {"en": "Expiry, password and download limit apply to the whole link and were set with the first file. Start a new link to change them.",
 		"de": "Ablauf, Passwort und Download-Limit gelten für den gesamten Link und wurden mit der ersten Datei festgelegt. Starte einen neuen Link, um sie zu ändern."},
 	"js.batch_failed": {"en": "Could not load this share.", "de": "Diese Freigabe konnte nicht geladen werden."},
+
+	// --- roster verification (which files this link really contains) ---
+	"js.batch_legacy": {"en": "This link predates signed file lists: each file's contents are authenticated, but which files belong to the link is not.",
+		"de": "Dieser Link stammt aus der Zeit vor signierten Dateilisten: Der Inhalt jeder Datei ist authentifiziert, die Zugehörigkeit der Dateien zum Link jedoch nicht."},
+	"js.batch_no_roster": {"en": "The signed file list is missing or does not match this link, so it cannot be confirmed which files belong here. Each file's contents are still verified on download.",
+		"de": "Die signierte Dateiliste fehlt oder passt nicht zu diesem Link, daher lässt sich nicht bestätigen, welche Dateien dazugehören. Der Inhalt jeder Datei wird beim Herunterladen weiterhin verifiziert."},
+	"js.batch_unverified": {"en": "%s file(s) here are not in the sender's signed list and are excluded from “Download all”.",
+		"de": "%s Datei(en) stehen nicht auf der signierten Liste des Absenders und sind von „Alle herunterladen“ ausgenommen."},
+	"js.batch_missing": {"en": "%s file(s) the sender listed are not being offered: %s.",
+		"de": "%s vom Absender gelistete Datei(en) werden nicht angeboten: %s."},
+	"js.batch_row_unverified": {"en": "unverified", "de": "nicht verifiziert"},
+	"js.batch_row_unverified_hint": {"en": "This file is not on the sender's signed list. Its contents are still authenticated, but it may not have been part of this share.",
+		"de": "Diese Datei steht nicht auf der signierten Liste des Absenders. Ihr Inhalt ist weiterhin authentifiziert, sie war aber möglicherweise nicht Teil dieser Freigabe."},
 
 	// --- batch share (one link, many files) ---
 	"batch.title":          {"en": "Shared files", "de": "Geteilte Dateien"},
@@ -226,13 +247,19 @@ var translations = map[string]map[string]string{
 	"account.change_pw": {"en": "Change password", "de": "Passwort ändern"},
 	"account.set_pw":    {"en": "Set password", "de": "Passwort festlegen"},
 	"account.current":   {"en": "Current password", "de": "Aktuelles Passwort"},
-	"account.new":       {"en": "New password (min. 8 characters)", "de": "Neues Passwort (mind. 8 Zeichen)"},
+	"account.new":       {"en": "New password (min. 12 characters)", "de": "Neues Passwort (mind. 12 Zeichen)"},
 	"account.confirm":   {"en": "Confirm new password", "de": "Neues Passwort bestätigen"},
 	"account.update":    {"en": "Update password", "de": "Passwort aktualisieren"},
-	"msg.pw_short":      {"en": "New password must be at least 8 characters.", "de": "Das neue Passwort muss mindestens 8 Zeichen lang sein."},
-	"msg.pw_mismatch":   {"en": "Passwords do not match.", "de": "Die Passwörter stimmen nicht überein."},
-	"msg.pw_wrong":      {"en": "Current password is incorrect.", "de": "Das aktuelle Passwort ist falsch."},
-	"msg.pw_updated":    {"en": "Password updated.", "de": "Passwort aktualisiert."},
+	"account.stepup_hint": {"en": "This account signs in through your identity provider. To add a password — a credential that keeps working after that provider revokes your access — confirm who you are there first.",
+		"de": "Dieses Konto meldet sich über deinen Identitätsanbieter an. Um ein Passwort hinzuzufügen — eine Anmeldeinformation, die auch nach einem Entzug des Zugriffs beim Anbieter weiter funktioniert — bestätige dort zuerst deine Identität."},
+	"account.stepup_button": {"en": "Confirm identity to set a password",
+		"de": "Identität bestätigen, um ein Passwort festzulegen"},
+	"msg.stepup_required": {"en": "Confirm your identity with your identity provider before setting a password.",
+		"de": "Bestätige deine Identität bei deinem Identitätsanbieter, bevor du ein Passwort festlegst."},
+	"msg.pw_short":    {"en": "New password must be at least 12 characters.", "de": "Das neue Passwort muss mindestens 12 Zeichen lang sein."},
+	"msg.pw_mismatch": {"en": "Passwords do not match.", "de": "Die Passwörter stimmen nicht überein."},
+	"msg.pw_wrong":    {"en": "Current password is incorrect.", "de": "Das aktuelle Passwort ist falsch."},
+	"msg.pw_updated":  {"en": "Password updated.", "de": "Passwort aktualisiert."},
 
 	// --- admin users ---
 	"users.heading":        {"en": "Users", "de": "Benutzer"},
@@ -240,7 +267,7 @@ var translations = map[string]map[string]string{
 	"users.new":            {"en": "+ New local user", "de": "+ Neuer lokaler Benutzer"},
 	"users.username":       {"en": "Username", "de": "Benutzername"},
 	"users.email_opt":      {"en": "Email (optional)", "de": "E-Mail (optional)"},
-	"users.password8":      {"en": "Password (min. 8)", "de": "Passwort (mind. 8)"},
+	"users.password8":      {"en": "Password (min. 12)", "de": "Passwort (mind. 12)"},
 	"users.is_admin":       {"en": "Admin", "de": "Admin"},
 	"users.create":         {"en": "Create user", "de": "Benutzer anlegen"},
 	"users.col_email":      {"en": "Email", "de": "E-Mail"},
@@ -252,7 +279,7 @@ var translations = map[string]map[string]string{
 	"users.no_login":       {"en": "no login", "de": "kein Login"},
 	"users.member":         {"en": "member", "de": "Mitglied"},
 	"users.reset_pw":       {"en": "Reset password", "de": "Passwort zurücksetzen"},
-	"users.new_pw_ph":      {"en": "new password (min. 8)", "de": "neues Passwort (mind. 8)"},
+	"users.new_pw_ph":      {"en": "new password (min. 12)", "de": "neues Passwort (mind. 12)"},
 	"users.save":           {"en": "Save", "de": "Speichern"},
 	"users.revoke":         {"en": "Revoke admin", "de": "Admin entziehen"},
 	"users.make_admin":     {"en": "Make admin", "de": "Zum Admin machen"},
@@ -272,7 +299,7 @@ var translations = map[string]map[string]string{
 	"users.quota_files_ph": {"en": "files, blank = default", "de": "Dateien, leer = Standard"},
 	"users.t_quota_admin":  {"en": "Admins have no quota unless you set one here", "de": "Admins haben kein Kontingent, sofern hier keines gesetzt wird"},
 	"msg.user_required":    {"en": "Username is required.", "de": "Benutzername ist erforderlich."},
-	"msg.user_pw_short":    {"en": "Password must be at least 8 characters.", "de": "Das Passwort muss mindestens 8 Zeichen lang sein."},
+	"msg.user_pw_short":    {"en": "Password must be at least 12 characters.", "de": "Das Passwort muss mindestens 12 Zeichen lang sein."},
 	"msg.user_exists":      {"en": "A user with that username already exists.", "de": "Ein Benutzer mit diesem Namen existiert bereits."},
 	"msg.user_created":     {"en": "Created user %s.", "de": "Benutzer %s angelegt."},
 	"msg.pw_reset":         {"en": "Password reset.", "de": "Passwort zurückgesetzt."},
@@ -485,14 +512,17 @@ func jsStrings(lang string) map[string]string {
 		"js.e2e_encrypting", "js.e2e_decrypting", "js.e2e_downloading",
 		"js.e2e_deriving", "js.e2e_failed", "js.e2e_wrong_pw", "js.e2e_unsupported",
 		"js.e2e_unavailable", "js.e2e_insecure",
+		"js.e2e_legacy", "js.e2e_name_changed",
 		"js.cancel", "js.retry", "js.cancelled", "js.queued",
 		"js.reason_cancelled", "js.reason_network", "js.reason_login",
-		"js.reason_http", "js.reason_encrypt", "js.reason_too_large",
+		"js.reason_http", "js.reason_encrypt", "js.reason_too_large", "js.reason_roster",
 		"js.batch_link", "js.batch_count", "js.batch_new", "js.batch_download",
 		"js.batch_preview", "js.batch_hide_preview", "js.batch_preview_failed",
 		"js.batch_empty", "js.batch_zipping", "js.batch_fetching",
 		"js.batch_zip_too_large", "js.batch_zip_name", "js.batch_options_locked",
 		"js.batch_failed",
+		"js.batch_legacy", "js.batch_no_roster", "js.batch_unverified", "js.batch_missing",
+		"js.batch_row_unverified", "js.batch_row_unverified_hint",
 		"batch.n_files", "batch.one_file",
 	}
 	out := make(map[string]string, len(keys))

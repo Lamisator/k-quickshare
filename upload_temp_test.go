@@ -36,7 +36,7 @@ func TestUploadRemovesMultipartTempFiles(t *testing.T) {
 	a.maxUpload = 128 << 20
 
 	u := mkUser(t, a, ctx, "upload-tmp-"+uuid.NewString()[:8], false)
-	sid, _, err := a.createSession(ctx, u.ID)
+	sid, _, err := a.createSession(ctx, u.ID, nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	a.maxUpload = 8 << 20 // small, so the oversize case is cheap to send
 
 	u := mkUser(t, a, ctx, "upload-rej-"+uuid.NewString()[:8], false)
-	sid, _, err := a.createSession(ctx, u.ID)
+	sid, _, err := a.createSession(ctx, u.ID, nil)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -172,6 +172,7 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	var buf strings.Builder
 	mw2 := multipart.NewWriter(&buf)
 	mw2.WriteField("e2e", "1")
+	mw2.WriteField("e2e_version", "2")
 	mw2.WriteField("plain_size", "999999999")
 	part, _ := mw2.CreateFormFile("file", "small.bin")
 	part.Write([]byte("not really ciphertext"))
@@ -182,6 +183,36 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	}
 	if !strings.Contains(body, humanSize(a.maxUpload)) || strings.Contains(body, "invalid plain_size") {
 		t.Errorf("oversize plain_size: %q should state the file size and the limit", body)
+	}
+
+	// A version 1 upload is refused. Old shares still open, but nothing may
+	// store a new file whose length, count and name nothing authenticates.
+	var v1 strings.Builder
+	mwV1 := multipart.NewWriter(&v1)
+	mwV1.WriteField("e2e", "1")
+	mwV1.WriteField("plain_size", "5")
+	p1, _ := mwV1.CreateFormFile("file", "old.bin")
+	p1.Write(make([]byte, 21))
+	mwV1.Close()
+	code, body = post(strings.NewReader(v1.String()), mwV1.FormDataContentType())
+	if code != http.StatusBadRequest || !strings.Contains(body, "e2e_version") {
+		t.Errorf("legacy-format upload: got HTTP %d %q, want 400 naming e2e_version", code, body)
+	}
+
+	// Version 2 without a manifest is refused too: the manifest is what makes
+	// the container authenticated, so accepting the version and not the
+	// metadata would store a file that claims a guarantee it cannot keep.
+	var noMan strings.Builder
+	mwNM := multipart.NewWriter(&noMan)
+	mwNM.WriteField("e2e", "1")
+	mwNM.WriteField("e2e_version", "2")
+	mwNM.WriteField("plain_size", "5")
+	p2, _ := mwNM.CreateFormFile("file", "nomanifest.bin")
+	p2.Write(make([]byte, 21))
+	mwNM.Close()
+	code, body = post(strings.NewReader(noMan.String()), mwNM.FormDataContentType())
+	if code != http.StatusBadRequest || !strings.Contains(body, "manifest") {
+		t.Errorf("manifest-less upload: got HTTP %d %q, want 400 naming the manifest", code, body)
 	}
 
 	// An interrupted body must not be reported as a malformed request.

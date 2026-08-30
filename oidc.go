@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,7 +18,13 @@ const (
 	oidcStateCookie    = "pyxis_oidc_state"
 	oidcVerifierCookie = "pyxis_oidc_verifier"
 	oidcNextCookie     = "pyxis_oidc_next"
+	oidcReauthCookie   = "pyxis_oidc_reauth"
 	oidcStateTTL       = 10 * time.Minute
+
+	// How recent the provider's own auth_time must be for a step-up to count.
+	// prompt=login already asks the IdP to re-prompt; this catches a provider
+	// that honours the parameter loosely.
+	oidcMaxAuthAge = 5 * time.Minute
 
 	// Zitadel confirms the org context of a scope-restricted login via
 	// urn:zitadel:iam:org:domain:primary. urn:zitadel:iam:user:resourceowner:primary_domain
@@ -204,11 +211,25 @@ func (a *App) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 		oauth2.AccessTypeOnline,
 		oauth2.S256ChallengeOption(verifier),
 	}
-	// Let callers force a fresh Zitadel login prompt (useful after a
-	// denied-org attempt when Zitadel would otherwise silently reuse the
-	// cached session).
-	if p := r.URL.Query().Get("prompt"); p == "login" || p == "select_account" || p == "consent" {
-		opts = append(opts, oauth2.SetAuthURLParam("prompt", p))
+	// Step-up: the caller is about to do something that needs proof the person
+	// at the keyboard is still the account holder, not merely the bearer of a
+	// session cookie. max_age=0 plus prompt=login tells the provider to
+	// re-authenticate rather than reuse its own session, and makes it return an
+	// auth_time the callback can check.
+	reauth := r.URL.Query().Get("reauth") == "1"
+	if reauth {
+		setShortCookie(w, oidcReauthCookie, "1", expires, a.cookieSecure)
+		opts = append(opts,
+			oauth2.SetAuthURLParam("prompt", "login"),
+			oauth2.SetAuthURLParam("max_age", "0"))
+	} else {
+		clearShortCookie(w, oidcReauthCookie, a.cookieSecure)
+		// Let callers force a fresh Zitadel login prompt (useful after a
+		// denied-org attempt when Zitadel would otherwise silently reuse the
+		// cached session).
+		if p := r.URL.Query().Get("prompt"); p == "login" || p == "select_account" || p == "consent" {
+			opts = append(opts, oauth2.SetAuthURLParam("prompt", p))
+		}
 	}
 
 	authURL := oc.oauth.AuthCodeURL(state, opts...)
@@ -269,6 +290,19 @@ func (a *App) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The account is keyed on (issuer, subject), never on the subject alone —
+	// a `sub` is unique only within the issuer that minted it. The issuer comes
+	// from the verified token, and the verifier has already required it to
+	// match the configured provider, so it cannot be steered by the request.
+	issuer := idt.Issuer
+	if issuer == "" {
+		issuer = oc.settings.Issuer
+	}
+	if issuer == "" {
+		http.Error(w, "id_token missing issuer", http.StatusBadGateway)
+		return
+	}
+
 	// Zitadel doesn't always include org/profile claims in the ID token
 	// (depends on the "User Info Inside ID Token" project toggle), so we
 	// merge in the UserInfo endpoint's claims. This gives us primary_domain
@@ -314,13 +348,34 @@ func (a *App) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	user, err := a.upsertOIDCUser(r.Context(), sub, preferredUsername, email)
+	user, err := a.upsertOIDCUser(r.Context(), issuer, sub, preferredUsername, email)
 	if err != nil {
 		httpError(w, fmt.Errorf("upsert user: %w", err), http.StatusInternalServerError)
 		return
 	}
 
-	sid, expires, err := a.createSession(r.Context(), user.ID)
+	// A step-up only counts when the provider actually re-authenticated. If it
+	// reports an auth_time, it has to be recent; if it reports none we still
+	// asked for prompt=login, but say so in the log because the guarantee is
+	// then the provider's word rather than a checked claim.
+	var reauthAt *time.Time
+	if c, err := r.Cookie(oidcReauthCookie); err == nil && c.Value == "1" {
+		clearShortCookie(w, oidcReauthCookie, a.cookieSecure)
+		switch authTime, ok := claimSeconds(claims["auth_time"]); {
+		case ok && time.Since(authTime) > oidcMaxAuthAge:
+			log.Printf("oidc step-up rejected for sub=%s: auth_time is %s old", sub, time.Since(authTime))
+		case ok:
+			now := time.Now()
+			reauthAt = &now
+		default:
+			log.Printf("oidc step-up for sub=%s: provider returned no auth_time; "+
+				"relying on prompt=login alone", sub)
+			now := time.Now()
+			reauthAt = &now
+		}
+	}
+
+	sid, expires, err := a.createSession(r.Context(), user.ID, reauthAt)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
@@ -332,8 +387,24 @@ func (a *App) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		next = c.Value
 		clearShortCookie(w, oidcNextCookie, a.cookieSecure)
 	}
-	log.Printf("oidc login: %s (sub=%s)", user.Username, sub)
+	log.Printf("oidc login: %s (iss=%s sub=%s step_up=%v)", user.Username, issuer, sub, reauthAt != nil)
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// claimSeconds reads a NumericDate claim (auth_time, iat, …). JSON numbers
+// arrive as float64 through the generic claims map.
+func claimSeconds(v any) (time.Time, bool) {
+	switch n := v.(type) {
+	case float64:
+		return time.Unix(int64(n), 0), true
+	case int64:
+		return time.Unix(n, 0), true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return time.Unix(i, 0), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func (a *App) renderOIDCDenied(w http.ResponseWriter, r *http.Request, allowed, actual string) {

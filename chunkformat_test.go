@@ -20,8 +20,10 @@ import (
 // shipped binary uses this code.
 //
 // Layout: chunk i occupies i*chunkCipherLen and holds
-// seal(nonce(i), plaintext[i*chunkPlainSize : ...]), with the nonce being
-// 4 zero bytes followed by the big-endian uint64 chunk index.
+// seal(nonce(i), plaintext[i*chunkPlainSize : ...], aad), with the nonce being
+// 4 zero bytes followed by the big-endian uint64 chunk index. In version 1 the
+// aad is empty; in version 2 it is the file's manifest bytes, which is what
+// binds the chunks to the file's length, count, name, type and batch.
 
 const chunkCipherLen = chunkPlainSize + gcmOverhead
 
@@ -32,7 +34,9 @@ func chunkNonce(idx int64) []byte {
 }
 
 // encryptStream encrypts src to dst in chunks and returns the plaintext size.
-func encryptStream(dst io.Writer, src io.Reader, key []byte) (int64, error) {
+// A nil aad reproduces the version 1 container; passing the manifest bytes
+// reproduces version 2.
+func encryptStream(dst io.Writer, src io.Reader, key, aad []byte) (int64, error) {
 	aead, err := newAEAD(key)
 	if err != nil {
 		return 0, err
@@ -45,7 +49,7 @@ func encryptStream(dst io.Writer, src io.Reader, key []byte) (int64, error) {
 	for {
 		n, rerr := io.ReadFull(src, buf)
 		if n > 0 {
-			sealed := aead.Seal(nil, chunkNonce(idx), buf[:n], nil)
+			sealed := aead.Seal(nil, chunkNonce(idx), buf[:n], aad)
 			if _, werr := dst.Write(sealed); werr != nil {
 				return total, werr
 			}
@@ -53,6 +57,13 @@ func encryptStream(dst io.Writer, src io.Reader, key []byte) (int64, error) {
 			idx++
 		}
 		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
+			// Version 2 emits a chunk even for an empty input: its tag is the
+			// only thing authenticating the manifest of a zero-byte file.
+			if idx == 0 && len(aad) > 0 {
+				if _, werr := dst.Write(aead.Seal(nil, chunkNonce(0), nil, aad)); werr != nil {
+					return total, werr
+				}
+			}
 			return total, nil
 		}
 		if rerr != nil {
@@ -66,18 +77,44 @@ func encryptStream(dst io.Writer, src io.Reader, key []byte) (int64, error) {
 type encReader struct {
 	f         *os.File
 	aead      cipher.AEAD
+	aad       []byte
 	plainSize int64
 	off       int64
 	chunkIdx  int64 // index of the chunk in buf, -1 if none
 	buf       []byte
 }
 
-func newEncReader(f *os.File, key []byte, plainSize int64) (*encReader, error) {
+func newEncReader(f *os.File, key, aad []byte, plainSize int64) (*encReader, error) {
 	aead, err := newAEAD(key)
 	if err != nil {
 		return nil, err
 	}
-	return &encReader{f: f, aead: aead, plainSize: plainSize, chunkIdx: -1}, nil
+	// Version 2 fixes the ciphertext length: the manifest declares the chunk
+	// count, so a body that is not exactly that long is rejected before a
+	// single tag is checked. This mirrors decryptFile in e2e.js, and it is what
+	// catches the two cases per-chunk tags never could — a file truncated at a
+	// chunk boundary, and a blob replaced with nothing at all, which otherwise
+	// reads as a perfectly valid empty file.
+	if len(aad) > 0 {
+		st, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if want := e2eCipherLen(plainSize, e2eVersionV2); st.Size() != want {
+			return nil, fmt.Errorf("ciphertext is %d bytes, the manifest requires %d",
+				st.Size(), want)
+		}
+	}
+	r := &encReader{f: f, aead: aead, aad: aad, plainSize: plainSize, chunkIdx: -1}
+	// An empty version 2 file has a chunk but no bytes to read, so Read would
+	// return EOF without ever checking a tag. Verify it here, otherwise the one
+	// case the empty chunk exists for would go unverified.
+	if plainSize == 0 && len(aad) > 0 {
+		if err := r.loadChunk(0); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
 }
 
 func (r *encReader) Read(p []byte) (int, error) {
@@ -102,10 +139,12 @@ func (r *encReader) loadChunk(idx int64) error {
 	if err != nil && err != io.EOF {
 		return err
 	}
-	if n <= gcmOverhead {
+	// A tag with no plaintext is legitimate in version 2 (the empty file), and
+	// impossible in version 1, where a chunk always carries bytes.
+	if n < gcmOverhead || (n == gcmOverhead && len(r.aad) == 0) {
 		return io.ErrUnexpectedEOF
 	}
-	plain, err := r.aead.Open(raw[:0], chunkNonce(idx), raw[:n], nil)
+	plain, err := r.aead.Open(raw[:0], chunkNonce(idx), raw[:n], r.aad)
 	if err != nil {
 		return fmt.Errorf("decrypt chunk %d: %w", idx, err)
 	}

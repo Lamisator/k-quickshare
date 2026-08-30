@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -13,22 +17,46 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
 )
 
 const (
 	sessionCookieName = "pyxis_sid"
 	sessionTTL        = 30 * 24 * time.Hour
+
+	// How long a completed step-up (a fresh interactive OIDC sign-in) stays
+	// good for. Long enough to fill in a form, short enough that a session
+	// stolen afterwards cannot use it.
+	reauthWindow = 10 * time.Minute
 )
 
 type User struct {
 	ID           uuid.UUID
 	Username     string
 	Email        string
+	OIDCIssuer   string
 	OIDCSubject  string
 	IsAdmin      bool
 	IsSuperAdmin bool
 	HasPassword  bool
+
+	// Session-scoped, filled in by sessionUser: when this session last
+	// completed a fresh interactive OIDC authentication. Nil on a session that
+	// never did (a local password login, or an SSO session from before the
+	// step-up existed).
+	ReauthAt *time.Time
+}
+
+// HasOIDC reports whether the account is backed by an external identity.
+func (u *User) HasOIDC() bool { return u.OIDCSubject != "" }
+
+// ReauthFresh reports whether this session's step-up is still inside the
+// window. A password login never sets one, so this is false for those — which
+// is correct: they authenticate with the credential they are being asked to
+// prove, and that path checks the current password instead.
+func (u *User) ReauthFresh() bool {
+	return u.ReauthAt != nil && time.Since(*u.ReauthAt) < reauthWindow
 }
 
 type contextKey string
@@ -40,16 +68,102 @@ func userFromContext(ctx context.Context) *User {
 	return u
 }
 
+// --- password hashing -------------------------------------------------------
+//
+// Local passwords are hashed with Argon2id. Bcrypt hashes written by earlier
+// versions still verify, and are transparently upgraded on the next successful
+// sign-in (see rehashIfLegacy), so nobody has to reset anything.
+//
+// Parameters are OWASP's first recommended Argon2id configuration: 19 MiB of
+// memory, two passes, one lane. The heavier m=64MiB/p=4 variant is also
+// acceptable, but every login attempt allocates that memory on the server, and
+// the login form is reachable by anyone — 19 MiB keeps the memory-hardness that
+// makes GPU cracking expensive without turning the sign-in page into an
+// amplification lever.
+const (
+	argonTime    uint32 = 2
+	argonMemory  uint32 = 19 * 1024 // KiB
+	argonThreads uint8  = 1
+	argonKeyLen  uint32 = 32
+	argonSaltLen        = 16
+)
+
 func hashPassword(pw string) (string, error) {
-	b, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
-	return string(b), err
+	salt := randomBytes(argonSaltLen)
+	sum := argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version, argonMemory, argonTime, argonThreads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(sum)), nil
 }
 
+// checkPassword verifies pw against a stored hash in either format. The
+// algorithm is taken from the stored string, never from configuration, so
+// changing the parameters above cannot invalidate existing hashes.
 func checkPassword(hash, pw string) bool {
-	if hash == "" {
+	switch {
+	case hash == "":
+		return false
+	case strings.HasPrefix(hash, "$argon2id$"):
+		return checkArgon2id(hash, pw)
+	default:
+		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
+	}
+}
+
+// isLegacyHash reports whether a stored hash should be rewritten with the
+// current algorithm the next time the password is verified.
+func isLegacyHash(hash string) bool {
+	return hash != "" && !strings.HasPrefix(hash, "$argon2id$")
+}
+
+func checkArgon2id(hash, pw string) bool {
+	// $argon2id$v=19$m=19456,t=2,p=1$<salt>$<digest>
+	parts := strings.Split(hash, "$")
+	if len(parts) != 6 || parts[1] != "argon2id" {
 		return false
 	}
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
+	var version int
+	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
+		return false
+	}
+	var (
+		memory  uint32
+		timeArg uint32
+		threads uint8
+	)
+	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &timeArg, &threads); err != nil {
+		return false
+	}
+	// Refuse absurd stored parameters rather than allocating whatever a
+	// tampered row asks for.
+	if memory == 0 || memory > 1<<20 || timeArg == 0 || timeArg > 16 || threads == 0 {
+		return false
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return false
+	}
+	want, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil || len(want) == 0 {
+		return false
+	}
+	got := argon2.IDKey([]byte(pw), salt, timeArg, memory, threads, uint32(len(want)))
+	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// rehashIfLegacy upgrades a bcrypt hash to Argon2id after a successful login.
+// Failure is logged and ignored: the user is already authenticated and must not
+// be turned away because a background upgrade did not stick.
+func (a *App) rehashIfLegacy(ctx context.Context, userID uuid.UUID, storedHash, password string) {
+	if !isLegacyHash(storedHash) {
+		return
+	}
+	if err := a.updatePassword(ctx, userID, password); err != nil {
+		log.Printf("rehash password for %s: %v", userID, err)
+		return
+	}
+	log.Printf("password hash upgraded to argon2id for user id=%s", userID)
 }
 
 func randomToken(n int) string {
@@ -66,22 +180,31 @@ func randomBytes(n int) []byte {
 
 // --- users ----------------------------------------------------------------
 
-func (a *App) findUserByUsername(ctx context.Context, username string) (*User, string, error) {
+// userColumns is the projection every user lookup shares, so a column added to
+// scanUser cannot be forgotten in one of the three queries that feed it.
+const userColumns = `id::text, username, email, password_hash, oidc_issuer, oidc_subject,
+	is_admin, is_super_admin`
+
+// scanUser reads userColumns from one row and returns the stored password hash
+// alongside, since only the login paths need it.
+func scanUser(row pgx.Row) (*User, string, error) {
 	var (
 		u       User
 		hash    *string
 		email   *string
+		issuer  *string
 		subject *string
 	)
-	err := a.db.QueryRow(ctx,
-		`SELECT id::text, username, email, password_hash, oidc_subject, is_admin, is_super_admin
-		 FROM users WHERE lower(username) = lower($1)`, username).
-		Scan(&u.ID, &u.Username, &email, &hash, &subject, &u.IsAdmin, &u.IsSuperAdmin)
+	err := row.Scan(&u.ID, &u.Username, &email, &hash, &issuer, &subject,
+		&u.IsAdmin, &u.IsSuperAdmin)
 	if err != nil {
 		return nil, "", err
 	}
 	if email != nil {
 		u.Email = *email
+	}
+	if issuer != nil {
+		u.OIDCIssuer = *issuer
 	}
 	if subject != nil {
 		u.OIDCSubject = *subject
@@ -93,28 +216,45 @@ func (a *App) findUserByUsername(ctx context.Context, username string) (*User, s
 	return &u, "", nil
 }
 
-func (a *App) findUserByOIDCSubject(ctx context.Context, sub string) (*User, error) {
-	var (
-		u       User
-		hash    *string
-		email   *string
-		subject *string
-	)
-	err := a.db.QueryRow(ctx,
-		`SELECT id::text, username, email, password_hash, oidc_subject, is_admin, is_super_admin
-		 FROM users WHERE oidc_subject = $1`, sub).
-		Scan(&u.ID, &u.Username, &email, &hash, &subject, &u.IsAdmin, &u.IsSuperAdmin)
+func (a *App) findUserByUsername(ctx context.Context, username string) (*User, string, error) {
+	return scanUser(a.db.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE lower(username) = lower($1)`, username))
+}
+
+// findUserByOIDCIdentity resolves the account for one external identity.
+//
+// OpenID Connect guarantees uniqueness only for the (issuer, subject) PAIR: a
+// `sub` is unique within its issuer and says nothing outside it. Matching on
+// `sub` alone means that repointing the instance at another IdP — or an
+// attacker who can register at one — maps a colliding subject straight onto an
+// existing account, an administrator's included.
+//
+// The second lookup adopts a row written before the issuer was recorded: it can
+// only ever match an account this instance created itself, and it claims the
+// row for the configured issuer so the ambiguity is gone from then on.
+func (a *App) findUserByOIDCIdentity(ctx context.Context, issuer, sub string) (*User, error) {
+	if issuer == "" || sub == "" {
+		return nil, pgx.ErrNoRows
+	}
+	u, _, err := scanUser(a.db.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2`,
+		issuer, sub))
+	if err == nil {
+		return u, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	u, _, err = scanUser(a.db.QueryRow(ctx,
+		`UPDATE users SET oidc_issuer = $1
+		  WHERE oidc_subject = $2 AND oidc_issuer IS NULL
+		  RETURNING `+userColumns, issuer, sub))
 	if err != nil {
 		return nil, err
 	}
-	if email != nil {
-		u.Email = *email
-	}
-	if subject != nil {
-		u.OIDCSubject = *subject
-	}
-	u.HasPassword = hash != nil && *hash != ""
-	return &u, nil
+	log.Printf("oidc: adopted pre-issuer account %q for issuer %s", u.Username, issuer)
+	return u, nil
 }
 
 func (a *App) createLocalUser(ctx context.Context, username, email, password string, isAdmin bool) (*User, error) {
@@ -238,8 +378,11 @@ func (a *App) deleteUser(ctx context.Context, userID uuid.UUID) error {
 	return err
 }
 
-func (a *App) upsertOIDCUser(ctx context.Context, sub, preferredUsername, email string) (*User, error) {
-	if u, err := a.findUserByOIDCSubject(ctx, sub); err == nil {
+func (a *App) upsertOIDCUser(ctx context.Context, issuer, sub, preferredUsername, email string) (*User, error) {
+	if issuer == "" {
+		return nil, errors.New("oidc: refusing to bind an account without an issuer")
+	}
+	if u, err := a.findUserByOIDCIdentity(ctx, issuer, sub); err == nil {
 		return u, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
@@ -278,9 +421,9 @@ func (a *App) upsertOIDCUser(ctx context.Context, sub, preferredUsername, email 
 		emailArg = email
 	}
 	_, err := a.db.Exec(ctx,
-		`INSERT INTO users (id, username, email, oidc_subject, is_admin)
-		 VALUES ($1, $2, $3, $4, FALSE)`,
-		id.String(), username, emailArg, sub)
+		`INSERT INTO users (id, username, email, oidc_issuer, oidc_subject, is_admin)
+		 VALUES ($1, $2, $3, $4, $5, FALSE)`,
+		id.String(), username, emailArg, issuer, sub)
 	if err != nil {
 		return nil, err
 	}
@@ -288,6 +431,7 @@ func (a *App) upsertOIDCUser(ctx context.Context, sub, preferredUsername, email 
 		ID:          id,
 		Username:    username,
 		Email:       email,
+		OIDCIssuer:  issuer,
 		OIDCSubject: sub,
 	}, nil
 }
@@ -308,62 +452,106 @@ func itoa(n int) string {
 
 // --- sessions -------------------------------------------------------------
 
-func (a *App) createSession(ctx context.Context, userID uuid.UUID) (string, time.Time, error) {
-	sid := randomToken(32)
+// sessionKey is what actually goes in the sessions table. The cookie value is a
+// bearer token: storing it verbatim as the primary key meant a database dump —
+// a backup, a read replica, an errant `SELECT *` in a support ticket — handed
+// over every live session ready to replay. Only the SHA-256 of the token is
+// stored, exactly as one stores an API bearer token, so a leaked row proves a
+// session exists but cannot be used as one.
+//
+// The token is 32 bytes of CSPRNG output, so a plain hash is right here: there
+// is no low-entropy guess to slow down, and password-style stretching on every
+// request would only cost latency.
+func sessionKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func (a *App) createSession(ctx context.Context, userID uuid.UUID, reauthAt *time.Time) (string, time.Time, error) {
+	token := randomToken(32)
 	expiresAt := time.Now().Add(sessionTTL)
 	_, err := a.db.Exec(ctx,
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES ($1, $2, $3)`,
-		sid, userID.String(), expiresAt)
+		`INSERT INTO sessions (id, user_id, expires_at, reauth_at) VALUES ($1, $2, $3, $4)`,
+		sessionKey(token), userID.String(), expiresAt, reauthAt)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	return sid, expiresAt, nil
+	return token, expiresAt, nil
 }
 
-func (a *App) sessionUser(ctx context.Context, sid string) (*User, error) {
-	if sid == "" {
+func (a *App) sessionUser(ctx context.Context, token string) (*User, error) {
+	if token == "" {
 		return nil, pgx.ErrNoRows
 	}
 	var (
-		u       User
-		email   *string
-		hash    *string
-		subject *string
+		u        User
+		email    *string
+		hash     *string
+		issuer   *string
+		subject  *string
+		reauthAt *time.Time
 	)
 	err := a.db.QueryRow(ctx,
-		`SELECT u.id::text, u.username, u.email, u.password_hash, u.oidc_subject, u.is_admin, u.is_super_admin
+		`SELECT u.id::text, u.username, u.email, u.password_hash, u.oidc_issuer, u.oidc_subject,
+		        u.is_admin, u.is_super_admin, s.reauth_at
 		 FROM sessions s
 		 JOIN users u ON u.id = s.user_id
-		 WHERE s.id = $1 AND s.expires_at > NOW()`, sid).
-		Scan(&u.ID, &u.Username, &email, &hash, &subject, &u.IsAdmin, &u.IsSuperAdmin)
+		 WHERE s.id = $1 AND s.expires_at > NOW()`, sessionKey(token)).
+		Scan(&u.ID, &u.Username, &email, &hash, &issuer, &subject,
+			&u.IsAdmin, &u.IsSuperAdmin, &reauthAt)
 	if err != nil {
 		return nil, err
 	}
 	if email != nil {
 		u.Email = *email
 	}
+	if issuer != nil {
+		u.OIDCIssuer = *issuer
+	}
 	if subject != nil {
 		u.OIDCSubject = *subject
 	}
 	u.HasPassword = hash != nil && *hash != ""
+	u.ReauthAt = reauthAt
 	return &u, nil
 }
 
-// deleteUserSessions revokes a user's sessions. exceptSID keeps one session
-// alive (the one performing a self-service password change); pass "" to
-// revoke everything (admin resets, privilege changes).
-func (a *App) deleteUserSessions(ctx context.Context, userID uuid.UUID, exceptSID string) error {
+// markSessionReauth stamps a session as having just completed a fresh
+// interactive sign-in with the identity provider.
+func (a *App) markSessionReauth(ctx context.Context, token string, userID uuid.UUID) error {
 	_, err := a.db.Exec(ctx,
-		`DELETE FROM sessions WHERE user_id = $1 AND id <> $2`,
-		userID.String(), exceptSID)
+		`UPDATE sessions SET reauth_at = NOW() WHERE id = $1 AND user_id = $2`,
+		sessionKey(token), userID.String())
 	return err
 }
 
-func (a *App) deleteSession(ctx context.Context, sid string) {
-	if sid == "" {
+// clearSessionReauth spends a completed step-up across all of the user's
+// sessions, so one re-authentication authorises one action.
+func (a *App) clearSessionReauth(ctx context.Context, userID uuid.UUID) error {
+	_, err := a.db.Exec(ctx,
+		`UPDATE sessions SET reauth_at = NULL WHERE user_id = $1`, userID.String())
+	return err
+}
+
+// deleteUserSessions revokes a user's sessions. exceptToken keeps one session
+// alive (the one performing a self-service password change); pass "" to
+// revoke everything (admin resets, privilege changes).
+func (a *App) deleteUserSessions(ctx context.Context, userID uuid.UUID, exceptToken string) error {
+	except := ""
+	if exceptToken != "" {
+		except = sessionKey(exceptToken)
+	}
+	_, err := a.db.Exec(ctx,
+		`DELETE FROM sessions WHERE user_id = $1 AND id <> $2`,
+		userID.String(), except)
+	return err
+}
+
+func (a *App) deleteSession(ctx context.Context, token string) {
+	if token == "" {
 		return
 	}
-	if _, err := a.db.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sid); err != nil {
+	if _, err := a.db.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sessionKey(token)); err != nil {
 		log.Printf("delete session: %v", err)
 	}
 }

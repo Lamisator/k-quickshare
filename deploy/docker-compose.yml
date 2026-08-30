@@ -1,7 +1,13 @@
 services:
 
   app:
-    build: .
+    # A relative build path is resolved against THIS file's directory, not the
+    # working directory of the `docker compose` invocation. `build: .` therefore
+    # looked for a Dockerfile in deploy/, where there has never been one, and
+    # the production stack could not be built from its own compose file.
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: pyxis-app
     restart: unless-stopped
     depends_on:
@@ -19,14 +25,30 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
       OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
-      FILE_ENCRYPTION_KEY: ${FILE_ENCRYPTION_KEY:-}
-      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      # Quoted: the `:?` message contains ": ", which YAML would otherwise read
+      # as a nested mapping and reject the whole file.
+      FILE_ENCRYPTION_KEY: "${FILE_ENCRYPTION_KEY:?set FILE_ENCRYPTION_KEY in .env - generate one with `openssl rand -hex 32`}"
+      # Required, not optional, in this file. This stack always sits behind
+      # Traefik, so every request arrives from the proxy: leaving it unset makes
+      # the app treat all visitors as one address, and a single person guessing
+      # a share password then rate-limits everybody. `:?` fails the deploy
+      # instead of starting a subtly broken instance.
+      TRUSTED_PROXY_CIDRS: "${TRUSTED_PROXY_CIDRS:?set TRUSTED_PROXY_CIDRS in .env to the network Traefik connects from, e.g. 172.16.0.0/12}"
       QUOTA_USER_BYTES: ${QUOTA_USER_BYTES:-21474836480}
       QUOTA_USER_FILES: ${QUOTA_USER_FILES:-1000}
       QUOTA_TOTAL_BYTES: ${QUOTA_TOTAL_BYTES:-0}
       DISK_MIN_FREE_BYTES: ${DISK_MIN_FREE_BYTES:-1073741824}
     volumes:
       - /srv/docker/pyxis/data/files:/data/files
+    # /healthz fails while the database schema is not the version this binary
+    # expects, so a half-applied migration shows up as an unhealthy container
+    # rather than as a service quietly answering from a schema it cannot use.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     security_opt:
       - no-new-privileges:true
     cap_drop:

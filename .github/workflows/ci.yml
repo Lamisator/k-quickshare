@@ -1,0 +1,110 @@
+name: CI
+
+# Everything that has to hold before a change is deployable. The repository had
+# tests but nothing running them, so a break was only ever found by hand — and
+# for a service whose whole promise is cryptographic, "we meant to run the
+# vectors" is not a control.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Dependency advisories land without anyone pushing, so the vulnerability scan
+  # also runs on a schedule against whatever is on main.
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.27'
+
+jobs:
+  test:
+    name: build & test
+    runs-on: ubuntu-latest
+    services:
+      # The migration and quota tests are skipped without a database, and those
+      # are exactly the ones that check rules written in SQL — so CI provides
+      # one rather than running the subset that needs no I/O.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pyxis
+          POSTGRES_PASSWORD: pyxis
+          POSTGRES_DB: pyxis_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U pyxis -d pyxis_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      # -race matters here specifically: the quota path, the OIDC settings
+      # swap and the rate limiter are all shared mutable state behind a mutex.
+      - name: go test -race
+        env:
+          TEST_DATABASE_URL: postgres://pyxis:pyxis@localhost:5432/pyxis_test?sslmode=disable
+        run: go test -race ./...
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # Symbol-aware: it reports only advisories whose vulnerable functions this
+      # code actually reaches, so a finding here is worth acting on rather than
+      # something to triage away.
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: run govulncheck
+        run: govulncheck ./...
+
+  container:
+    name: container build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The image is the deliverable. A Dockerfile that no longer builds is a
+      # broken release even when every test passes.
+      - name: build image
+        run: docker build -t pyxis:ci .
+      - name: compose files are valid
+        run: |
+          docker compose -f docker-compose.yml config -q
+          # The production file requires the secrets it refuses to start
+          # without; supply throwaway values so `config` can validate the rest,
+          # including that the build context actually resolves.
+          FILE_ENCRYPTION_KEY=ci POSTGRES_PASSWORD=ci ADMIN_PASSWORD=ci \
+          TRUSTED_PROXY_CIDRS=172.16.0.0/12 \
+            docker compose -f deploy/docker-compose.yml config -q
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

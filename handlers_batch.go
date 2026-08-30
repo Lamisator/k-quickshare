@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,11 +37,19 @@ type batchMeta struct {
 	AuthSalt      []byte
 	AuthVerifier  []byte
 	ArchivedAt    *time.Time
+	E2EVersion    int
+	Roster        []byte
+	RosterSeq     int64
 }
 
 // 12-byte GCM nonce + 32-byte file key + 16-byte tag, as produced by
 // wrapFileKey() in web/static/e2e.js.
 const batchWrappedKeyLen = 12 + 32 + 16
+
+// A sealed roster is 12-byte nonce || AES-GCM(roster JSON) || 16-byte tag, and
+// grows with the member count. The ceiling is generous enough for a very large
+// batch and still bounds what one POST can park in the row.
+const maxRosterLen = 256 << 10
 
 type batchMember struct {
 	ID          string
@@ -49,6 +58,8 @@ type batchMember struct {
 	ContentType string
 	StoredName  string
 	WrappedKey  []byte
+	E2EVersion  int
+	Manifest    []byte
 }
 
 func (bm *batchMeta) isPassword() bool { return bm.KeyMode == keyModeE2EPassword }
@@ -98,19 +109,100 @@ func (a *App) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	_, err = a.db.Exec(r.Context(),
 		`INSERT INTO batches (id, created_by, expires_at, max_downloads,
-		                      key_mode, auth_salt, auth_verifier)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		                      key_mode, auth_salt, auth_verifier, e2e_version)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		id.String(), user.ID.String(), expiresAt, maxDownloads,
-		keyMode, authSalt, authVerifier)
+		keyMode, authSalt, authVerifier, e2eVersionV2)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":        id.String(),
-		"url":       "/b/" + id.String(),
-		"expiresAt": expiresAt,
+		"id":         id.String(),
+		"url":        "/b/" + id.String(),
+		"expiresAt":  expiresAt,
+		"e2eVersion": e2eVersionV2,
 	})
+}
+
+// dispatchBatchOwnerRoutes handles the authenticated side of a batch:
+// /batches/{id}/roster.
+func (a *App) dispatchBatchOwnerRoutes(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/batches/")
+	idStr, action, _ := strings.Cut(rest, "/")
+	id, err := uuid.Parse(idStr)
+	if err != nil || action != "roster" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	a.handleBatchRosterUpdate(w, r, id)
+}
+
+// handleBatchRosterUpdate stores the sealed member list for a batch.
+//
+// The roster is what makes the batch's MEMBERSHIP authenticated, not just each
+// member's bytes. Without it the server chooses which files a link resolves to:
+// it can drop a member from the listing, or splice in one the sender never
+// added, and every individual file still decrypts perfectly. The uploader seals
+// the list under a key derived from the batch secret, so the server stores an
+// opaque blob it can neither read nor forge, and the downloader checks the
+// listing it was served against it.
+//
+// It is re-sealed after each member so the link is complete at every moment
+// during an upload session, not only once it finishes. `seq` must not go
+// backwards: that is what stops the roster being rolled back to a state with
+// fewer members by anyone replaying an earlier POST.
+func (a *App) handleBatchRosterUpdate(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
+	user := userFromContext(r.Context())
+	bm, err := a.loadBatchForUpload(r, id, user.ID.String())
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows), errors.Is(err, errNotBatchOwner):
+			http.Error(w, "batch not found", http.StatusNotFound)
+		case errors.Is(err, errBatchClosed):
+			http.Error(w, "batch is no longer open", http.StatusGone)
+		default:
+			httpError(w, err, http.StatusInternalServerError)
+		}
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sealed, derr := base64.RawURLEncoding.DecodeString(r.PostFormValue("roster"))
+	if derr != nil || len(sealed) == 0 {
+		http.Error(w, "roster is not base64url", http.StatusBadRequest)
+		return
+	}
+	if len(sealed) > maxRosterLen {
+		http.Error(w, "roster too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	seq, serr := strconv.ParseInt(r.PostFormValue("seq"), 10, 64)
+	if serr != nil || seq <= 0 {
+		http.Error(w, "seq must be a positive integer", http.StatusBadRequest)
+		return
+	}
+
+	tag, err := a.db.Exec(r.Context(),
+		`UPDATE batches SET roster = $1, roster_seq = $2
+		  WHERE id = $3 AND roster_seq < $2`, sealed, seq, bm.ID)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		// A newer roster is already stored. Not an error worth failing an
+		// upload over — the client simply lost a race with itself.
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // loadBatchForUpload fetches a batch the given user may still add files to.
@@ -139,10 +231,12 @@ func (a *App) loadBatchMeta(r *http.Request, id uuid.UUID) (*batchMeta, error) {
 	bm := &batchMeta{ID: id.String()}
 	err := a.db.QueryRow(r.Context(),
 		`SELECT created_at, created_by, expires_at, max_downloads, download_count,
-		        key_mode, auth_salt, auth_verifier, archived_at
+		        key_mode, auth_salt, auth_verifier, archived_at,
+		        e2e_version, roster, roster_seq
 		 FROM batches WHERE id = $1`, id.String()).
 		Scan(&bm.CreatedAt, &bm.CreatedBy, &bm.ExpiresAt, &bm.MaxDownloads,
-			&bm.DownloadCount, &bm.KeyMode, &bm.AuthSalt, &bm.AuthVerifier, &bm.ArchivedAt)
+			&bm.DownloadCount, &bm.KeyMode, &bm.AuthSalt, &bm.AuthVerifier, &bm.ArchivedAt,
+			&bm.E2EVersion, &bm.Roster, &bm.RosterSeq)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +245,8 @@ func (a *App) loadBatchMeta(r *http.Request, id uuid.UUID) (*batchMeta, error) {
 
 func (a *App) loadBatchMembers(r *http.Request, batchID string) ([]batchMember, error) {
 	rows, err := a.db.Query(r.Context(),
-		`SELECT id, original_name, size_bytes, content_type, stored_name, wrapped_key
+		`SELECT id, original_name, size_bytes, content_type, stored_name, wrapped_key,
+		        e2e_version, manifest
 		 FROM files
 		 WHERE batch_id = $1 AND archived_at IS NULL
 		 ORDER BY uploaded_at, id`, batchID)
@@ -163,7 +258,7 @@ func (a *App) loadBatchMembers(r *http.Request, batchID string) ([]batchMember, 
 	for rows.Next() {
 		var m batchMember
 		if err := rows.Scan(&m.ID, &m.Name, &m.Size, &m.ContentType,
-			&m.StoredName, &m.WrappedKey); err != nil {
+			&m.StoredName, &m.WrappedKey, &m.E2EVersion, &m.Manifest); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -302,6 +397,9 @@ func (a *App) handleBatchManifest(w http.ResponseWriter, r *http.Request, bm *ba
 			"wrappedKey":  base64.RawURLEncoding.EncodeToString(m.WrappedKey),
 			"previewKind": kind,
 			"iconKind":    iconKind(m.ContentType, m.Name),
+			"e2eVersion":  m.E2EVersion,
+			// Verbatim: the AAD of every one of this member's chunks.
+			"manifest": base64.RawURLEncoding.EncodeToString(m.Manifest),
 		})
 	}
 	left := -1
@@ -313,6 +411,12 @@ func (a *App) handleBatchManifest(w http.ResponseWriter, r *http.Request, bm *ba
 		"files":          files,
 		"downloadsLeft":  left,
 		"downloadsTotal": bm.MaxDownloads,
+		"e2eVersion":     bm.E2EVersion,
+		// The sealed member list. The browser opens it with a key derived from
+		// the batch secret and checks the listing above against it, so this
+		// response cannot quietly gain or lose a file.
+		"roster":    base64.RawURLEncoding.EncodeToString(bm.Roster),
+		"rosterSeq": bm.RosterSeq,
 	})
 }
 
@@ -322,7 +426,7 @@ func (a *App) handleBatchUnlock(w http.ResponseWriter, r *http.Request, bm *batc
 		return
 	}
 	limitKey := a.clientIP(r) + "|b|" + bm.ID
-	if !a.shareLimiter.allow(limitKey) {
+	if !a.shareLimiter.allow(r.Context(), limitKey) {
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return
 	}
@@ -331,13 +435,13 @@ func (a *App) handleBatchUnlock(w http.ResponseWriter, r *http.Request, bm *batc
 	if err == nil && len(token) == 32 {
 		sum := sha256.Sum256(token)
 		if hmac.Equal(sum[:], bm.AuthVerifier) {
-			a.shareLimiter.reset(limitKey)
+			a.shareLimiter.reset(r.Context(), limitKey)
 			a.setBatchUnlockCookie(w, bm)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 	}
-	a.shareLimiter.fail(limitKey)
+	a.shareLimiter.fail(r.Context(), limitKey)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 

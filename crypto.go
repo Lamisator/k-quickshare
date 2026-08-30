@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -36,7 +37,123 @@ const (
 	// the server stores just a hash of a separately-derived auth token
 
 	encSaltLen = 16
+
+	// Container format version, stored per file and per batch.
+	//
+	// 1 — bare chunk stream. Each chunk authenticates itself and nothing else:
+	//     no plaintext length, no chunk count, no name or type inside the
+	//     authenticated payload. Whole trailing chunks could therefore be
+	//     dropped and the rest still verified, and a blob replaced with zero
+	//     bytes decrypted to an empty file without a single GCM failure.
+	//     Still read, never written — existing shares must keep working.
+	// 2 — the same chunk stream, with an authenticated manifest bound into
+	//     every chunk as AES-GCM additional data. The manifest names the
+	//     protocol version, a client-generated random file id, the owning
+	//     batch, the plaintext size, the chunk count and geometry, the file
+	//     name and the MIME type. Truncation, substitution, reordering,
+	//     renaming and cross-batch moves all fail authentication.
+	e2eVersionLegacy = 1
+	e2eVersionV2     = 2
+
+	// A manifest is a short JSON object. The ceiling exists so a client cannot
+	// make the server store, and every downloader fetch, an arbitrary blob
+	// under the name "metadata".
+	maxManifestLen = 4096
+
+	// Length of the client-generated file id: 32 random bytes, base64url.
+	manifestIDLen = 43
 )
+
+// fileManifest is the authenticated metadata of one end-to-end encrypted file.
+//
+// The BYTES matter, not this struct. The client seals its chunks against the
+// exact bytes it produced, and those bytes are what must come back — so the
+// server stores them verbatim, never re-serialises them, and this type exists
+// only to validate what arrives and to reject what is inconsistent. Re-encoding
+// a manifest, even to an equivalent JSON document, destroys the file.
+type fileManifest struct {
+	V      int    `json:"v"`
+	ID     string `json:"id"`
+	Batch  string `json:"batch,omitempty"`
+	Size   int64  `json:"size"`
+	Chunks int64  `json:"chunks"`
+	Chunk  int64  `json:"chunk"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+}
+
+// e2eChunkCount returns how many GCM chunks a plaintext of this size occupies.
+//
+// Version 2 always emits at least one chunk, even for an empty file. That chunk
+// has no plaintext, only a tag over the manifest — which is precisely the point:
+// without it an empty file would carry no authentication at all, and "replace
+// the blob with nothing" would once again be a silently valid empty file.
+func e2eChunkCount(plain int64, version int) int64 {
+	n := (plain + chunkPlainSize - 1) / chunkPlainSize
+	if n < 1 && version >= e2eVersionV2 {
+		return 1
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// e2eCipherLen returns the exact ciphertext size the chunk format produces for
+// a given plaintext size. The upload handler uses it to reject a blob whose
+// length cannot be a well-formed container, which is the only statement the
+// server can make about a payload it cannot read.
+func e2eCipherLen(plain int64, version int) int64 {
+	if plain < 0 {
+		return 0
+	}
+	return plain + e2eChunkCount(plain, version)*gcmOverhead
+}
+
+// parseManifest validates an uploaded manifest against everything the server
+// independently knows: the declared plaintext size, the container geometry and
+// the batch the upload claims to join. It returns the decoded view; the caller
+// keeps and stores the raw bytes.
+//
+// The server cannot verify the manifest cryptographically — it holds no key —
+// but it can refuse one that contradicts the request around it, which stops a
+// buggy or hostile client from storing metadata that no downloader could ever
+// authenticate.
+func parseManifest(raw []byte, plainSize int64, batchID string) (*fileManifest, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("manifest is required for an e2e_version 2 upload")
+	}
+	if len(raw) > maxManifestLen {
+		return nil, fmt.Errorf("manifest is %d bytes, the maximum is %d", len(raw), maxManifestLen)
+	}
+	var m fileManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("manifest is not valid JSON: %w", err)
+	}
+	switch {
+	case m.V != e2eVersionV2:
+		return nil, fmt.Errorf("manifest declares version %d, want %d", m.V, e2eVersionV2)
+	case len(m.ID) != manifestIDLen:
+		return nil, errors.New("manifest id must be 32 random bytes, base64url")
+	case m.Size != plainSize:
+		return nil, fmt.Errorf("manifest size %d disagrees with plain_size %d", m.Size, plainSize)
+	case m.Chunk != chunkPlainSize:
+		return nil, fmt.Errorf("manifest chunk size %d, want %d", m.Chunk, chunkPlainSize)
+	case m.Chunks != e2eChunkCount(plainSize, e2eVersionV2):
+		return nil, fmt.Errorf("manifest chunk count %d, want %d",
+			m.Chunks, e2eChunkCount(plainSize, e2eVersionV2))
+	case m.Name == "":
+		return nil, errors.New("manifest carries no file name")
+	case m.Batch != batchID:
+		// Both directions matter: a member must name its batch, and a
+		// standalone share must not claim one.
+		return nil, fmt.Errorf("manifest batch %q does not match the upload's batch %q", m.Batch, batchID)
+	}
+	if _, err := base64.RawURLEncoding.DecodeString(m.ID); err != nil {
+		return nil, errors.New("manifest id is not base64url")
+	}
+	return &m, nil
+}
 
 // loadFileKEK reads the 32-byte key-encryption key from FILE_ENCRYPTION_KEY
 // (hex or base64) or FILE_ENCRYPTION_KEY_FILE. Returns nil when unset.
@@ -71,18 +188,6 @@ func newAEAD(key []byte) (cipher.AEAD, error) {
 		return nil, err
 	}
 	return cipher.NewGCM(block)
-}
-
-// e2eCipherLen returns the exact ciphertext size the chunk format produces for
-// a given plaintext size. The upload handler uses it to reject a blob whose
-// length cannot be a well-formed container, which is the only statement the
-// server can make about a payload it cannot read.
-func e2eCipherLen(plain int64) int64 {
-	if plain <= 0 {
-		return 0
-	}
-	chunks := (plain + chunkPlainSize - 1) / chunkPlainSize
-	return plain + chunks*gcmOverhead
 }
 
 // --- small-secret encryption (settings values) ------------------------------
