@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,6 +39,11 @@ type App struct {
 
 	quota QuotaConfig
 
+	// The per-user allowance is admin-editable at runtime, so it lives behind
+	// a mutex rather than in the immutable QuotaConfig above.
+	quotaMu       sync.RWMutex
+	quotaDefaults UserQuota
+
 	trustedProxies []*net.IPNet // networks whose X-Forwarded-For is honored
 
 	loginLimiter *failLimiter
@@ -48,13 +54,21 @@ type App struct {
 	oidcCfg OIDCSettings
 }
 
-// QuotaConfig bounds storage consumption. Zero values mean "no limit" except
-// MinFreeBytes, which always applies when > 0.
+// QuotaConfig bounds storage consumption instance-wide. Zero values mean "no
+// limit" except MinFreeBytes, which always applies when > 0. These are
+// infrastructure limits and stay environment-only; the per-user allowance is
+// UserQuota, which admins edit at runtime.
 type QuotaConfig struct {
-	UserBytes    int64 // max total bytes of active files per non-admin user
-	UserFiles    int64 // max active file count per non-admin user
 	TotalBytes   int64 // max total bytes of active files instance-wide
 	MinFreeBytes int64 // refuse uploads when the volume has less free space
+}
+
+// UserQuota is one user's allowance. Zero means "no limit". The value applied
+// to an upload is the override on the user row when set, otherwise the
+// instance default held in App.quotaDefaults.
+type UserQuota struct {
+	Bytes int64 // max total bytes of active files
+	Files int64 // max active file count
 }
 
 func main() {
@@ -123,8 +137,6 @@ func main() {
 		unlockKey:    randomBytes(32),
 		fileKEK:      fileKEK,
 		quota: QuotaConfig{
-			UserBytes:    envInt64("QUOTA_USER_BYTES", 20*1024*1024*1024),
-			UserFiles:    envInt64("QUOTA_USER_FILES", 1000),
 			TotalBytes:   envInt64("QUOTA_TOTAL_BYTES", 0),
 			MinFreeBytes: envInt64("DISK_MIN_FREE_BYTES", 1024*1024*1024),
 		},
@@ -134,6 +146,13 @@ func main() {
 	app.trustedProxies, err = parseTrustedProxies(os.Getenv("TRUSTED_PROXY_CIDRS"))
 	if err != nil {
 		log.Fatalf("TRUSTED_PROXY_CIDRS: %v", err)
+	}
+
+	if err := app.loadQuotaDefaults(ctx, UserQuota{
+		Bytes: envInt64("QUOTA_USER_BYTES", 20*1024*1024*1024),
+		Files: envInt64("QUOTA_USER_FILES", 1000),
+	}); err != nil {
+		log.Fatalf("quota defaults: %v", err)
 	}
 
 	if err := app.bootstrapAdmin(ctx, adminUser, adminPass); err != nil {
@@ -198,6 +217,7 @@ func main() {
 	mux.Handle("/admin/users/", http.HandlerFunc(app.requireAdmin(app.dispatchAdminUserAction)))
 	mux.Handle("/admin/settings", http.HandlerFunc(app.requireAdmin(app.handleAdminSettings)))
 	mux.Handle("/admin/settings/oidc", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsOIDC)))
+	mux.Handle("/admin/settings/quota", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsQuota)))
 
 	var handler http.Handler = mux
 	handler = app.withOptionalUser(handler)
@@ -226,6 +246,8 @@ func (a *App) dispatchAdminUserAction(w http.ResponseWriter, r *http.Request) {
 		a.handleAdminResetPassword(w, r)
 	case strings.HasSuffix(r.URL.Path, "/admin"):
 		a.handleAdminToggleAdmin(w, r)
+	case strings.HasSuffix(r.URL.Path, "/quota"):
+		a.handleAdminSetQuota(w, r)
 	case strings.HasSuffix(r.URL.Path, "/delete"):
 		a.handleAdminDeleteUser(w, r)
 	default:
@@ -418,4 +440,74 @@ func humanSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+var errBadSize = errors.New("not a byte size")
+
+// parseSize reads a byte count an admin typed: a bare number, or a number with
+// a unit suffix ("20G", "20 GiB", "500 MB", "1.5T"). Every unit is 1024-based,
+// including the MB/GB spellings, because humanSize renders KiB/MiB/GiB and the
+// field has to round-trip what the UI shows. Negative values are rejected; 0 is
+// valid and means "no limit".
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, errBadSize
+	}
+	// Split the numeric head from the unit tail.
+	i := 0
+	for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.') {
+		i++
+	}
+	num, unit := s[:i], strings.TrimSpace(strings.ToLower(s[i:]))
+	if num == "" {
+		return 0, errBadSize
+	}
+	val, err := strconv.ParseFloat(num, 64)
+	if err != nil || val < 0 {
+		return 0, errBadSize
+	}
+
+	mult := float64(1)
+	switch strings.TrimSuffix(strings.TrimSuffix(unit, "ib"), "b") {
+	case "":
+		// bare number, or a plain "b" suffix: bytes
+	case "k":
+		mult = 1 << 10
+	case "m":
+		mult = 1 << 20
+	case "g":
+		mult = 1 << 30
+	case "t":
+		mult = 1 << 40
+	case "p":
+		mult = 1 << 50
+	default:
+		return 0, errBadSize
+	}
+	n := val * mult
+	if n > float64(math.MaxInt64) {
+		return 0, errBadSize
+	}
+	return int64(n), nil
+}
+
+// sizeInput renders a byte count for an <input> the admin will edit and post
+// back. Unlike humanSize it never rounds: a value that is not a whole multiple
+// of a unit is shown as raw bytes, so saving the form unchanged cannot quietly
+// move the limit (humanSize would turn 21474836481 into "20.0 GiB").
+func sizeInput(n int64) string {
+	if n <= 0 {
+		return "0"
+	}
+	units := []struct {
+		suffix string
+		size   int64
+	}{{"PiB", 1 << 50}, {"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}}
+	for _, u := range units {
+		if n >= u.size && n%u.size == 0 {
+			return strconv.FormatInt(n/u.size, 10) + " " + u.suffix
+		}
+	}
+	return strconv.FormatInt(n, 10)
 }

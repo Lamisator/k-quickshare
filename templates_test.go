@@ -36,10 +36,18 @@ func TestTemplatesRender(t *testing.T) {
 			CanDelete: true, IconKind: "image", BatchID: &batchID},
 	}
 
+	customBytes := int64(5 << 30)
 	userRows := []UserRow{
+		// An admin on the default: unlimited, no override to render.
 		{ID: uid, Username: "marius", Email: "m@example.com", IsAdmin: true,
-			IsSuperAdmin: true, HasPassword: true, HasOIDC: true, CreatedAt: now},
-		{ID: uuid.NewString(), Username: "guest", CreatedAt: now},
+			IsSuperAdmin: true, HasPassword: true, HasOIDC: true, CreatedAt: now,
+			UsedBytes: 3 << 30, UsedFiles: 12},
+		// A member with a custom byte quota but an inherited file limit, which
+		// is the case where the two form fields disagree about being blank.
+		{ID: uuid.NewString(), Username: "guest", CreatedAt: now,
+			QuotaBytes: &customBytes, UsedBytes: 1 << 30, UsedFiles: 3,
+			EffQuota: UserQuota{Bytes: customBytes, Files: 1000}, Custom: true,
+			QuotaBytesInput: sizeInput(customBytes)},
 	}
 
 	base := func(lang string) map[string]any {
@@ -62,12 +70,15 @@ func TestTemplatesRender(t *testing.T) {
 		"index.html": {"MaxUpload": int64(1 << 30)},
 		"history.html": {"Active": "files", "Files": files, "ActiveCount": 2,
 			"TotalSize": int64(999), "TotalDL": 4},
-		"login.html":   {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
-		"account.html": {"Active": "account", "Error": "", "Success": "ok"},
+		"login.html": {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
+		"account.html": {"Active": "account", "Error": "", "Success": "ok",
+			"UsageOK": true, "Usage": UsageSummary{UsedBytes: 3 << 30, UsedFiles: 12,
+				Quota: UserQuota{Bytes: 20 << 30, Files: 1000}, Custom: true}},
 		"admin_users.html": {"Active": "users", "Users": userRows, "MeID": uid,
 			"MeIsSuper": false, "Error": "", "Success": ""},
 		"admin_settings.html": {"Active": "settings", "OIDC": OIDCSettings{Issuer: "https://x"},
-			"OIDCLive": false, "Error": "", "Success": ""},
+			"OIDCLive": false, "Error": "", "Success": "",
+			"QuotaBytes": sizeInput(20 << 30), "QuotaFiles": int64(1000)},
 		"oidc_denied.html": {"User": (*User)(nil), "AllowedDomain": "a.example", "ActualDomain": "b.example"},
 	}
 	// Only two states survive: "gone", and the end-to-end landing page. The
@@ -84,6 +95,14 @@ func TestTemplatesRender(t *testing.T) {
 		{"State": "e2e", "E2EMode": "password", "ID": "id1", "Name": "secret.txt", "Size": int64(5),
 			"ContentType": "text/plain", "UploadedAt": now, "AuthSalt": "c2FsdHNhbHRzYWx0c2E",
 			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil)},
+	}
+	// The unlimited and unavailable branches of the account storage panel emit
+	// different markup (no bar, no percentage, or nothing at all) and are never
+	// reached by the case above.
+	accountCases := []map[string]any{
+		{"Active": "account", "UsageOK": true,
+			"Usage": UsageSummary{UsedBytes: 1 << 30, UsedFiles: 4}},
+		{"Active": "account", "UsageOK": false},
 	}
 	batchCases := []map[string]any{
 		{"State": "batch", "E2EMode": "url", "Unlocked": true, "ID": uuid.NewString(),
@@ -107,6 +126,12 @@ func TestTemplatesRender(t *testing.T) {
 			var sb strings.Builder
 			if err := tmpl.ExecuteTemplate(&sb, "download.html", merge(lang, extra)); err != nil {
 				t.Errorf("download.html case %d [%s]: %v", i, lang, err)
+			}
+		}
+		for i, extra := range accountCases {
+			var sb strings.Builder
+			if err := tmpl.ExecuteTemplate(&sb, "account.html", merge(lang, extra)); err != nil {
+				t.Errorf("account.html case %d [%s]: %v", i, lang, err)
 			}
 		}
 		for i, extra := range batchCases {

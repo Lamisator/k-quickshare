@@ -39,6 +39,7 @@
       <th>{{T .Lang "users.col_email"}}</th>
       <th>{{T .Lang "users.col_methods"}}</th>
       <th>{{T .Lang "users.col_role"}}</th>
+      <th>{{T .Lang "users.col_quota"}}</th>
       <th>{{T .Lang "users.col_created"}}</th>
       <th class="actions-col">{{T .Lang "users.col_actions"}}</th>
     </tr>
@@ -58,6 +59,16 @@
         {{else if .IsAdmin}}<span class="badge">{{T $.Lang "role.admin"}}</span>
         {{else}}<span class="muted">{{T $.Lang "users.member"}}</span>{{end}}
       </td>
+      <td class="quota-cell">
+        <span>{{humanSize .UsedBytes}} /
+          {{if gt .EffQuota.Bytes 0}}{{humanSize .EffQuota.Bytes}}{{else}}{{T $.Lang "quota.unlimited"}}{{end}}
+          {{if .Custom}}<span class="chip chip-quota">{{T $.Lang "quota.custom"}}</span>{{end}}
+        </span>
+        <span class="muted">{{.UsedFiles}} /
+          {{if gt .EffQuota.Files 0}}{{.EffQuota.Files}}{{else}}{{T $.Lang "quota.unlimited"}}{{end}}
+          {{T $.Lang "quota.files"}}
+        </span>
+      </td>
       <td><span class="muted"><time data-ts="{{rfc3339 .CreatedAt}}">{{formatDate .CreatedAt}}</time></span></td>
       <td class="row-actions">
         {{if and .IsSuperAdmin (not $.MeIsSuper)}}
@@ -71,6 +82,21 @@
           </form>
         </details>
         {{end}}
+        <details class="row-action">
+          <summary class="btn btn-ghost btn-sm"
+                   {{if and .IsAdmin (not .Custom)}}title="{{T $.Lang "users.t_quota_admin"}}"{{end}}>
+            {{T $.Lang "users.quota"}}
+          </summary>
+          <form method="post" action="/admin/users/{{.ID}}/quota" class="inline-form" autocomplete="off">
+            <input name="bytes" value="{{.QuotaBytesInput}}" size="14"
+                   placeholder="{{T $.Lang "users.quota_bytes_ph"}}"
+                   aria-label="{{T $.Lang "users.quota_bytes_ph"}}">
+            <input name="files" value="{{.QuotaFilesInput}}" size="12"
+                   placeholder="{{T $.Lang "users.quota_files_ph"}}"
+                   aria-label="{{T $.Lang "users.quota_files_ph"}}">
+            <button type="submit" class="btn btn-primary btn-sm">{{T $.Lang "users.save"}}</button>
+          </form>
+        </details>
         <form method="post" action="/admin/users/{{.ID}}/admin" class="inline-form">
           <input type="hidden" name="value" value="{{if .IsAdmin}}off{{else}}on{{end}}">
           <button type="submit" class="btn btn-ghost btn-sm"

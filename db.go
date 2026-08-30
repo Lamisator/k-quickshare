@@ -21,6 +21,13 @@ CREATE TABLE IF NOT EXISTS users (
 	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN NOT NULL DEFAULT FALSE;
+-- Per-user quota overrides. NULL means "inherit the instance default" (the
+-- settings rows quota.user_bytes / quota.user_files); 0 means "no limit for
+-- this user specifically", which is the same 0-is-unlimited convention the
+-- instance-wide limits use. The two are deliberately distinct: an admin must
+-- be able to lift a user above a restrictive default without editing it.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS quota_bytes BIGINT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS quota_files BIGINT;
 
 CREATE TABLE IF NOT EXISTS settings (
 	key        TEXT PRIMARY KEY,

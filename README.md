@@ -50,7 +50,8 @@ dependencies beyond the two containers.
 - Admin and super-admin roles; user management and OIDC settings in the UI.
 
 **Operations**
-- Per-user and instance-wide storage quotas, plus a free-disk floor.
+- Storage quotas admins set in the UI: an instance-wide default per user, plus
+  per-user overrides. Instance ceiling and free-disk floor on top.
 - A sweeper retires expired and used-up links every minute: the blob is deleted
   at once, the metadata row is kept for 30 days as "expired", then purged.
 - Full English and German localisation, dark and light themes.
@@ -240,8 +241,8 @@ Every setting is an environment variable. Only `DATABASE_URL` and
 | `OIDC_REDIRECT_URL` | — | Must match the provider byte for byte. |
 | `OIDC_ALLOWED_DOMAIN` | — | Restrict SSO to one email/identity domain. |
 | `TRUSTED_PROXY_CIDRS` | — | Only these sources' `X-Forwarded-For` is believed. |
-| `QUOTA_USER_BYTES` | `21474836480` | Per non-admin user (20 GiB). `0` = unlimited. |
-| `QUOTA_USER_FILES` | `1000` | Active files per non-admin user. |
+| `QUOTA_USER_BYTES` | `21474836480` | *Initial* default per user (20 GiB). `0` = unlimited. |
+| `QUOTA_USER_FILES` | `1000` | *Initial* default active files per user. |
 | `QUOTA_TOTAL_BYTES` | `0` | Instance-wide ceiling. `0` = unlimited. |
 | `DISK_MIN_FREE_BYTES` | `1073741824` | Refuse uploads below this free space. |
 
@@ -369,9 +370,24 @@ immediately: the blob is deleted, the metadata row survives 30 days listed as
 "expired", then is purged. Archived rows do not count against quotas. Batches
 follow the same two stages; purging a batch cascades its member rows.
 
-**Quotas** use an advisory-locked `upload_reservations` table — reserve, stream,
-finalise — so concurrent uploads cannot race past the limit. Abandoned
-reservations expire after 15 minutes.
+**Quotas** resolve in three layers. The allowance applied to an upload is the
+override on the user's row when set, otherwise the instance default from
+`/admin/settings`; `QUOTA_USER_BYTES` / `QUOTA_USER_FILES` are only the fallback
+used until an admin saves that default for the first time, after which the
+database wins and the environment variables stop mattering.
+
+Two nulls are load-bearing. `users.quota_bytes IS NULL` means "inherit the
+default"; a stored `0` means "unlimited for this user", which is how you lift
+one person above a restrictive default without editing the default. Admins are
+exempt from the default — as they always have been — but an override set on an
+admin does apply, because an admin who types a limit into another admin's row
+means it.
+
+Enforcement uses an advisory-locked `upload_reservations` table — reserve,
+stream, finalise — so concurrent uploads cannot race past the limit, and the
+override is read inside that transaction, so a quota change takes effect on the
+next upload rather than at the user's next sign-in. Abandoned reservations
+expire after 15 minutes.
 
 **Rate limiting** is 10 failures per 10 minutes on login and on share passwords.
 

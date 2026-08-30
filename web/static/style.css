@@ -1140,6 +1140,37 @@ body.bare {
 .account-info dt { color: var(--text-muted); }
 .account-info dd { margin: 0; color: var(--text); }
 
+/* ---- account storage usage ---- */
+
+.usage-block {
+  margin: 0 0 1.5rem;
+  padding: 0.95rem 1.05rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.usage-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.45rem;
+}
+.usage-row-files { margin-top: 1rem; }
+.usage-figures {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.usage-figures strong { color: var(--text); font-weight: 650; }
+.usage-note {
+  margin: 0.85rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
 .section-title {
   font-size: 0.82rem;
   color: var(--text-muted);
@@ -1203,6 +1234,20 @@ body.bare {
   color: var(--text);
 }
 
+/* Usage over quota, stacked: bytes on top, file count beneath. */
+.quota-cell {
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+}
+.quota-cell > span { display: block; }
+.quota-cell .muted { font-size: 0.82rem; }
+.chip-quota {
+  margin-left: 0.3rem;
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
 .table-wrap { overflow-x: auto; }
 
 .user-table {
@@ -1264,6 +1309,13 @@ body.bare {
 /* ================= Settings ================= */
 
 .settings-card { max-width: 720px; }
+.settings-card + .settings-card { margin-top: 1.25rem; }
+.settings-note {
+  margin: 0 0 1.1rem;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
 .settings-head {
   display: flex;
   align-items: center;

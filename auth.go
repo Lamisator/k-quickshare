@@ -156,15 +156,39 @@ type UserRow struct {
 	HasPassword  bool
 	HasOIDC      bool
 	CreatedAt    time.Time
+
+	// Quota override as stored: nil means "inherits the instance default".
+	QuotaBytes *int64
+	QuotaFiles *int64
+	// Current consumption, counted exactly the way loadUsage counts it for
+	// enforcement — an admin comparing the two columns must not see the
+	// displayed usage disagree with the limit that is actually applied.
+	UsedBytes int64
+	UsedFiles int64
+
+	// Resolved for display; filled in by renderAdminUsers, not by the query.
+	EffQuota UserQuota
+	Custom   bool
+	// Override values pre-rendered for the edit form, empty when inherited.
+	QuotaBytesInput string
+	QuotaFilesInput string
 }
 
 func (a *App) listUsers(ctx context.Context) ([]UserRow, error) {
 	rows, err := a.db.Query(ctx,
-		`SELECT id::text, username, email,
-		        (password_hash IS NOT NULL) AS has_password,
-		        (oidc_subject IS NOT NULL) AS has_oidc,
-		        is_admin, is_super_admin, created_at
-		 FROM users ORDER BY created_at ASC`)
+		`SELECT u.id::text, u.username, u.email,
+		        (u.password_hash IS NOT NULL) AS has_password,
+		        (u.oidc_subject IS NOT NULL) AS has_oidc,
+		        u.is_admin, u.is_super_admin, u.created_at,
+		        u.quota_bytes, u.quota_files,
+		        COALESCE(f.bytes, 0), COALESCE(f.files, 0)
+		 FROM users u
+		 LEFT JOIN (
+		     SELECT uploaded_by, SUM(size_bytes) AS bytes, COUNT(*) AS files
+		     FROM files WHERE `+activeFileWhere+`
+		     GROUP BY uploaded_by
+		 ) f ON f.uploaded_by = u.id
+		 ORDER BY u.created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +200,8 @@ func (a *App) listUsers(ctx context.Context) ([]UserRow, error) {
 			email *string
 		)
 		if err := rows.Scan(&u.ID, &u.Username, &email,
-			&u.HasPassword, &u.HasOIDC, &u.IsAdmin, &u.IsSuperAdmin, &u.CreatedAt); err != nil {
+			&u.HasPassword, &u.HasOIDC, &u.IsAdmin, &u.IsSuperAdmin, &u.CreatedAt,
+			&u.QuotaBytes, &u.QuotaFiles, &u.UsedBytes, &u.UsedFiles); err != nil {
 			return nil, err
 		}
 		if email != nil {
@@ -185,6 +210,15 @@ func (a *App) listUsers(ctx context.Context) ([]UserRow, error) {
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// setUserQuota writes one user's overrides. A nil argument clears the column,
+// putting that dimension back on the instance default.
+func (a *App) setUserQuota(ctx context.Context, userID uuid.UUID, bytes, files *int64) error {
+	_, err := a.db.Exec(ctx,
+		`UPDATE users SET quota_bytes = $1, quota_files = $2 WHERE id = $3`,
+		bytes, files, userID.String())
+	return err
 }
 
 func (a *App) countAdmins(ctx context.Context) (int, error) {

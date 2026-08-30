@@ -10,6 +10,31 @@
 
 <section class="card settings-card">
   <div class="settings-head">
+    <h2>{{T .Lang "settings.quota"}}</h2>
+  </div>
+  <p class="settings-note">{{T .Lang "settings.quota_note"}}</p>
+
+  <form method="post" action="/admin/settings/quota" class="settings-form" autocomplete="off">
+    <label>
+      <span>{{T .Lang "settings.quota_bytes"}}</span>
+      <input name="user_bytes" value="{{.QuotaBytes}}" placeholder="20 GiB" required>
+      <em class="hint">{{T .Lang "settings.quota_bytes_h"}}</em>
+    </label>
+
+    <label>
+      <span>{{T .Lang "settings.quota_files"}}</span>
+      <input name="user_files" type="number" min="0" step="1" value="{{.QuotaFiles}}" required>
+      <em class="hint">{{T .Lang "settings.quota_files_h"}}</em>
+    </label>
+
+    <div class="settings-actions">
+      <button type="submit" class="btn btn-primary">{{T .Lang "settings.quota_save"}}</button>
+    </div>
+  </form>
+</section>
+
+<section class="card settings-card">
+  <div class="settings-head">
     <h2>{{T .Lang "settings.oidc"}}</h2>
     <span class="chip {{if .OIDCLive}}chip-lock{{else}}chip-warn{{end}}">
       {{if .OIDCLive}}{{T .Lang "settings.active"}}{{else}}{{T .Lang "settings.inactive"}}{{end}}

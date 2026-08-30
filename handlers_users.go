@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -19,9 +20,18 @@ func (a *App) handleAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) renderAccount(w http.ResponseWriter, r *http.Request, status int, errMsg, okMsg string) {
+	// A quota the user cannot see is only discoverable by hitting it, so the
+	// account page carries it. A failure here must not cost them the password
+	// form, so it degrades to omitting the panel.
+	usage, err := a.usageSummary(r.Context(), userFromContext(r.Context()))
+	if err != nil {
+		log.Printf("account usage summary: %v", err)
+	}
 	a.renderStatus(w, r, status, "account.html", map[string]any{
 		"Title":   a.tr(r, "title.account") + " · Pyxis",
 		"Active":  "account",
+		"Usage":   usage,
+		"UsageOK": err == nil,
 		"Error":   errMsg,
 		"Success": okMsg,
 	})
@@ -96,6 +106,18 @@ func (a *App) renderAdminUsers(w http.ResponseWriter, r *http.Request, status in
 		return
 	}
 	me := userFromContext(r.Context())
+	def := a.getQuotaDefaults()
+	for i := range users {
+		u := &users[i]
+		u.EffQuota = applyQuotaDefaults(u.IsAdmin, u.QuotaBytes, u.QuotaFiles, def)
+		u.Custom = u.QuotaBytes != nil || u.QuotaFiles != nil
+		if u.QuotaBytes != nil {
+			u.QuotaBytesInput = sizeInput(*u.QuotaBytes)
+		}
+		if u.QuotaFiles != nil {
+			u.QuotaFilesInput = strconv.FormatInt(*u.QuotaFiles, 10)
+		}
+	}
 	a.renderStatus(w, r, status, "admin_users.html", map[string]any{
 		"Title":     a.tr(r, "title.users") + " · Pyxis",
 		"Active":    "users",
@@ -105,6 +127,79 @@ func (a *App) renderAdminUsers(w http.ResponseWriter, r *http.Request, status in
 		"Error":     errMsg,
 		"Success":   okMsg,
 	})
+}
+
+// handleAdminSetQuota stores a per-user override. Either field may be left
+// blank, which clears that column and puts the user back on the instance
+// default — the only way to express "inherit" once a limit has been set.
+func (a *App) handleAdminSetQuota(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseAdminUserID(w, r, "/quota")
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	bytes, err := parseQuotaOverride(r.PostFormValue("bytes"), parseSize)
+	if err != nil {
+		a.renderAdminUsers(w, r, http.StatusBadRequest, a.tr(r, "msg.quota_bad_size"), "")
+		return
+	}
+	files, err := parseQuotaOverride(r.PostFormValue("files"), parseCount)
+	if err != nil {
+		a.renderAdminUsers(w, r, http.StatusBadRequest, a.tr(r, "msg.quota_bad_count"), "")
+		return
+	}
+
+	var username string
+	if err := a.db.QueryRow(r.Context(),
+		`SELECT username FROM users WHERE id = $1`, id.String()).Scan(&username); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	if err := a.setUserQuota(r.Context(), id, bytes, files); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	log.Printf("admin set quota for %s: bytes=%s files=%s",
+		username, quotaLogValue(bytes), quotaLogValue(files))
+	a.renderAdminUsers(w, r, http.StatusOK, "", a.tr(r, "msg.quota_saved", username))
+}
+
+// parseQuotaOverride maps a form field to an override pointer: blank means
+// "inherit the default" (NULL), anything else is parsed by parse.
+func parseQuotaOverride(raw string, parse func(string) (int64, error)) (*int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	n, err := parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
+var errBadCount = errors.New("not a file count")
+
+func parseCount(s string) (int64, error) {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || n < 0 {
+		return 0, errBadCount
+	}
+	return n, nil
+}
+
+func quotaLogValue(n *int64) string {
+	if n == nil {
+		return "default"
+	}
+	return strconv.FormatInt(*n, 10)
 }
 
 func (a *App) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {

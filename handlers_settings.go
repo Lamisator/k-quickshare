@@ -12,6 +12,7 @@ func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) renderSettings(w http.ResponseWriter, r *http.Request, status int, errMsg, okMsg string) {
 	cfg := a.getOIDCSettings()
+	q := a.getQuotaDefaults()
 	a.renderStatus(w, r, status, "admin_settings.html", map[string]any{
 		"Title":        a.tr(r, "title.settings") + " · Pyxis",
 		"Active":       "settings",
@@ -19,9 +20,40 @@ func (a *App) renderSettings(w http.ResponseWriter, r *http.Request, status int,
 		"OIDCLive":     a.getOIDC() != nil,
 		"CallbackURL":  cfg.RedirectURL,
 		"CallbackHint": "https://<your-host>/auth/oidc/callback",
+		"QuotaBytes":   sizeInput(q.Bytes),
+		"QuotaFiles":   q.Files,
 		"Error":        errMsg,
 		"Success":      okMsg,
 	})
+}
+
+// handleAdminSettingsQuota stores the instance-wide per-user allowance. It
+// applies to every user who has no override of their own; 0 means unlimited.
+func (a *App) handleAdminSettingsQuota(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	bytes, err := parseSize(r.PostFormValue("user_bytes"))
+	if err != nil {
+		a.renderSettings(w, r, http.StatusBadRequest, a.tr(r, "msg.quota_bad_size"), "")
+		return
+	}
+	files, err := parseCount(r.PostFormValue("user_files"))
+	if err != nil {
+		a.renderSettings(w, r, http.StatusBadRequest, a.tr(r, "msg.quota_bad_count"), "")
+		return
+	}
+	if err := a.saveQuotaDefaults(r.Context(), UserQuota{Bytes: bytes, Files: files}); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	log.Printf("quota defaults saved: %s per user, %d files per user", humanSize(bytes), files)
+	a.renderSettings(w, r, http.StatusOK, "", a.tr(r, "msg.quota_default_saved"))
 }
 
 func (a *App) handleAdminSettingsOIDC(w http.ResponseWriter, r *http.Request) {
