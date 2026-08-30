@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS upload_reservations (
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS files_uploaded_at_idx ON files (uploaded_at DESC);
+-- The quota bar in the page shell aggregates one user's active files on every
+-- render, so that lookup must not be a sequential scan.
+CREATE INDEX IF NOT EXISTS files_uploaded_by_idx ON files (uploaded_by) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS files_expires_at_idx  ON files (expires_at) WHERE expires_at IS NOT NULL;
 `
 

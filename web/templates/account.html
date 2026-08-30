@@ -17,49 +17,6 @@
     </dd>
   </dl>
 
-  {{if .UsageOK}}
-  <h2 class="section-title">{{T .Lang "account.storage"}}</h2>
-  <div class="usage-block">
-    <div class="usage-row">
-      <span class="usage-figures">
-        <strong>{{humanSize .Usage.UsedBytes}}</strong> {{T .Lang "disk.of"}}
-        {{if gt .Usage.Quota.Bytes 0}}{{humanSize .Usage.Quota.Bytes}}{{else}}{{T .Lang "quota.unlimited"}}{{end}}
-      </span>
-      {{if gt .Usage.Quota.Bytes 0}}
-      <span class="disk-pct">{{printf "%.0f" .Usage.BytesPercent}}%</span>
-      {{end}}
-    </div>
-    {{if gt .Usage.Quota.Bytes 0}}
-    <div class="disk-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
-         aria-valuenow="{{printf "%.0f" .Usage.BytesPercent}}">
-      <div class="disk-fill" data-pct="{{printf "%.1f" .Usage.BytesPercent}}"></div>
-    </div>
-    {{end}}
-
-    <div class="usage-row usage-row-files">
-      <span class="usage-figures">
-        <strong>{{.Usage.UsedFiles}}</strong> {{T .Lang "disk.of"}}
-        {{if gt .Usage.Quota.Files 0}}{{.Usage.Quota.Files}}{{else}}{{T .Lang "quota.unlimited"}}{{end}}
-        {{T .Lang "quota.files"}}
-      </span>
-      {{if gt .Usage.Quota.Files 0}}
-      <span class="disk-pct">{{printf "%.0f" .Usage.FilesPercent}}%</span>
-      {{end}}
-    </div>
-    {{if gt .Usage.Quota.Files 0}}
-    <div class="disk-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
-         aria-valuenow="{{printf "%.0f" .Usage.FilesPercent}}">
-      <div class="disk-fill" data-pct="{{printf "%.1f" .Usage.FilesPercent}}"></div>
-    </div>
-    {{end}}
-
-    <p class="usage-note">
-      {{T .Lang "account.storage_note"}}
-      {{if .Usage.Custom}} {{T .Lang "account.quota_custom"}}{{end}}
-    </p>
-  </div>
-  {{end}}
-
   <h2 class="section-title">{{if .User.HasPassword}}{{T .Lang "account.change_pw"}}{{else}}{{T .Lang "account.set_pw"}}{{end}}</h2>
   {{if .Error}}<p class="alert">{{.Error}}</p>{{end}}
   {{if .Success}}<p class="alert alert-ok">{{.Success}}</p>{{end}}

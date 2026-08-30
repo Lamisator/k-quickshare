@@ -304,6 +304,7 @@ code {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+.disk-free .chip { vertical-align: middle; margin-left: 0.2rem; }
 .disk-warn .disk-fill { background: linear-gradient(90deg, #d9a441 0%, var(--warning) 100%); }
 .disk-warn .disk-pct { background: rgba(240, 198, 116, 0.16); color: var(--warning); }
 .disk-critical .disk-fill { background: linear-gradient(90deg, #c2566c 0%, var(--danger) 100%); }
@@ -1166,37 +1167,6 @@ body.bare {
 }
 .account-info dt { color: var(--text-muted); }
 .account-info dd { margin: 0; color: var(--text); }
-
-/* ---- account storage usage ---- */
-
-.usage-block {
-  margin: 0 0 1.5rem;
-  padding: 0.95rem 1.05rem 1rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.usage-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 0.45rem;
-}
-.usage-row-files { margin-top: 1rem; }
-.usage-figures {
-  font-size: 0.9rem;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-.usage-figures strong { color: var(--text); font-weight: 650; }
-.usage-note {
-  margin: 0.85rem 0 0;
-  font-size: 0.8rem;
-  line-height: 1.5;
-  color: var(--text-dim);
-}
 
 .section-title {
   font-size: 0.82rem;

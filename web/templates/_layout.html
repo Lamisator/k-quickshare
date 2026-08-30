@@ -98,7 +98,13 @@
     </div>
   </aside>
   <main class="main">
-  {{if and .Disk .Disk.OK}}
+  {{/* Free space on the volume is capacity information about the instance and
+       an administrator's concern. A member cannot act on it, and it discloses
+       more about the host than they need, so it is admin-only — they get the
+       quota bar below instead, which is the limit that actually binds them.
+       renderStatus also skips the statfs for non-admins; this guard is the one
+       that decides, so the rule can be tested by rendering a template. */}}
+  {{if and .User .User.IsAdmin}}{{if and .Disk .Disk.OK}}
   <section class="disk-bar{{if ge .Disk.Percent 90.0}} disk-critical{{else if ge .Disk.Percent 75.0}} disk-warn{{end}}"
            aria-label="{{T .Lang "disk.label"}}">
     <div class="disk-head">
@@ -117,7 +123,38 @@
     </div>
     <p class="disk-free">{{T .Lang "disk.free" (humanSize .Disk.Free)}}</p>
   </section>
-  {{end}}
+  {{end}}{{end}}
+
+  {{/* Only rendered when something actually caps this user: a bar that fills
+       towards "unlimited" would be decoration. Admins on the default quota are
+       exempt and so see nothing here; an admin given an explicit override does
+       get one. */}}
+  {{if .Usage}}{{if .Usage.Limited}}
+  <section class="disk-bar{{if ge .Usage.BarPercent 90.0}} disk-critical{{else if ge .Usage.BarPercent 75.0}} disk-warn{{end}}"
+           aria-label="{{T .Lang "quota.your_storage"}}">
+    <div class="disk-head">
+      <span class="disk-title">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8"/><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M10 12h4"/></svg>
+        {{T .Lang "quota.your_storage"}}
+      </span>
+      <span class="disk-figures">
+        <strong>{{humanSize .Usage.UsedBytes}}</strong> {{T .Lang "disk.of"}}
+        {{if gt .Usage.Quota.Bytes 0}}{{humanSize .Usage.Quota.Bytes}}{{else}}{{T .Lang "quota.unlimited"}}{{end}}
+        <span class="disk-pct">{{printf "%.1f" .Usage.BarPercent}}%</span>
+      </span>
+    </div>
+    <div class="disk-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+         aria-valuenow="{{printf "%.0f" .Usage.BarPercent}}">
+      <div class="disk-fill" data-pct="{{printf "%.1f" .Usage.BarPercent}}"></div>
+    </div>
+    <p class="disk-free">
+      {{.Usage.UsedFiles}} {{T .Lang "disk.of"}}
+      {{if gt .Usage.Quota.Files 0}}{{.Usage.Quota.Files}}{{else}}{{T .Lang "quota.unlimited"}}{{end}}
+      {{T .Lang "quota.files"}}
+      {{if .Usage.Custom}}<span class="chip chip-quota">{{T .Lang "quota.custom"}}</span>{{end}}
+    </p>
+  </section>
+  {{end}}{{end}}
 {{end}}
 
 {{define "footer"}}

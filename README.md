@@ -51,7 +51,9 @@ dependencies beyond the two containers.
 
 **Operations**
 - Storage quotas admins set in the UI: an instance-wide default per user, plus
-  per-user overrides. Instance ceiling and free-disk floor on top.
+  per-user overrides. Instance ceiling and free-disk floor on top. Everyone
+  sees their own usage as a bar in the page shell; the volume's free space is
+  shown to admins only.
 - A sweeper retires expired and used-up links every minute: the blob is deleted
   at once, the metadata row is kept for 30 days as "expired", then purged.
 - Full English and German localisation, dark and light themes.
@@ -382,6 +384,13 @@ one person above a restrictive default without editing the default. Admins are
 exempt from the default — as they always have been — but an override set on an
 admin does apply, because an admin who types a limit into another admin's row
 means it.
+
+The page shell shows each user a bar for their own quota, drawn only when
+something actually caps them, so an exempt admin sees none. The disk-usage bar
+beside it is admin-only: free space on the volume is instance capacity a member
+cannot act on, and it says more about the host than they need. That summary
+query runs on every render for a signed-in user, which is what
+`files_uploaded_by_idx` is for.
 
 Enforcement uses an advisory-locked `upload_reservations` table — reserve,
 stream, finalise — so concurrent uploads cannot race past the limit, and the

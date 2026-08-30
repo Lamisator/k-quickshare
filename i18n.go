@@ -221,13 +221,6 @@ var translations = map[string]map[string]string{
 	"role.member":       {"en": "Member", "de": "Mitglied"},
 	"role.admin":        {"en": "Admin", "de": "Admin"},
 	"role.super":        {"en": "Super admin", "de": "Super-Admin"},
-	"account.storage":   {"en": "Storage", "de": "Speicher"},
-	"account.storage_note": {
-		"en": "Expired and deleted files stop counting as soon as the sweeper retires them.",
-		"de": "Abgelaufene und gelöschte Dateien zählen nicht mehr mit, sobald der Sweeper sie stilllegt."},
-	"account.quota_custom": {
-		"en": "An administrator set this allowance for you specifically.",
-		"de": "Ein Administrator hat dieses Kontingent eigens für dich festgelegt."},
 	"account.change_pw": {"en": "Change password", "de": "Passwort ändern"},
 	"account.set_pw":    {"en": "Set password", "de": "Passwort festlegen"},
 	"account.current":   {"en": "Current password", "de": "Aktuelles Passwort"},
@@ -269,6 +262,7 @@ var translations = map[string]map[string]string{
 	"users.t_self_delete":  {"en": "You can't delete yourself", "de": "Du kannst dich nicht selbst löschen"},
 	"users.confirm_delete": {"en": "Delete user “%s”?", "de": "Benutzer „%s“ löschen?"},
 	"users.quota":          {"en": "Quota", "de": "Kontingent"},
+	"quota.your_storage":   {"en": "Your storage", "de": "Dein Speicher"},
 	"quota.unlimited":      {"en": "unlimited", "de": "unbegrenzt"},
 	"quota.files":          {"en": "files", "de": "Dateien"},
 	"quota.custom":         {"en": "custom", "de": "individuell"},

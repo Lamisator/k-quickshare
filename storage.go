@@ -176,6 +176,20 @@ type UsageSummary struct {
 func (s UsageSummary) BytesPercent() float64 { return pct(s.UsedBytes, s.Quota.Bytes) }
 func (s UsageSummary) FilesPercent() float64 { return pct(s.UsedFiles, s.Quota.Files) }
 
+// Limited reports whether anything actually caps this user. When nothing does,
+// there is no meaningful bar to draw — a progress bar towards "unlimited" is
+// decoration — and the shell omits the block entirely.
+func (s UsageSummary) Limited() bool { return s.Quota.Bytes > 0 || s.Quota.Files > 0 }
+
+// BarPercent drives the single bar in the shell: bytes when they are capped,
+// otherwise the file count, which is then the only limit there is.
+func (s UsageSummary) BarPercent() float64 {
+	if s.Quota.Bytes > 0 {
+		return s.BytesPercent()
+	}
+	return s.FilesPercent()
+}
+
 func pct(used, limit int64) float64 {
 	if limit <= 0 {
 		return 0
@@ -189,6 +203,10 @@ func pct(used, limit int64) float64 {
 // usageSummary reports what a user has stored and what they are allowed. It
 // counts exactly what the upload path counts (activeFileWhere), so the figure
 // someone reads here is the one they will be measured against.
+//
+// This runs on every page render for a signed-in user, so the aggregate is
+// filtered to the one user inside the subquery rather than grouping the whole
+// table and joining — that is what files_uploaded_by_idx serves.
 func (a *App) usageSummary(ctx context.Context, user *User) (UsageSummary, error) {
 	var (
 		s      UsageSummary
@@ -201,7 +219,7 @@ func (a *App) usageSummary(ctx context.Context, user *User) (UsageSummary, error
 		 FROM users u
 		 LEFT JOIN (
 		     SELECT uploaded_by, SUM(size_bytes) AS bytes, COUNT(*) AS files
-		     FROM files WHERE `+activeFileWhere+`
+		     FROM files WHERE uploaded_by = $1 AND `+activeFileWhere+`
 		     GROUP BY uploaded_by
 		 ) f ON f.uploaded_by = u.id
 		 WHERE u.id = $1`, user.ID.String()).

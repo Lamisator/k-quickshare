@@ -20,18 +20,11 @@ func (a *App) handleAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) renderAccount(w http.ResponseWriter, r *http.Request, status int, errMsg, okMsg string) {
-	// A quota the user cannot see is only discoverable by hitting it, so the
-	// account page carries it. A failure here must not cost them the password
-	// form, so it degrades to omitting the panel.
-	usage, err := a.usageSummary(r.Context(), userFromContext(r.Context()))
-	if err != nil {
-		log.Printf("account usage summary: %v", err)
-	}
+	// The quota panel that used to live here is now the shell's quota bar, so
+	// it is on this page too — renderStatus fills in Usage for every page.
 	a.renderStatus(w, r, status, "account.html", map[string]any{
 		"Title":   a.tr(r, "title.account") + " · Pyxis",
 		"Active":  "account",
-		"Usage":   usage,
-		"UsageOK": err == nil,
 		"Error":   errMsg,
 		"Success": okMsg,
 	})

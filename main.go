@@ -291,11 +291,21 @@ func (a *App) renderStatus(w http.ResponseWriter, r *http.Request, status int, n
 	if _, ok := data["User"]; !ok {
 		data["User"] = userFromContext(r.Context())
 	}
-	// The shell pages show a disk-usage bar; a statfs call is cheap enough to
-	// do per render and always reflects reality (including the sweeper).
 	if u, _ := data["User"].(*User); u != nil {
-		if _, ok := data["Disk"]; !ok {
+		// A statfs is cheap enough to do per render and always reflects
+		// reality, including the sweeper. Only admins are shown the result,
+		// so only admins pay for it.
+		if _, ok := data["Disk"]; !ok && u.IsAdmin {
 			data["Disk"] = a.diskStats()
+		}
+		// Everyone gets their own quota bar. Losing it must not cost them the
+		// page, so a failure here is logged and the block is left out.
+		if _, ok := data["Usage"]; !ok {
+			if s, err := a.usageSummary(r.Context(), u); err != nil {
+				log.Printf("usage summary for %s: %v", u.Username, err)
+			} else {
+				data["Usage"] = s
+			}
 		}
 	}
 	if _, ok := data["Title"]; !ok {

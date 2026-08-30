@@ -56,6 +56,9 @@ func TestTemplatesRender(t *testing.T) {
 			"Theme": "light", "User": user, "Active": "upload",
 			"Disk": DiskStats{Total: 500 << 30, Used: 142 << 30, Free: 358 << 30,
 				Percent: 28.4, OK: true},
+			// The quota bar lives in the shell, so every page renders it.
+			"Usage": UsageSummary{UsedBytes: 3 << 30, UsedFiles: 12,
+				Quota: UserQuota{Bytes: 20 << 30, Files: 1000}},
 		}
 	}
 	merge := func(lang string, extra map[string]any) map[string]any {
@@ -70,10 +73,8 @@ func TestTemplatesRender(t *testing.T) {
 		"index.html": {"MaxUpload": int64(1 << 30)},
 		"history.html": {"Active": "files", "Files": files, "ActiveCount": 2,
 			"TotalSize": int64(999), "TotalDL": 4},
-		"login.html": {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
-		"account.html": {"Active": "account", "Error": "", "Success": "ok",
-			"UsageOK": true, "Usage": UsageSummary{UsedBytes: 3 << 30, UsedFiles: 12,
-				Quota: UserQuota{Bytes: 20 << 30, Files: 1000}, Custom: true}},
+		"login.html":   {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
+		"account.html": {"Active": "account", "Error": "", "Success": "ok"},
 		"admin_users.html": {"Active": "users", "Users": userRows, "MeID": uid,
 			"MeIsSuper": false, "Error": "", "Success": ""},
 		"admin_settings.html": {"Active": "settings", "OIDC": OIDCSettings{Issuer: "https://x"},
@@ -96,13 +97,17 @@ func TestTemplatesRender(t *testing.T) {
 			"ContentType": "text/plain", "UploadedAt": now, "AuthSalt": "c2FsdHNhbHRzYWx0c2E",
 			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil)},
 	}
-	// The unlimited and unavailable branches of the account storage panel emit
-	// different markup (no bar, no percentage, or nothing at all) and are never
-	// reached by the case above.
-	accountCases := []map[string]any{
-		{"Active": "account", "UsageOK": true,
-			"Usage": UsageSummary{UsedBytes: 1 << 30, UsedFiles: 4}},
-		{"Active": "account", "UsageOK": false},
+	// Shapes of the shell quota bar that the case above never reaches: a file
+	// limit with no byte limit (the bar then tracks files), an entirely
+	// unlimited user (no bar at all), a custom allowance, and Usage missing
+	// because the summary query failed.
+	shellCases := []map[string]any{
+		{"Usage": UsageSummary{UsedBytes: 1 << 30, UsedFiles: 900,
+			Quota: UserQuota{Files: 1000}}},
+		{"Usage": UsageSummary{UsedBytes: 1 << 30, UsedFiles: 4}},
+		{"Usage": UsageSummary{UsedBytes: 19 << 30, UsedFiles: 4,
+			Quota: UserQuota{Bytes: 20 << 30}, Custom: true}},
+		{"Usage": nil},
 	}
 	batchCases := []map[string]any{
 		{"State": "batch", "E2EMode": "url", "Unlocked": true, "ID": uuid.NewString(),
@@ -128,10 +133,10 @@ func TestTemplatesRender(t *testing.T) {
 				t.Errorf("download.html case %d [%s]: %v", i, lang, err)
 			}
 		}
-		for i, extra := range accountCases {
+		for i, extra := range shellCases {
 			var sb strings.Builder
 			if err := tmpl.ExecuteTemplate(&sb, "account.html", merge(lang, extra)); err != nil {
-				t.Errorf("account.html case %d [%s]: %v", i, lang, err)
+				t.Errorf("shell quota bar case %d [%s]: %v", i, lang, err)
 			}
 		}
 		for i, extra := range batchCases {
@@ -140,6 +145,70 @@ func TestTemplatesRender(t *testing.T) {
 				t.Errorf("batch.html case %d [%s]: %v", i, lang, err)
 			}
 		}
+	}
+}
+
+// TestStorageBarVisibility pins who sees which bar. Free space on the volume
+// is instance capacity, which a member cannot act on and which says more about
+// the host than they need — the disk bar is admin-only, and a member gets the
+// bar for the limit that actually binds them. Both rules are decided in the
+// layout precisely so they can be checked here.
+func TestStorageBarVisibility(t *testing.T) {
+	tmpl, err := loadTemplates()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	disk := DiskStats{Total: 500 << 30, Used: 142 << 30, Free: 358 << 30, Percent: 28.4, OK: true}
+	limited := UsageSummary{UsedBytes: 3 << 30, UsedFiles: 12,
+		Quota: UserQuota{Bytes: 20 << 30, Files: 1000}}
+
+	render := func(u *User, data map[string]any) string {
+		t.Helper()
+		m := map[string]any{
+			"Lang": "en", "I18N": jsStrings("en"), "ReqPath": "/", "Title": "t",
+			"Theme": "dark", "User": u, "Active": "upload", "MaxUpload": int64(1 << 30),
+		}
+		for k, v := range data {
+			m[k] = v
+		}
+		var sb strings.Builder
+		if err := tmpl.ExecuteTemplate(&sb, "index.html", m); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return sb.String()
+	}
+
+	member := &User{ID: uuid.New(), Username: "guest"}
+	admin := &User{ID: uuid.New(), Username: "root", IsAdmin: true}
+
+	// Even handed Disk outright, a member must never be shown it.
+	out := render(member, map[string]any{"Disk": disk, "Usage": limited})
+	if strings.Contains(out, `aria-label="Disk usage"`) {
+		t.Error("a non-admin was shown the instance disk usage bar")
+	}
+	if !strings.Contains(out, `aria-label="Your storage"`) {
+		t.Error("a limited non-admin was not shown their quota bar")
+	}
+
+	out = render(admin, map[string]any{"Disk": disk, "Usage": limited})
+	if !strings.Contains(out, `aria-label="Disk usage"`) {
+		t.Error("an admin lost the disk usage bar")
+	}
+	if !strings.Contains(out, `aria-label="Your storage"`) {
+		t.Error("an admin with an explicit quota was not shown their quota bar")
+	}
+
+	// Nothing caps this user, so a bar towards "unlimited" would be decoration.
+	out = render(admin, map[string]any{"Disk": disk, "Usage": UsageSummary{UsedBytes: 1 << 30}})
+	if strings.Contains(out, `aria-label="Your storage"`) {
+		t.Error("a quota bar was drawn for a user with no limit")
+	}
+
+	// A signed-out visitor gets neither, and no nil dereference.
+	out = render(nil, map[string]any{})
+	if strings.Contains(out, `aria-label="Disk usage"`) ||
+		strings.Contains(out, `aria-label="Your storage"`) {
+		t.Error("a storage bar rendered with no signed-in user")
 	}
 }
 

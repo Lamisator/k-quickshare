@@ -105,6 +105,34 @@ func TestUsagePercent(t *testing.T) {
 	}
 }
 
+func TestUsageSummaryBar(t *testing.T) {
+	cases := []struct {
+		name    string
+		s       UsageSummary
+		limited bool
+		bar     float64
+	}{
+		{"no limit at all", UsageSummary{UsedBytes: 1 << 30, UsedFiles: 9}, false, 0},
+		{"bytes capped: the bar tracks bytes",
+			UsageSummary{UsedBytes: 5, UsedFiles: 900, Quota: UserQuota{Bytes: 10, Files: 1000}},
+			true, 50},
+		// With no byte limit the file count is the only limit there is, so the
+		// bar has to follow it or it would sit at zero while the user is
+		// one upload away from being refused.
+		{"files capped only: the bar tracks files",
+			UsageSummary{UsedBytes: 1 << 40, UsedFiles: 9, Quota: UserQuota{Files: 10}},
+			true, 90},
+	}
+	for _, c := range cases {
+		if got := c.s.Limited(); got != c.limited {
+			t.Errorf("%s: Limited() = %v, want %v", c.name, got, c.limited)
+		}
+		if got := c.s.BarPercent(); got != c.bar {
+			t.Errorf("%s: BarPercent() = %v, want %v", c.name, got, c.bar)
+		}
+	}
+}
+
 func TestQuotaViolation(t *testing.T) {
 	a := &App{quota: QuotaConfig{TotalBytes: 100}}
 	q := UserQuota{Bytes: 50, Files: 2}
