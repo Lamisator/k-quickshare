@@ -20,6 +20,17 @@
       <input id="file-input" type="file" name="file" multiple>
     </label>
 
+    {{/* A preset, not a hidden mode: pressing it writes the values it implies
+         into the fields below, so the share settings stay visible and the
+         server sees an ordinary 1-hour, 1-download share. */}}
+    <div class="quick-opts">
+      <button type="button" id="opt-single-use" class="btn btn-ghost btn-toggle" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        {{T .Lang "upload.single_use"}}
+      </button>
+      <span class="quick-opts-hint">{{T .Lang "upload.single_use_h"}}</span>
+    </div>
+
     <fieldset class="options" id="options">
       <legend>{{T .Lang "upload.options"}}</legend>
       <label class="opt">

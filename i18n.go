@@ -63,9 +63,13 @@ var translations = map[string]map[string]string{
 	"upload.password_ph": {"en": "empty = public link", "de": "leer = öffentlicher Link"},
 	"upload.maxdl":       {"en": "Download limit", "de": "Download-Limit"},
 	"upload.maxdl_ph":    {"en": "unlimited", "de": "unbegrenzt"},
-	"upload.queue":       {"en": "Uploads in this session", "de": "Uploads in dieser Sitzung"},
-	"upload.view_all":    {"en": "View all files →", "de": "Alle Dateien ansehen →"},
-	"upload.e2e":         {"en": "Files are encrypted in your browser before upload — the server only ever stores ciphertext. Without a password the key lives in the share link, so copy it right away: it can't be recovered later.", "de": "Dateien werden vor dem Hochladen in deinem Browser verschlüsselt — der Server speichert nur Chiffretext. Ohne Passwort steckt der Schlüssel im Freigabe-Link: kopiere ihn sofort, er lässt sich später nicht wiederherstellen."},
+	"upload.single_use":  {"en": "Single-Use", "de": "Einmalig"},
+	"upload.single_use_h": {
+		"en": "Expires after 1 hour, one download only.",
+		"de": "Läuft nach 1 Stunde ab, nur ein Download."},
+	"upload.queue":    {"en": "Uploads in this session", "de": "Uploads in dieser Sitzung"},
+	"upload.view_all": {"en": "View all files →", "de": "Alle Dateien ansehen →"},
+	"upload.e2e":      {"en": "Files are encrypted in your browser before upload — the server only ever stores ciphertext. Without a password the key lives in the share link, so copy it right away: it can't be recovered later.", "de": "Dateien werden vor dem Hochladen in deinem Browser verschlüsselt — der Server speichert nur Chiffretext. Ohne Passwort steckt der Schlüssel im Freigabe-Link: kopiere ihn sofort, er lässt sich später nicht wiederherstellen."},
 
 	// --- js strings (shared) ---
 	"js.done":            {"en": "Done", "de": "Fertig"},

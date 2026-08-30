@@ -422,6 +422,33 @@ code {
   clip: rect(0, 0, 0, 0); border: 0;
 }
 
+/* ---- Single-Use preset ---- */
+
+.quick-opts {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 1rem 0 0;
+}
+.quick-opts-hint {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+/* Styled off aria-pressed rather than a class, so the pressed look and the
+   state screen readers announce cannot drift apart. */
+.btn-toggle[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-bright);
+}
+.btn-toggle[aria-pressed="true"]:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-bright);
+  color: var(--accent-bright);
+}
+
 .options {
   margin: 1rem 0 0;
   padding: 1rem 1.15rem 1.1rem;

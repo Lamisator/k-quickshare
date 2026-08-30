@@ -662,6 +662,70 @@
   const expiresAtInput = document.getElementById('opt-expires-at');
   const passwordInput = document.getElementById('opt-password');
   const maxDownloadsInput = document.getElementById('opt-max');
+  const optionsBox = document.getElementById('options');
+  const singleUseBtn = document.getElementById('opt-single-use');
+
+  // Two independent reasons the share options can be read-only: the batch link
+  // has been created and its terms are frozen, or Single-Use is driving them.
+  // Both are folded into applyOptionState so neither can re-enable a field the
+  // other still wants disabled — declared before resetOptions() runs, which
+  // calls it.
+  let optionsLocked = false;
+  let singleUse = false;
+  let preSingleUse = null;
+
+  function applyOptionState() {
+    for (const el of [expiresSel, expiresAtInput, passwordInput, maxDownloadsInput]) {
+      if (el) el.disabled = optionsLocked;
+    }
+    // Single-Use owns expiry and the download limit; the password stays free.
+    if (!optionsLocked && singleUse) {
+      for (const el of [expiresSel, expiresAtInput, maxDownloadsInput]) {
+        if (el) el.disabled = true;
+      }
+    }
+    if (optionsBox) optionsBox.classList.toggle('options-locked', optionsLocked);
+    if (singleUseBtn) {
+      singleUseBtn.disabled = optionsLocked;
+      singleUseBtn.setAttribute('aria-pressed', singleUse ? 'true' : 'false');
+    }
+  }
+
+  function syncCustomExpiry() {
+    if (expiresAtWrap && expiresSel) {
+      expiresAtWrap.hidden = expiresSel.value !== 'custom';
+    }
+  }
+
+  // Single-Use is exactly "1 hour" plus "1 download" — it writes those two
+  // values rather than carrying a flag of its own, so the request the server
+  // receives is indistinguishable from setting them by hand. Turning it off
+  // restores what the fields held before, which is why the previous values are
+  // captured rather than reset to defaults.
+  function setSingleUse(on) {
+    if (on === singleUse) return;
+    if (on) {
+      preSingleUse = {
+        expires: expiresSel ? expiresSel.value : '',
+        expiresAt: expiresAtInput ? expiresAtInput.value : '',
+        max: maxDownloadsInput ? maxDownloadsInput.value : '',
+      };
+      if (expiresSel) expiresSel.value = '1';
+      if (maxDownloadsInput) maxDownloadsInput.value = '1';
+    } else if (preSingleUse) {
+      if (expiresSel) expiresSel.value = preSingleUse.expires;
+      if (expiresAtInput) expiresAtInput.value = preSingleUse.expiresAt;
+      if (maxDownloadsInput) maxDownloadsInput.value = preSingleUse.max;
+      preSingleUse = null;
+    }
+    singleUse = on;
+    syncCustomExpiry();
+    applyOptionState();
+  }
+
+  if (singleUseBtn) {
+    singleUseBtn.addEventListener('click', () => setSingleUse(!singleUse));
+  }
 
   form.addEventListener('submit', (e) => e.preventDefault());
 
@@ -669,7 +733,10 @@
   function resetOptions() {
     form.reset();
     if (expiresAtInput) expiresAtInput.value = '';
-    if (expiresAtWrap) expiresAtWrap.hidden = true;
+    singleUse = false;
+    preSingleUse = null;
+    syncCustomExpiry();
+    applyOptionState();
   }
   resetOptions();
   window.addEventListener('pageshow', (e) => {
@@ -680,7 +747,7 @@
   if (expiresSel && expiresAtWrap && expiresAtInput) {
     expiresSel.addEventListener('change', () => {
       const custom = expiresSel.value === 'custom';
-      expiresAtWrap.hidden = !custom;
+      syncCustomExpiry();
       if (custom && !expiresAtInput.value) {
         // default to one week from now, minute precision, local time
         const d = new Date(Date.now() + 7 * 24 * 3600 * 1000);
@@ -1008,11 +1075,8 @@
   const batchShareNew = document.getElementById('batch-share-new');
 
   function setOptionsLocked(locked) {
-    for (const el of [expiresSel, expiresAtInput, passwordInput, maxDownloadsInput]) {
-      if (el) el.disabled = locked;
-    }
-    const box = document.getElementById('options');
-    if (box) box.classList.toggle('options-locked', locked);
+    optionsLocked = locked;
+    applyOptionState();
   }
 
   // Concurrent uploads all await the same creation: handleFiles starts every
