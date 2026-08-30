@@ -10,10 +10,10 @@
     LANG = i18nEl.getAttribute('data-lang') || 'en';
   }
   // %d and %s are interchangeable here: the same catalogue feeds Go's Sprintf
-  // (which needs %d for counts) and this one-argument substitution.
-  const t = (key, arg) => {
+  // (which needs %d for counts) and this positional substitution.
+  const t = (key, ...args) => {
     let s = I18N[key] || key;
-    if (arg !== undefined) s = s.replace(/%[sd]/, arg);
+    for (const arg of args) s = s.replace(/%[sd]/, arg);
     return s;
   };
 
@@ -664,6 +664,8 @@
   const maxDownloadsInput = document.getElementById('opt-max');
   const optionsBox = document.getElementById('options');
   const singleUseBtn = document.getElementById('opt-single-use');
+  // 0 means "no limit advertised", in which case only the server decides.
+  const MAX_UPLOAD = Number(form.getAttribute('data-max-upload')) || 0;
 
   // Two independent reasons the share options can be read-only: the batch link
   // has been created and its terms are frozen, or Single-Use is driving them.
@@ -940,6 +942,16 @@
       markRowCancelled(row);
       showRetry();
     }));
+
+    // Check the size before encrypting anything. The server refuses an
+    // oversize file anyway, but only after the browser has encrypted the whole
+    // thing and pushed every byte across — minutes of work and the entire
+    // upload's bandwidth spent to be told no. too_large is deliberately not in
+    // RETRYABLE: retrying cannot change the outcome.
+    if (MAX_UPLOAD > 0 && file.size > MAX_UPLOAD) {
+      fail('too_large', t('reason_too_large', fmtSize(file.size), fmtSize(MAX_UPLOAD)));
+      return;
+    }
 
     // Expiry, limit and password belong to the batch row, not the member, so
     // the per-file POST carries none of them.

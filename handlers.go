@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -251,6 +252,34 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // --- uploads --------------------------------------------------------------
 
+// rejectUnparsableUpload answers a multipart parse failure with something the
+// uploader can act on. httpError sends http.StatusText for the status, so every
+// one of these used to arrive as a bare "Bad Request": a file over the size
+// limit, a dropped connection and a genuinely malformed request were one
+// indistinguishable message, with the actual reason kept in the server log
+// where the person uploading could never see it.
+func (a *App) rejectUnparsableUpload(w http.ResponseWriter, r *http.Request, err error) {
+	var tooBig *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooBig):
+		// The reader's ceiling is maxUpload plus slack for multipart framing,
+		// so quote the limit that was actually breached, not the ceiling.
+		log.Printf("upload refused: body over the %s limit", humanSize(a.maxUpload))
+		http.Error(w, fmt.Sprintf("file is larger than the %s upload limit", humanSize(a.maxUpload)),
+			http.StatusRequestEntityTooLarge)
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF),
+		errors.Is(r.Context().Err(), context.Canceled):
+		// The client went away mid-body. Usually nobody is left to read the
+		// response, but a proxy can still deliver it, and saying so keeps the
+		// log honest about what is a failure and what is a disconnect.
+		log.Printf("upload interrupted before the body finished")
+		http.Error(w, "the upload was interrupted before it finished; nothing was stored",
+			http.StatusBadRequest)
+	default:
+		httpError(w, fmt.Errorf("parse form: %w", err), http.StatusBadRequest)
+	}
+}
+
 func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -260,7 +289,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, a.maxUpload+32<<20)
 
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		httpError(w, fmt.Errorf("parse form: %w", err), http.StatusBadRequest)
+		a.rejectUnparsableUpload(w, r, err)
 		return
 	}
 	// net/http normally deletes the temp files multipart spills for anything
@@ -402,10 +431,18 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		sum := sha256.Sum256(token)
 		authVerifier = sum[:]
 	}
-	if perr != nil || plainSize < 0 || plainSize > a.maxUpload {
+	if perr != nil || plainSize < 0 {
+		// Not a size at all — a client bug, not a file the user can shrink.
 		dst.Close()
 		_ = os.Remove(dstPath)
-		http.Error(w, "invalid plain_size", http.StatusRequestEntityTooLarge)
+		http.Error(w, "invalid plain_size", http.StatusBadRequest)
+		return
+	}
+	if plainSize > a.maxUpload {
+		dst.Close()
+		_ = os.Remove(dstPath)
+		http.Error(w, fmt.Sprintf("file is %s; the maximum is %s",
+			humanSize(plainSize), humanSize(a.maxUpload)), http.StatusRequestEntityTooLarge)
 		return
 	}
 	ctWritten, copyErr := io.Copy(dst, file)
@@ -430,7 +467,8 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if written > a.maxUpload {
 		_ = os.Remove(dstPath)
-		http.Error(w, "file exceeds max size", http.StatusRequestEntityTooLarge)
+		http.Error(w, fmt.Sprintf("file is %s; the maximum is %s",
+			humanSize(written), humanSize(a.maxUpload)), http.StatusRequestEntityTooLarge)
 		return
 	}
 

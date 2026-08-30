@@ -110,6 +110,8 @@ var translations = map[string]map[string]string{
 		"de": "Deine Sitzung ist abgelaufen. Melde dich erneut an und versuche den Upload noch einmal."},
 	"js.reason_http": {"en": "The server rejected the upload (HTTP %s).",
 		"de": "Der Server hat den Upload abgelehnt (HTTP %s)."},
+	"js.reason_too_large": {"en": "This file is %s. The maximum is %s. Nothing was uploaded.",
+		"de": "Diese Datei ist %s groß. Das Maximum sind %s. Es wurde nichts hochgeladen."},
 	"js.reason_encrypt": {"en": "Encryption failed in this browser: %s",
 		"de": "Die Verschlüsselung ist in diesem Browser fehlgeschlagen: %s"},
 
@@ -485,7 +487,7 @@ func jsStrings(lang string) map[string]string {
 		"js.e2e_unavailable", "js.e2e_insecure",
 		"js.cancel", "js.retry", "js.cancelled", "js.queued",
 		"js.reason_cancelled", "js.reason_network", "js.reason_login",
-		"js.reason_http", "js.reason_encrypt",
+		"js.reason_http", "js.reason_encrypt", "js.reason_too_large",
 		"js.batch_link", "js.batch_count", "js.batch_new", "js.batch_download",
 		"js.batch_preview", "js.batch_hide_preview", "js.batch_preview_failed",
 		"js.batch_empty", "js.batch_zipping", "js.batch_fetching",
