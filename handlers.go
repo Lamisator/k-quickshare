@@ -263,6 +263,22 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("parse form: %w", err), http.StatusBadRequest)
 		return
 	}
+	// net/http normally deletes the temp files multipart spills for anything
+	// over the 32 MiB memory budget, but it does that through the Request it
+	// built itself (server.go: `w.req.MultipartForm`). withOptionalUser hands
+	// the chain a *copy* — Request.WithContext is a shallow copy — so
+	// ParseMultipartForm above sets MultipartForm on the copy, w.req's stays
+	// nil, and the built-in cleanup silently never runs. Every authenticated
+	// upload above 32 MiB then leaked its spill file until the container was
+	// restarted. Clean up explicitly; this is correct whatever the middleware
+	// does, and RemoveAll is safe to call more than once.
+	defer func() {
+		if r.MultipartForm != nil {
+			if err := r.MultipartForm.RemoveAll(); err != nil {
+				log.Printf("upload: remove multipart temp files: %v", err)
+			}
+		}
+	}()
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		httpError(w, err, http.StatusBadRequest)
