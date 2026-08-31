@@ -631,9 +631,12 @@ code {
   gap: 0.35rem;
   flex-shrink: 0;
 }
-.batch-preview {
+/* Same story as the gallery rules below: .dl-preview's margin shorthand sits
+   later in the file at equal specificity, so a bare .batch-preview margin-top
+   never applied and the inline preview sat flush against its row. */
+.dl-preview.batch-preview {
   flex-basis: 100%;
-  margin-top: 0.7rem;
+  margin: 0.7rem 0 0;
 }
 .batch-row:last-child { border-bottom: none; }
 .batch-row-meta {
@@ -753,9 +756,13 @@ code {
 }
 .gallery-close { flex-shrink: 0; padding: 0.4rem; }
 
+/* The stage stretches its children rather than centring them, so the preview
+   box inherits the full height by being a stretched flex item instead of by a
+   percentage resolved against an auto-height parent. The arrow buttons opt
+   back out with align-self. */
 .gallery-stage {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 0.6rem;
   /* Takes every row the head, caption and strip do not claim. */
   flex: 1 1 auto;
@@ -767,11 +774,12 @@ code {
   min-height: 0;
   height: 100%;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
 }
 .gallery-nav {
   flex-shrink: 0;
+  align-self: center;
   width: 40px;
   height: 40px;
   display: inline-flex;
@@ -793,18 +801,40 @@ code {
 
 /* The stage reuses .dl-preview so the sniffing rules and the media styling
    stay in one place; only the sizing differs. */
-.gallery-preview {
+/* Every rule here is written .dl-preview.gallery-preview rather than just
+   .gallery-preview. The generic .dl-preview rules live further down the file
+   and carry the same one-class specificity, so on source order alone they win
+   — which is what capped a full-screen gallery image at 420px and left it
+   marooned in the middle of the stage. Two classes settle it wherever the
+   rules happen to sit, including inside the narrow-screen media query. */
+.dl-preview.gallery-preview {
   margin: 0;
+  flex: 1;
   width: 100%;
   height: 100%;
+  min-width: 0;
   min-height: 0;
 }
 /* Percentages, not viewport units: the stage is what is left after the strip
-   and the caption, and the media has to fit THAT, not the screen. */
-.gallery-preview img,
-.gallery-preview video { max-height: 100%; max-width: 100%; }
-.gallery-preview iframe { height: 100%; }
-.gallery-preview .e2e-text { max-height: 100%; }
+   and the caption, and the media has to fit THAT, not the screen.
+
+   Sized rather than merely capped. max-width/max-height only ever scale an
+   image DOWN, so on a full-screen stage anything smaller than the viewport
+   kept its natural size and sat in the middle of the box with a wide rim of
+   background around it. width/height 100% plus object-fit:contain scales in
+   both directions, so the picture grows to fill the stage and keeps its
+   aspect ratio. */
+.dl-preview.gallery-preview img,
+.dl-preview.gallery-preview video {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+}
+.dl-preview.gallery-preview iframe { height: 100%; }
+/* Text has no aspect ratio to preserve — it just takes the whole panel. */
+.dl-preview.gallery-preview .e2e-text { height: 100%; max-height: 100%; }
 
 .gallery-caption {
   display: flex;
