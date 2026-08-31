@@ -747,6 +747,19 @@
       image: 'IMG', video: 'VID', audio: 'AUD', pdf: 'PDF', text: 'TXT',
     };
 
+    // Files at or below this are fetched and decrypted as soon as the gallery
+    // opens, so stepping through a set of ordinary photos does not stall on
+    // every arrow press. The threshold is per file, not for the set: a share of
+    // three snapshots and one long video should load the snapshots up front and
+    // still leave the video until somebody actually reaches it.
+    const PREFETCH_MAX = 10 * 1024 * 1024; // 10 MiB
+
+    // Prefetches run a few at a time rather than genuinely all at once. They
+    // share one connection either way, so firing twenty in parallel makes each
+    // of them slower without finishing the set any sooner — and the file on the
+    // stage is the one somebody is actually waiting for.
+    const PREFETCH_PARALLEL = 3;
+
     const previewAllBtn = document.getElementById('batch-preview-all');
     let gallery = null;          // built on first open, then reused
     let galleryItems = [];
@@ -839,9 +852,11 @@
 
       const note = document.createElement('p');
       note.className = 'gallery-note muted';
-      note.textContent = batchRoot.getAttribute('data-limited') === '1'
-        ? t('gallery_limit_note')
-        : t('gallery_hint');
+      const lines = [t('gallery_hint'), t('gallery_prefetch', fmtSize(PREFETCH_MAX))];
+      // Opening the gallery now spends a download on every small file at once,
+      // so a link that is counting them has to say so before that happens.
+      if (batchRoot.getAttribute('data-limited') === '1') lines.push(t('gallery_limit_note'));
+      note.textContent = lines.join(' ');
 
       box.appendChild(head);
       box.appendChild(stage);
@@ -943,6 +958,46 @@
       }
     }
 
+    function setTileBusy(m, busy) {
+      const ui = galleryTiles.get(m.id);
+      if (ui) ui.tile.classList.toggle('is-loading', busy);
+    }
+
+    // prefetchGallery pulls down everything small enough, in the background,
+    // starting after the file on the stage has claimed the connection.
+    //
+    // decryptMember is memoised, so a file already fetched — by the stage, by a
+    // row preview, by a download — is skipped here and never costs a second
+    // request against the link's download limit.
+    function prefetchGallery() {
+      const queue = galleryItems.filter(
+        (m) => Number(m.size) <= PREFETCH_MAX && !plainCache.has(m.id));
+      let next = 0;
+      const pump = async () => {
+        while (next < queue.length) {
+          // Closing the gallery stops the queue where it is. What is already in
+          // flight is paid for, but nothing new is started for a gallery
+          // nobody is looking at any more.
+          if (!gallery.el.open) return;
+          const m = queue[next++];
+          setTileBusy(m, true);
+          try {
+            const blob = await decryptMember(m, (label, f) => setRowProgress(m, label, f));
+            setTileThumb(m, blob);
+          } catch (err) {
+            // Deliberately silent. plainCache drops a failed attempt, so
+            // stepping onto this file tries again and reports the failure
+            // there — next to the file, where it means something — rather than
+            // as an alert about a file nobody has looked at yet.
+          } finally {
+            setTileBusy(m, false);
+            endRowProgress(m, false);
+          }
+        }
+      };
+      for (let i = 0; i < Math.min(PREFETCH_PARALLEL, queue.length); i++) pump();
+    }
+
     // Only images: a still from a video would mean decoding the video, which
     // is work nobody asked for.
     function setTileThumb(m, blob) {
@@ -1016,7 +1071,11 @@
         if (!gallery) buildGallery();
         renderStrip();
         gallery.el.showModal();
+        // The stage goes first so its request is the one already in flight when
+        // the prefetch queue starts; decryptMember has it in plainCache by the
+        // time showGalleryItem yields, so the prefetch skips it.
         showGalleryItem(0);
+        prefetchGallery();
       });
     }
 

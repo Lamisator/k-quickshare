@@ -111,10 +111,12 @@ var translations = map[string]map[string]string{
 	"js.gallery_hint":   {"en": "Use ← and → to move through the files.", "de": "Mit ← und → zwischen den Dateien wechseln."},
 	"js.gallery_nothing": {"en": "Nothing in this share can be previewed.",
 		"de": "In dieser Freigabe lässt sich nichts in der Vorschau anzeigen."},
-	// Stepping onto a file fetches it, and a fetch is what the limit counts, so
-	// say so before someone arrows through a share they only meant to skim.
-	"js.gallery_limit_note": {"en": "Each file is fetched the first time you open it, and counts against this link's download limit.",
-		"de": "Jede Datei wird beim ersten Öffnen geladen und zählt auf das Download-Limit dieses Links."},
+	"js.gallery_prefetch": {"en": "Files up to %s are loaded as soon as this opens; larger ones load when you reach them.",
+		"de": "Dateien bis %s werden beim Öffnen geladen, größere erst, wenn du sie erreichst."},
+	// A fetch is what the limit counts, and the gallery now spends one on every
+	// small file the moment it opens, so say so before that happens.
+	"js.gallery_limit_note": {"en": "Every file loaded here counts against this link's download limit.",
+		"de": "Jede hier geladene Datei zählt auf das Download-Limit dieses Links."},
 
 	// --- integrity of the decrypted result ---
 	"js.e2e_legacy": {"en": "This link uses an older format: the contents are authenticated, but the file's length and name are not. It was shared before the current format existed.",
@@ -553,7 +555,8 @@ func jsStrings(lang string) map[string]string {
 		"js.batch_legacy", "js.batch_no_roster", "js.batch_unverified", "js.batch_missing",
 		"js.batch_row_unverified", "js.batch_row_unverified_hint", "js.batch_reordered",
 		"js.preview_all", "js.gallery_prev", "js.gallery_next", "js.gallery_close",
-		"js.gallery_show", "js.gallery_hint", "js.gallery_nothing", "js.gallery_limit_note",
+		"js.gallery_show", "js.gallery_hint", "js.gallery_nothing",
+		"js.gallery_prefetch", "js.gallery_limit_note",
 		"batch.n_files", "batch.one_file",
 	}
 	out := make(map[string]string, len(keys))
