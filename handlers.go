@@ -23,8 +23,12 @@ import (
 )
 
 type File struct {
-	ID            string
+	ID string
+	// Empty from container version 4 on: the name is sealed in EncName and the
+	// server cannot read it. Older rows still carry the name they were uploaded
+	// with, because their manifests carry it in the clear regardless.
 	OriginalName  string
+	EncName       string // base64url of the sealed name blob, "" when there is none
 	StoredName    string
 	Size          int64
 	ContentType   string
@@ -106,17 +110,30 @@ func (a *App) handleUploadPage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleHistory lists the signed-in user's own uploads — an admin's included.
+// Seeing every account's shares is a separate page and a deliberate act, not
+// the view an administrator lands in by default.
 func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
+	a.renderFileList(w, r, false)
+}
+
+// handleAdminFiles is that separate page: the instance-wide list, admin only.
+func (a *App) handleAdminFiles(w http.ResponseWriter, r *http.Request) {
+	a.renderFileList(w, r, true)
+}
+
+func (a *App) renderFileList(w http.ResponseWriter, r *http.Request, everyone bool) {
 	user := userFromContext(r.Context())
 
-	// Share IDs are bearer secrets: a regular user must only ever see their
-	// own uploads. Admins intentionally get the instance-wide view.
+	// Share IDs are bearer secrets: a listing must only ever show uploads the
+	// viewer is entitled to. `everyone` is reachable only through the admin-only
+	// route, and an admin still gets their own uploads on /history.
 	// Archived rows (blob deleted, metadata kept 30 days) stay listed.
 	// A batch member holds no expiry, limit or password of its own — the batch
 	// row does — so those columns are coalesced through the join. Without it
 	// every member would list as "never expires, no limit", which is the
 	// opposite of what its link actually enforces.
-	const baseQuery = `SELECT f.id::text, f.original_name, f.stored_name, f.size_bytes, f.content_type,
+	const baseQuery = `SELECT f.id::text, f.original_name, f.enc_name, f.stored_name, f.size_bytes, f.content_type,
 		        f.uploaded_at, f.uploaded_by::text, u.username,
 		        COALESCE(b.expires_at, f.expires_at),
 		        (f.key_mode = 4),
@@ -134,7 +151,7 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		rows pgx.Rows
 		err  error
 	)
-	if user.IsAdmin {
+	if everyone && user.IsAdmin {
 		rows, err = a.db.Query(r.Context(),
 			baseQuery+` ORDER BY f.uploaded_at DESC LIMIT 500`)
 	} else {
@@ -157,6 +174,8 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var (
 			f            File
+			origName     *string
+			encName      []byte
 			uploaderID   *string
 			uploader     *string
 			expires      *time.Time
@@ -165,12 +184,18 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 			keyMode      int
 			batchKeyMode *int
 		)
-		if err := rows.Scan(&f.ID, &f.OriginalName, &f.StoredName, &f.Size, &f.ContentType,
+		if err := rows.Scan(&f.ID, &origName, &encName, &f.StoredName, &f.Size, &f.ContentType,
 			&f.UploadedAt, &uploaderID, &uploader,
 			&expires, &f.HasPassword, &maxDL, &f.DownloadCount, &archivedAt, &keyMode,
 			&f.BatchID, &batchKeyMode); err != nil {
 			httpError(w, err, http.StatusInternalServerError)
 			return
+		}
+		if origName != nil {
+			f.OriginalName = *origName
+		}
+		if len(encName) > 0 {
+			f.EncName = base64.RawURLEncoding.EncodeToString(encName)
 		}
 		f.Keyed = keyMode == keyModeE2EURL
 		if batchKeyMode != nil {
@@ -192,6 +217,9 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 			(expires != nil && time.Now().After(*expires)) ||
 			(f.HasLimit && f.DownloadCount >= f.MaxDL)
 		f.CanDelete = user.IsAdmin || (uploaderID != nil && *uploaderID == user.ID.String())
+		// The extension is not always available any more — a sealed name has
+		// none the server can see — so the icon comes from the MIME type, and
+		// the page refines it once the browser has opened the name.
 		f.IconKind = iconKind(f.ContentType, f.OriginalName)
 		if !f.Archived {
 			activeCount++
@@ -207,9 +235,16 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 	groups, batched := groupFiles(files)
 
+	titleKey, headKey, subKey, active := "title.files", "files.heading", "files.sub", "files"
+	if everyone {
+		titleKey, headKey, subKey, active = "title.allfiles", "files.all_heading", "files.all_sub", "allfiles"
+	}
 	a.render(w, r, "history.html", map[string]any{
-		"Title":       a.tr(r, "title.files") + " · Pyxis",
-		"Active":      "files",
+		"Title":       a.tr(r, titleKey) + " · Pyxis",
+		"Active":      active,
+		"Heading":     a.tr(r, headKey),
+		"Sub":         a.tr(r, subKey),
+		"Everyone":    everyone,
 		"Groups":      groups,
 		"HasBatches":  batched,
 		"ActiveCount": activeCount,
@@ -545,13 +580,37 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A version 3 object begins with its own manifest. Check that it is the one
-	// the request declared before storing either, so the row and the file can
-	// never describe different things — and write the header through unchanged,
-	// because it is covered by the chunks' AAD.
+	// From version 4 the name arrives sealed, in a blob of its own, and the
+	// server stores it without ever being able to open it. Before version 4 the
+	// name was in the manifest and there is nothing sealed to accept.
+	encName, nerr := base64.RawURLEncoding.DecodeString(r.FormValue("enc_name"))
+	if nerr != nil {
+		encName = nil
+		nerr = errors.New("enc_name is not base64url")
+	} else if e2eVersion >= e2eVersionV4 {
+		switch {
+		case len(encName) == 0:
+			nerr = errors.New("an e2e_version 4 upload must carry a sealed enc_name")
+		case len(encName) > maxEncNameLen:
+			nerr = fmt.Errorf("enc_name is %d bytes, the maximum is %d", len(encName), maxEncNameLen)
+		}
+	} else if len(encName) > 0 {
+		nerr = fmt.Errorf("enc_name needs e2e_version %d or newer", e2eVersionV4)
+	}
+	if nerr != nil {
+		dst.Close()
+		_ = os.Remove(dstPath)
+		http.Error(w, nerr.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// A version 3 or 4 object begins with its own manifest. Check that it is the
+	// one the request declared before storing either, so the row and the file
+	// can never describe different things — and write the header through
+	// unchanged, because it is covered by the chunks' AAD.
 	var headerWritten int64
 	if e2eVersion >= e2eVersionV3 {
-		head, herr := verifyContainerHeader(file, manifestRaw)
+		head, herr := verifyContainerHeader(file, manifestRaw, e2eVersion)
 		if herr != nil {
 			dst.Close()
 			_ = os.Remove(dstPath)
@@ -596,17 +655,25 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Name and type come from the MANIFEST, not from the multipart headers or a
-	// side form field. Those are unauthenticated: a downloader has no way to
-	// tell whether the name it is shown is the one the sender chose. The
-	// manifest travels inside the AAD of every chunk, so taking the stored
-	// columns from it keeps what the history page and the landing page display
-	// in step with what the browser can actually verify after decrypting.
+	// Type comes from the MANIFEST, not from the multipart headers or a side
+	// form field. Those are unauthenticated: a downloader has no way to tell
+	// whether what it is shown is what the sender chose. The manifest travels
+	// inside the AAD of every chunk, so taking the stored column from it keeps
+	// what the pages display in step with what the browser can verify after
+	// decrypting.
 	contentType := manifest.Type
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	origName := sanitizeName(manifest.Name)
+	// From version 4 there is no name to store: the column stays NULL and the
+	// sealed blob is the only copy the server holds. Older versions keep
+	// writing the manifest's name, because that manifest is served in the clear
+	// anyway and a listing has nothing else to show.
+	var origName *string
+	if e2eVersion < e2eVersionV4 {
+		n := sanitizeName(manifest.Name)
+		origName = &n
+	}
 
 	// Swap the reservation for the real row under the quota lock, re-checking
 	// against the actual size.
@@ -616,12 +683,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			batchID = &batch.ID
 		}
 		_, err := tx.Exec(r.Context(),
-			`INSERT INTO files (id, original_name, stored_name, size_bytes, content_type,
+			`INSERT INTO files (id, original_name, enc_name, stored_name, size_bytes, content_type,
 			                    uploaded_by, expires_at, max_downloads,
 			                    key_mode, enc_salt, auth_verifier, batch_id, wrapped_key,
 			                    e2e_version, manifest)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-			id.String(), origName, storedName, written, contentType,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+			id.String(), origName, encName, storedName, written, contentType,
 			user.ID.String(), expiresAt, maxDownloads,
 			keyMode, salt, authVerifier, batchID, wrappedKey,
 			e2eVersion, manifestRaw)
@@ -654,7 +721,9 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if wantsJSON(r) {
 		res := map[string]any{
-			"id":          id.String(),
+			"id": id.String(),
+			// Only ever set for a pre-version-4 upload; from 4 on the server
+			// has no name to hand back, and the client knows it already.
 			"name":        origName,
 			"size":        written,
 			"url":         shareURL,
@@ -677,7 +746,8 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 type fileMeta struct {
 	ID            string
-	OriginalName  string
+	OriginalName  string // empty from container version 4 on; see EncName
+	EncName       []byte // the sealed name blob, opaque to the server
 	StoredName    string
 	Size          int64
 	ContentType   string
@@ -756,18 +826,22 @@ func (a *App) dispatchFileRoutes(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	fm := &fileMeta{ID: id.String()}
+	var origName *string
 	err := a.db.QueryRow(r.Context(),
-		`SELECT original_name, stored_name, size_bytes, content_type, uploaded_at,
+		`SELECT original_name, enc_name, stored_name, size_bytes, content_type, uploaded_at,
 		        expires_at, max_downloads, download_count,
 		        key_mode, enc_salt, auth_verifier, archived_at, batch_id,
 		        e2e_version, manifest
 		 FROM files WHERE id = $1`, id.String()).
-		Scan(&fm.OriginalName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
+		Scan(&origName, &fm.EncName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
 			&fm.ExpiresAt, &fm.MaxDownloads, &fm.DownloadCount,
 			&fm.KeyMode, &fm.EncSalt, &fm.AuthVerifier, &fm.ArchivedAt, &fm.BatchID,
 			&fm.E2EVersion, &fm.Manifest)
 	if err != nil {
 		return nil, err
+	}
+	if origName != nil {
+		fm.OriginalName = *origName
 	}
 	return fm, nil
 }
@@ -824,12 +898,16 @@ func (a *App) renderE2ELanding(w http.ResponseWriter, r *http.Request, fm *fileM
 		mode = "password"
 	}
 	data := map[string]any{
-		"Title":      fm.OriginalName + " · Pyxis",
-		"State":      "e2e",
-		"E2EMode":    mode,
-		"Unlocked":   fm.KeyMode == keyModeE2EPassword && a.isUnlocked(r, fm),
-		"ID":         fm.ID,
+		"Title":    a.tr(r, "title.download") + " · Pyxis",
+		"State":    "e2e",
+		"E2EMode":  mode,
+		"Unlocked": fm.KeyMode == keyModeE2EPassword && a.isUnlocked(r, fm),
+		"ID":       fm.ID,
+		// Empty for a version 4 share: the page shows a placeholder and the
+		// browser replaces it the moment it has opened EncName, which costs one
+		// short blob rather than a byte of the file.
 		"Name":       fm.OriginalName,
+		"EncName":    base64.RawURLEncoding.EncodeToString(fm.EncName),
 		"E2EVersion": fm.E2EVersion,
 		// Verbatim, exactly as stored: this is the AAD of every chunk, so the
 		// browser can only decrypt if these bytes survive the round trip.
@@ -840,6 +918,7 @@ func (a *App) renderE2ELanding(w http.ResponseWriter, r *http.Request, fm *fileM
 		"HasLimit":    false,
 		"PreviewKind": previewKind(fm.ContentType, fm.Size),
 		"IconKind":    iconKind(fm.ContentType, fm.OriginalName),
+		"ManifestID":  manifestIDOf(fm.Manifest),
 	}
 	if len(fm.EncSalt) > 0 {
 		data["AuthSalt"] = base64.RawURLEncoding.EncodeToString(fm.EncSalt)
@@ -901,8 +980,8 @@ func (a *App) handleFileRaw(w http.ResponseWriter, r *http.Request, fm *fileMeta
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`attachment; filename="%s.enc"`, quoteForHeader(fm.OriginalName)))
-	http.ServeContent(w, r, fm.OriginalName+".enc", fm.UploadedAt, f)
+		fmt.Sprintf(`attachment; filename="%s.enc"`, quoteForHeader(downloadName(fm.OriginalName, fm.ID))))
+	http.ServeContent(w, r, downloadName(fm.OriginalName, fm.ID)+".enc", fm.UploadedAt, f)
 
 	a.archiveIfSpent(r, fm)
 }
@@ -1191,6 +1270,32 @@ func previewKind(contentType string, size int64) string {
 }
 
 // iconKind picks a file-type icon bucket for lists and the landing page.
+// downloadName is what the ciphertext is called on its way out. A sealed-name
+// share has nothing the server could put here, and the browser renames the file
+// after decrypting anyway, so the row id stands in — never a guess at a name.
+func downloadName(origName, id string) string {
+	if origName != "" {
+		return origName
+	}
+	return id
+}
+
+// manifestIDOf digs the client-generated file id out of a stored manifest. It
+// is the AAD of the sealed name, so the browser needs it to open one, and
+// parsing the bytes here saves every page from doing it again.
+func manifestIDOf(raw []byte) string {
+	if len(raw) == 0 || len(raw) > maxManifestLen {
+		return ""
+	}
+	var m struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	return m.ID
+}
+
 func iconKind(contentType, name string) string {
 	ct := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))

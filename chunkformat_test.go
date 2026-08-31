@@ -43,7 +43,7 @@ func encryptStream(dst io.Writer, src io.Reader, key, aad []byte) (int64, error)
 		return 0, err
 	}
 	if len(aad) > 0 {
-		if _, err := dst.Write(buildContainerHeader(aad)); err != nil {
+		if _, err := dst.Write(buildContainerHeader(aad, e2eVersionV3)); err != nil {
 			return 0, err
 		}
 	}
@@ -118,7 +118,7 @@ func newEncReader(f *os.File, key, aad []byte, plainSize int64) (*encReader, err
 		if _, err := f.ReadAt(head, 0); err != nil {
 			return nil, err
 		}
-		if !bytes.Equal(head, buildContainerHeader(aad)) {
+		if !bytes.Equal(head, buildContainerHeader(aad, e2eVersionV3)) {
 			return nil, errors.New("the embedded manifest does not match the one supplied")
 		}
 		base = int64(len(head))

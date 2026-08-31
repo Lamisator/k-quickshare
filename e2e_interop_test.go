@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -33,6 +34,22 @@ const (
 	jsEncKeyHex       = "ce6888382034c7ea58a919faf1eb70e239f7f03e5c09b63aa793e81ddc8b3966"
 	jsAuthHex         = "1695abc0c830d8bc246dbc8ae6b005181ceaba419e0cffe4fbea23fa85aa83ab"
 	jsRosterPwKeyHex  = "9033d58c129c0b62638e245497478ccd0472e5c6dce921a47eca47d48230938a"
+
+	// Version 4's name branch, off the same secret and the same password. It is
+	// what seals a file name apart from the file, and it must be independent of
+	// every other branch — the auth branch above is handed to the server.
+	jsNameKeyHex   = "095e8feb2e25f0ee2555ed781a6c3fa864102e4cb3ecf10fcc6dfa450e86be14"
+	jsNamePwKeyHex = "e2da56191687930473318731e333da92eccff015d250a645f51e529f93777a67"
+
+	// A name sealed by the browser under jsNameKeyHex for the manifest id below.
+	// The nonce is random, so this is one captured blob rather than a value Go
+	// can recompute — which is the point: the server stores it and can say
+	// nothing about what is inside.
+	jsSealedNamePlain = "quarterly-report.pdf"
+	jsSealedName      = "duuaynm5f8_9SzN4cMjgnLUkNtud5rUfGVCBnT0k8KVG7mXSXJZDkmomqj-Vmss2HgImiAaLr8V23lskxbQ-XTXIOq-dpnZK0UjqH-z0SUMRdHeKQBcpDhCp"
+
+	// The version 4 manifest for that same file, as e2e.js writes it: no name.
+	jsV4ManifestJSON = `{"v":4,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"type":"application/pdf"}`
 
 	jsPlainLen = 197842
 
@@ -111,6 +128,7 @@ func TestE2EKeyDerivationMatchesBrowser(t *testing.T) {
 		{"url", hkdf32Go(t, vectorSecret(), empty, "pyxis-e2e-url-v1"), jsURLKeyHex},
 		{"batch", hkdf32Go(t, vectorSecret(), empty, "pyxis-e2e-batch-v1"), jsBatchKeyHex},
 		{"roster(url)", hkdf32Go(t, vectorSecret(), empty, "pyxis-e2e-roster-v1"), jsRosterURLKeyHex},
+		{"name(url)", hkdf32Go(t, vectorSecret(), empty, "pyxis-e2e-name-v1"), jsNameKeyHex},
 	} {
 		if got := hex.EncodeToString(tc.got); got != tc.want {
 			t.Errorf("%s key: got %s, want %s", tc.name, got, tc.want)
@@ -121,6 +139,7 @@ func TestE2EKeyDerivationMatchesBrowser(t *testing.T) {
 	encKey := hkdf32Go(t, master, vectorSalt(), "pyxis-e2e-enc-v1")
 	auth := hkdf32Go(t, master, vectorSalt(), "pyxis-e2e-auth-v1")
 	rosterKey := hkdf32Go(t, master, vectorSalt(), "pyxis-e2e-roster-v1")
+	nameKey := hkdf32Go(t, master, vectorSalt(), "pyxis-e2e-name-v1")
 	for _, tc := range []struct {
 		name string
 		got  []byte
@@ -129,6 +148,7 @@ func TestE2EKeyDerivationMatchesBrowser(t *testing.T) {
 		{"password enc", encKey, jsEncKeyHex},
 		{"password auth", auth, jsAuthHex},
 		{"password roster", rosterKey, jsRosterPwKeyHex},
+		{"password name", nameKey, jsNamePwKeyHex},
 	} {
 		if got := hex.EncodeToString(tc.got); got != tc.want {
 			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)
@@ -139,6 +159,7 @@ func TestE2EKeyDerivationMatchesBrowser(t *testing.T) {
 	// any relationship between it and the others would leak the file key.
 	for _, pair := range [][2][]byte{
 		{encKey, auth}, {encKey, rosterKey}, {auth, rosterKey},
+		{encKey, nameKey}, {auth, nameKey}, {rosterKey, nameKey},
 	} {
 		if bytes.Equal(pair[0], pair[1]) {
 			t.Error("two KDF branches produced the same key — domain separation is broken")
@@ -207,7 +228,7 @@ func TestE2EV3CiphertextMatchesBrowser(t *testing.T) {
 	if got := int64(jsV3HeaderLen); e2eHeaderLen(len(manifest), e2eVersionV3) != got {
 		t.Errorf("e2eHeaderLen: got %d, want %d", e2eHeaderLen(len(manifest), e2eVersionV3), got)
 	}
-	if !bytes.Equal(buf.Bytes()[:jsV3HeaderLen], buildContainerHeader(manifest)) {
+	if !bytes.Equal(buf.Bytes()[:jsV3HeaderLen], buildContainerHeader(manifest, e2eVersionV3)) {
 		t.Error("the object does not begin with its own manifest")
 	}
 	if !bytes.HasPrefix(buf.Bytes(), []byte("PYX3")) {
@@ -367,15 +388,64 @@ func TestParseManifestRejectsInconsistentUploads(t *testing.T) {
 	}
 }
 
+// TestManifestV4CarriesNoName pins the rule that makes version 4 worth having.
+// A manifest is stored and served in the clear — it is the AAD, so it cannot be
+// encrypted — which means anything in it is something the server knows and can
+// hand to anyone who asks. From version 4 the name is not in it, and a client
+// that puts one there anyway is refused rather than quietly stored.
+func TestManifestV4CarriesNoName(t *testing.T) {
+	const id = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	withName := `{"v":4,"id":"` + id + `","batch":"","size":0,"chunks":1,"chunk":65536,"name":"secret-plans.pdf","type":"t"}`
+	if _, err := parseManifest([]byte(withName), 0, "", e2eVersionV4); err == nil {
+		t.Error("a version 4 manifest carrying a name was accepted; the name would be readable by the server")
+	}
+	m, err := parseManifest([]byte(jsV4ManifestJSON), 0, "", e2eVersionV4)
+	if err != nil {
+		t.Fatalf("a nameless version 4 manifest was rejected: %v", err)
+	}
+	if m.Name != "" {
+		t.Errorf("parsed name = %q, want empty", m.Name)
+	}
+	// The rule only applies from version 4: a version 3 manifest must still
+	// carry its name, because that is the only copy those shares have.
+	older := `{"v":3,"id":"` + id + `","batch":"","size":0,"chunks":1,"chunk":65536,"type":"t"}`
+	if _, err := parseManifest([]byte(older), 0, "", e2eVersionV3); err == nil {
+		t.Error("a version 3 manifest with no name was accepted")
+	}
+}
+
+// TestSealedNameMatchesBrowser pins the sealed-name blob against bytes produced
+// by the browser's own e2e.js under Node's WebCrypto. The server never opens one
+// — it holds the ciphertext and no key — so what it must never do is corrupt or
+// truncate it. These vectors are what a downloader has to be handed back.
+func TestSealedNameMatchesBrowser(t *testing.T) {
+	sealed, err := base64.RawURLEncoding.DecodeString(jsSealedName)
+	if err != nil {
+		t.Fatalf("vector is not base64url: %v", err)
+	}
+	// 12-byte nonce, then AES-GCM over a short JSON body, then a 16-byte tag.
+	if len(sealed) <= 12+gcmOverhead {
+		t.Fatalf("sealed name is %d bytes, too short to be nonce+ciphertext+tag", len(sealed))
+	}
+	if len(sealed) > maxEncNameLen {
+		t.Errorf("sealed name is %d bytes, over the %d the server accepts", len(sealed), maxEncNameLen)
+	}
+	// The name must not be recoverable from the blob by anyone holding it
+	// alone — that is the whole claim being made about the column.
+	if bytes.Contains(sealed, []byte(jsSealedNamePlain)) {
+		t.Error("the plaintext name appears inside the sealed blob")
+	}
+}
+
 // TestVerifyContainerHeader covers the one structural claim the server can make
 // about an object it cannot read: that the manifest inside it is the manifest
 // sent with it. Without this the database row and the file could describe
 // different things, and only the downloader would ever find out.
 func TestVerifyContainerHeader(t *testing.T) {
 	manifest := []byte(jsManifestJSON)
-	good := buildContainerHeader(manifest)
+	good := buildContainerHeader(manifest, e2eVersionV3)
 
-	if got, err := verifyContainerHeader(bytes.NewReader(append(good, 'x')), manifest); err != nil {
+	if got, err := verifyContainerHeader(bytes.NewReader(append(good, 'x')), manifest, e2eVersionV3); err != nil {
 		t.Fatalf("a well-formed header was rejected: %v", err)
 	} else if !bytes.Equal(got, good) {
 		t.Error("the header returned for storage is not the one that was read")
@@ -390,11 +460,11 @@ func TestVerifyContainerHeader(t *testing.T) {
 		{"empty object", nil, manifest},
 		{"truncated header", good[:4], manifest},
 		{"bad magic", append([]byte("XXXX"), good[4:]...), manifest},
-		{"length disagrees with the manifest", buildContainerHeader(manifest[:len(manifest)-1]), manifest},
-		{"embedded manifest is a different file", buildContainerHeader(other), manifest},
+		{"length disagrees with the manifest", buildContainerHeader(manifest[:len(manifest)-1], e2eVersionV3), manifest},
+		{"embedded manifest is a different file", buildContainerHeader(other, e2eVersionV3), manifest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := verifyContainerHeader(bytes.NewReader(tc.body), tc.want); err == nil {
+			if _, err := verifyContainerHeader(bytes.NewReader(tc.body), tc.want, e2eVersionV3); err == nil {
 				t.Error("accepted a header that does not match the declared manifest")
 			}
 		})

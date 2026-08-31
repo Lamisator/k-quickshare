@@ -11,61 +11,106 @@
        on a <meta> attribute. */}}
   <form id="upload-form" enctype="multipart/form-data" autocomplete="off"
         data-max-upload="{{.MaxUpload}}">
-    <label for="file-input" id="dropzone" class="dropzone">
-      <span class="dropzone-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="46" height="46" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 3v14"/>
-          <path d="M6 9l6-6 6 6"/>
-          <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
-        </svg>
-      </span>
-      <span class="dropzone-text">{{T .Lang "upload.drop"}} <em>{{T .Lang "upload.browse"}}</em></span>
-      <span class="dropzone-hint">{{T .Lang "upload.hint" (humanSize .MaxUpload)}}</span>
-      <input id="file-input" type="file" name="file" multiple>
-    </label>
 
-    {{/* A preset, not a hidden mode: pressing it writes the values it implies
-         into the fields below, so the share settings stay visible and the
-         server sees an ordinary 1-hour, 1-download share. */}}
-    <div class="quick-opts">
-      <button type="button" id="opt-single-use" class="btn btn-ghost btn-toggle" aria-pressed="false">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-        {{T .Lang "upload.single_use"}}
-      </button>
-      <span class="quick-opts-hint">{{T .Lang "upload.single_use_h"}}</span>
-    </div>
+    {{/* Two steps, in this order on purpose. The share terms belong to the
+         batch and are frozen the moment its first file lands, so a dropzone
+         that accepts a file before they are settled is a dropzone that decides
+         them by default. Step 2 stays inert until step 1 is confirmed. */}}
+    <section class="step step-open" id="step-params">
+      <div class="step-head">
+        <span class="step-num" aria-hidden="true">1</span>
+        <div class="step-titles">
+          <h2 class="step-title">{{T .Lang "upload.step1"}}</h2>
+          <p class="step-sub">{{T .Lang "upload.step1_sub"}}</p>
+        </div>
+        <span class="chip step-chip" id="step1-chip" hidden>{{T .Lang "upload.step_set"}}</span>
+      </div>
 
-    <fieldset class="options" id="options">
-      <legend>{{T .Lang "upload.options"}}</legend>
-      <label class="opt">
-        <span>{{T .Lang "upload.expiry"}}</span>
-        <select id="opt-expires" name="expires_hours">
-          <option value="0">{{T .Lang "expiry.never"}}</option>
-          <option value="1">{{T .Lang "expiry.1h"}}</option>
-          <option value="24" selected>{{T .Lang "expiry.24h"}}</option>
-          <option value="168">{{T .Lang "expiry.7d"}}</option>
-          <option value="720">{{T .Lang "expiry.30d"}}</option>
-          <option value="custom">{{T .Lang "expiry.custom"}}</option>
-        </select>
-      </label>
-      <label class="opt" id="opt-expires-at-wrap" hidden>
-        <span>{{T .Lang "upload.expiry_at"}}</span>
-        <input id="opt-expires-at" type="datetime-local">
-      </label>
-      <label class="opt">
-        <span>{{T .Lang "upload.password"}}</span>
-        <input id="opt-password" name="password" type="text" placeholder="{{T .Lang "upload.password_ph"}}" autocomplete="off">
-      </label>
-      <label class="opt">
-        <span>{{T .Lang "upload.maxdl"}}</span>
-        <input id="opt-max" name="max_downloads" type="number" min="0" step="1" placeholder="{{T .Lang "upload.maxdl_ph"}}">
-      </label>
-    </fieldset>
+      <div class="step-body" id="step1-body">
+        {{/* A preset, not a hidden mode: pressing it writes the values it implies
+             into the fields below, so the share settings stay visible and the
+             server sees an ordinary 1-hour, 1-download share. */}}
+        <div class="quick-opts">
+          <button type="button" id="opt-single-use" class="btn btn-ghost btn-toggle" aria-pressed="false">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            {{T .Lang "upload.single_use"}}
+          </button>
+          <span class="quick-opts-hint">{{T .Lang "upload.single_use_h"}}</span>
+        </div>
 
-    <p class="e2e-note">
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-      {{T .Lang "upload.e2e"}}
-    </p>
+        <fieldset class="options" id="options">
+          <legend>{{T .Lang "upload.options"}}</legend>
+          <label class="opt">
+            <span>{{T .Lang "upload.expiry"}}</span>
+            <select id="opt-expires" name="expires_hours">
+              <option value="0">{{T .Lang "expiry.never"}}</option>
+              <option value="1">{{T .Lang "expiry.1h"}}</option>
+              <option value="24" selected>{{T .Lang "expiry.24h"}}</option>
+              <option value="168">{{T .Lang "expiry.7d"}}</option>
+              <option value="720">{{T .Lang "expiry.30d"}}</option>
+              <option value="custom">{{T .Lang "expiry.custom"}}</option>
+            </select>
+          </label>
+          <label class="opt" id="opt-expires-at-wrap" hidden>
+            <span>{{T .Lang "upload.expiry_at"}}</span>
+            <input id="opt-expires-at" type="datetime-local">
+          </label>
+          <label class="opt">
+            <span>{{T .Lang "upload.password"}}</span>
+            <input id="opt-password" name="password" type="text" placeholder="{{T .Lang "upload.password_ph"}}" autocomplete="off">
+          </label>
+          <label class="opt">
+            <span>{{T .Lang "upload.maxdl"}}</span>
+            <input id="opt-max" name="max_downloads" type="number" min="0" step="1" placeholder="{{T .Lang "upload.maxdl_ph"}}">
+          </label>
+        </fieldset>
+
+        <div class="step-actions">
+          <button type="button" class="btn btn-primary" id="opt-confirm">
+            {{T .Lang "upload.confirm"}}
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13"/><path d="M13 6l6 6-6 6"/></svg>
+          </button>
+          <span class="step-hint">{{T .Lang "upload.confirm_hint"}}</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="step step-locked" id="step-files" aria-disabled="true">
+      <div class="step-head">
+        <span class="step-num" aria-hidden="true">2</span>
+        <div class="step-titles">
+          <h2 class="step-title">{{T .Lang "upload.step2"}}</h2>
+          <p class="step-sub" id="step2-sub">{{T .Lang "upload.step2_locked"}}</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" id="step-edit" hidden>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h8"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+          {{T .Lang "upload.step_edit"}}
+        </button>
+      </div>
+
+      <div class="step-body">
+        {{/* Inert until step 1 is confirmed: the input is disabled, so neither a
+             click nor a keyboard activation of the label opens a file picker,
+             and the drop handler turns files away on its own. */}}
+        <label for="file-input" id="dropzone" class="dropzone">
+          <span class="dropzone-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="46" height="46" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v14"/>
+              <path d="M6 9l6-6 6 6"/>
+              <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+            </svg>
+          </span>
+          <span class="dropzone-text">{{T .Lang "upload.drop"}} <em>{{T .Lang "upload.browse"}}</em></span>
+          <span class="dropzone-hint">{{T .Lang "upload.hint" (humanSize .MaxUpload)}}</span>
+          <input id="file-input" type="file" name="file" multiple disabled>
+        </label>
+
+        <p class="e2e-note">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          {{T .Lang "upload.e2e"}}
+        </p>
+      </div>
+    </section>
   </form>
 </section>
 

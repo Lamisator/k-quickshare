@@ -63,16 +63,31 @@ const (
 	//     self-describing. The header needs no MAC of its own: it IS the AAD, so
 	//     altering the length or the manifest breaks every chunk, and altering
 	//     the magic is refused outright.
+	// 4 — version 3 with the file NAME taken out of the manifest:
+	//         "PYX4" || uint16be manifestLen || manifest || chunks…
+	//     A manifest cannot be encrypted — it is the AAD — so every name in one
+	//     was a name the server could read, in its column and in the object's
+	//     own header. Version 4 seals the name in a separate blob under a
+	//     separate HKDF branch of the share secret (files.enc_name), which the
+	//     server stores and cannot open. A listing decrypts names on their own,
+	//     without fetching ciphertext; the manifest id is the blob's AAD, so a
+	//     name still belongs to exactly one file.
 	e2eVersionLegacy = 1
 	e2eVersionV2     = 2
 	e2eVersionV3     = 3
+	e2eVersionV4     = 4
 
-	// What new uploads may declare. Version 2 is still accepted because its
-	// integrity guarantee is identical to version 3's — only its
-	// self-description is weaker — and refusing it would break a browser
-	// holding a cached copy of the previous e2e.js mid-session.
+	// What new uploads may declare. Versions 2 and 3 are still accepted because
+	// their integrity guarantee is identical to version 4's — they merely leak
+	// the name — and refusing them would break a browser holding a cached copy
+	// of the previous e2e.js mid-session.
 	e2eMinUploadVersion = e2eVersionV2
-	e2eCurrentVersion   = e2eVersionV3
+	e2eCurrentVersion   = e2eVersionV4
+
+	// A sealed name is 12-byte nonce || AES-GCM(short JSON) || 16-byte tag. The
+	// ceiling is generous for a file name and still far too small to smuggle
+	// anything through the column.
+	maxEncNameLen = 1024
 
 	// A manifest is a short JSON object. The ceiling exists so a client cannot
 	// make the server store, and every downloader fetch, an arbitrary blob
@@ -122,9 +137,20 @@ func e2eChunkCount(plain int64, version int) int64 {
 	return n
 }
 
-// containerMagic marks a version 3 object. Bytes rather than a string constant
-// so a stray edit cannot change its length.
-var containerMagic = []byte{'P', 'Y', 'X', '3'}
+// containerMagic marks a version 3 object, containerMagicV4 a version 4 one.
+// Bytes rather than string constants so a stray edit cannot change their length.
+var (
+	containerMagic   = []byte{'P', 'Y', 'X', '3'}
+	containerMagicV4 = []byte{'P', 'Y', 'X', '4'}
+)
+
+// magicForVersion is the four bytes a container of this version must start with.
+func magicForVersion(version int) []byte {
+	if version >= e2eVersionV4 {
+		return containerMagicV4
+	}
+	return containerMagic
+}
 
 // e2eHeaderLen is how many bytes precede the chunk stream. Only version 3 has
 // a header; earlier versions start at zero.
@@ -147,13 +173,13 @@ func e2eCipherLen(plain int64, manifestLen, version int) int64 {
 		plain + e2eChunkCount(plain, version)*gcmOverhead
 }
 
-// buildContainerHeader returns the bytes a version 3 object must begin with.
-// The server does not create containers; it builds the header to compare
+// buildContainerHeader returns the bytes a version 3 or 4 object must begin
+// with. The server does not create containers; it builds the header to compare
 // against what a client uploaded, which is how it refuses an object whose
 // embedded metadata disagrees with the manifest sent alongside it.
-func buildContainerHeader(manifest []byte) []byte {
+func buildContainerHeader(manifest []byte, version int) []byte {
 	head := make([]byte, containerHeaderFixed+len(manifest))
-	copy(head, containerMagic)
+	copy(head, magicForVersion(version))
 	binary.BigEndian.PutUint16(head[4:6], uint16(len(manifest)))
 	copy(head[containerHeaderFixed:], manifest)
 	return head
@@ -167,14 +193,15 @@ func buildContainerHeader(manifest []byte) []byte {
 // cannot read, and it matters: if the embedded manifest and the stored column
 // were allowed to diverge, the column would be describing a file that says
 // something else about itself, and only the downloader would ever find out.
-func verifyContainerHeader(r io.Reader, manifest []byte) ([]byte, error) {
-	want := buildContainerHeader(manifest)
+func verifyContainerHeader(r io.Reader, manifest []byte, version int) ([]byte, error) {
+	want := buildContainerHeader(manifest, version)
+	magic := magicForVersion(version)
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(r, got); err != nil {
 		return nil, fmt.Errorf("container header is truncated: %w", err)
 	}
-	if !bytes.Equal(got[:len(containerMagic)], containerMagic) {
-		return nil, errors.New("not a Pyxis v3 container: bad magic")
+	if !bytes.Equal(got[:len(magic)], magic) {
+		return nil, fmt.Errorf("not a Pyxis v%d container: bad magic", version)
 	}
 	if !bytes.Equal(got, want) {
 		return nil, errors.New("the manifest embedded in the file does not match the one sent with it")
@@ -217,7 +244,12 @@ func parseManifest(raw []byte, plainSize int64, batchID string, version int) (*f
 	case m.Chunks != e2eChunkCount(plainSize, version):
 		return nil, fmt.Errorf("manifest chunk count %d, want %d",
 			m.Chunks, e2eChunkCount(plainSize, version))
-	case m.Name == "":
+	case version >= e2eVersionV4 && m.Name != "":
+		// A version 4 manifest that still carries a name is a client leaking
+		// the very thing this version exists to hide. Refuse it rather than
+		// store it: these bytes are served to every downloader verbatim.
+		return nil, errors.New("a version 4 manifest must not carry a file name")
+	case version < e2eVersionV4 && m.Name == "":
 		return nil, errors.New("manifest carries no file name")
 	case m.Batch != batchID:
 		// Both directions matter: a member must name its batch, and a

@@ -21,6 +21,7 @@ var translations = map[string]map[string]string{
 	"nav.upload":        {"en": "Upload", "de": "Hochladen"},
 	"nav.files":         {"en": "My files", "de": "Meine Dateien"},
 	"nav.section.admin": {"en": "Administration", "de": "Verwaltung"},
+	"nav.allfiles":      {"en": "All files", "de": "Alle Dateien"},
 	"nav.users":         {"en": "Users", "de": "Benutzer"},
 	"nav.settings":      {"en": "Settings", "de": "Einstellungen"},
 	"nav.section.you":   {"en": "You", "de": "Du"},
@@ -40,17 +41,32 @@ var translations = map[string]map[string]string{
 	"title.files":    {"en": "My files", "de": "Meine Dateien"},
 	"title.login":    {"en": "Sign in", "de": "Anmelden"},
 	"title.account":  {"en": "Account", "de": "Konto"},
+	"title.allfiles": {"en": "All files", "de": "Alle Dateien"},
 	"title.users":    {"en": "Users", "de": "Benutzer"},
 	"title.settings": {"en": "Settings", "de": "Einstellungen"},
 	"title.download": {"en": "Shared file", "de": "Geteilte Datei"},
 
 	// --- upload page ---
-	"upload.heading":     {"en": "Share files", "de": "Dateien teilen"},
-	"upload.sub":         {"en": "Drop files below, set your sharing options, and get a link to send around.", "de": "Dateien unten ablegen, Freigabe-Optionen wählen und einen Link zum Verschicken erhalten."},
-	"upload.drop":        {"en": "Drop files here or", "de": "Dateien hier ablegen oder"},
-	"upload.browse":      {"en": "browse", "de": "durchsuchen"},
-	"upload.hint":        {"en": "Multiple files supported · up to %s each", "de": "Mehrere Dateien möglich · bis zu %s pro Datei"},
-	"upload.options":     {"en": "Options for this batch", "de": "Optionen für diese Übertragung"},
+	"upload.heading": {"en": "Share files", "de": "Dateien teilen"},
+	"upload.sub":     {"en": "Set the terms of the link first, then add the files it should cover.", "de": "Erst die Bedingungen des Links festlegen, dann die Dateien hinzufügen, die er umfassen soll."},
+	"upload.drop":    {"en": "Drop files here or", "de": "Dateien hier ablegen oder"},
+	"upload.browse":  {"en": "browse", "de": "durchsuchen"},
+	"upload.hint":    {"en": "Multiple files supported · up to %s each", "de": "Mehrere Dateien möglich · bis zu %s pro Datei"},
+	"upload.options": {"en": "Options for this batch", "de": "Optionen für diese Übertragung"},
+
+	// --- the two upload steps ---
+	"upload.step1": {"en": "Step 1 · Share settings", "de": "Schritt 1 · Freigabe-Einstellungen"},
+	"upload.step1_sub": {"en": "These terms belong to the link, not to a file, and they are fixed once the first file lands.",
+		"de": "Diese Bedingungen gehören zum Link, nicht zu einer Datei — mit der ersten Datei stehen sie fest."},
+	"upload.step2": {"en": "Step 2 · Files", "de": "Schritt 2 · Dateien"},
+	"upload.step2_locked": {"en": "Settle the settings above first — the link's terms cannot be chosen after the fact.",
+		"de": "Zuerst die Einstellungen oben festlegen — die Bedingungen des Links lassen sich nachträglich nicht mehr wählen."},
+	"upload.step2_open": {"en": "Drop everything that belongs under one link.", "de": "Alles ablegen, was unter einen Link gehört."},
+	"upload.confirm":    {"en": "Continue to files", "de": "Weiter zu den Dateien"},
+	"upload.confirm_hint": {"en": "You can still come back and change these until the first file is uploaded.",
+		"de": "Bis zur ersten hochgeladenen Datei kannst du hierher zurück und alles ändern."},
+	"upload.step_edit":   {"en": "Change settings", "de": "Einstellungen ändern"},
+	"upload.step_set":    {"en": "settled", "de": "festgelegt"},
 	"upload.expiry":      {"en": "Link expires", "de": "Link läuft ab"},
 	"expiry.never":       {"en": "Never", "de": "Nie"},
 	"expiry.1h":          {"en": "After 1 hour", "de": "Nach 1 Stunde"},
@@ -201,13 +217,17 @@ var translations = map[string]map[string]string{
 		"de": "Zusammen mit anderen Dateien unter einem Link geteilt"},
 
 	// --- files / history page ---
-	"files.heading":       {"en": "My files", "de": "Meine Dateien"},
-	"files.sub":           {"en": "Everything shared on this instance, newest first.", "de": "Alles, was auf dieser Instanz geteilt wurde — Neuestes zuerst."},
+	"files.heading":     {"en": "My files", "de": "Meine Dateien"},
+	"files.sub":         {"en": "Everything you have shared, newest first.", "de": "Alles, was du geteilt hast — Neuestes zuerst."},
+	"files.all_heading": {"en": "All files", "de": "Alle Dateien"},
+	"files.all_sub": {"en": "Every account's shares on this instance, newest first. Your own are on My files.",
+		"de": "Die Freigaben aller Konten auf dieser Instanz — Neuestes zuerst. Deine eigenen stehen unter „Meine Dateien“."},
 	"files.search":        {"en": "Filter by name, type or uploader…", "de": "Nach Name, Typ oder Uploader filtern…"},
 	"files.stat_count":    {"en": "Active files", "de": "Aktive Dateien"},
 	"files.stat_size":     {"en": "Total size", "de": "Gesamtgröße"},
 	"files.stat_dl":       {"en": "Downloads", "de": "Downloads"},
 	"files.empty":         {"en": "No files yet — head over to Upload and share something.", "de": "Noch keine Dateien — geh zu „Hochladen“ und teile etwas."},
+	"files.all_empty":     {"en": "Nobody on this instance has an active share right now.", "de": "Derzeit hat niemand auf dieser Instanz eine aktive Freigabe."},
 	"files.open":          {"en": "Open", "de": "Öffnen"},
 	"files.delete":        {"en": "Delete", "de": "Löschen"},
 	"files.protected":     {"en": "protected", "de": "geschützt"},
@@ -221,6 +241,16 @@ var translations = map[string]map[string]string{
 	"files.qr":            {"en": "Show QR code", "de": "QR-Code anzeigen"},
 	"files.keyed":         {"en": "key in link", "de": "Schlüssel im Link"},
 	"files.keyed_tip":     {"en": "The decryption key is only part of the original share link — the server doesn't store it. Copy the link right after uploading.", "de": "Der Entschlüsselungsschlüssel ist nur Teil des ursprünglichen Freigabe-Links — der Server speichert ihn nicht. Kopiere den Link direkt nach dem Hochladen."},
+
+	// --- sealed names ---
+	"dl.name_sealed": {"en": "Encrypted file name", "de": "Verschlüsselter Dateiname"},
+	"js.name_sealed": {"en": "Name unavailable", "de": "Name nicht verfügbar"},
+	"js.name_unsealable": {"en": "This file's name could not be opened with the key in this link.",
+		"de": "Der Dateiname ließ sich mit dem Schlüssel aus diesem Link nicht öffnen."},
+	"files.name_sealed": {"en": "Encrypted file name", "de": "Verschlüsselter Dateiname"},
+	"files.name_sealed_tip": {"en": "The name is encrypted under the key in the share link, which this page does not have. Open the link to see it.",
+		"de": "Der Name ist mit dem Schlüssel aus dem Freigabe-Link verschlüsselt, den diese Seite nicht hat. Öffne den Link, um ihn zu sehen."},
+	"files.name_remembered": {"en": "remembered by this browser", "de": "von diesem Browser gemerkt"},
 
 	// --- batch grouping in the file list ---
 	"files.batch_of":     {"en": "%d files in one share", "de": "%d Dateien in einer Freigabe"},
@@ -570,6 +600,10 @@ func jsStrings(lang string) map[string]string {
 		"js.gallery_prefetch", "js.gallery_limit_note",
 		"js.zoom_in", "js.zoom_out",
 		"batch.n_files", "batch.one_file",
+		// The step-2 subtitle flips between these two as the gate opens.
+		"upload.step2_locked", "upload.step2_open",
+		"js.name_sealed", "js.name_unsealable",
+		"files.name_sealed", "files.name_remembered",
 	}
 	out := make(map[string]string, len(keys))
 	for _, k := range keys {

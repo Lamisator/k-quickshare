@@ -37,8 +37,12 @@ dependencies beyond the two containers.
 ## Features
 
 **Sharing**
+- Two-step upload: the link's terms are settled first, and only then does the
+  dropzone open — nothing can be shared under settings nobody chose.
 - Drag-and-drop upload with per-file progress, transfer rate, cancel and retry.
 - Every file uploaded in one visit is collected under **one share link**.
+- **File names are encrypted too**, sealed apart from the file so a recipient
+  sees a listing without downloading anything and the server sees nothing.
 - **My files** folds each of those batches into a collapsible group — the share's
   terms are stated once on the header, its members indented beneath it, and the
   whole group selects, expands or collapses in one click.
@@ -51,6 +55,8 @@ dependencies beyond the two containers.
 - Local accounts (Argon2id, database-backed sessions) and OIDC single sign-on,
   which coexist — enabling SSO does not disable password login.
 - Admin and super-admin roles; user management and OIDC settings in the UI.
+- **My files** is your own uploads, for everyone including admins. The
+  instance-wide listing is a separate, admin-only page.
 
 **Operations**
 - Storage quotas admins set in the UI: an instance-wide default per user, plus
@@ -89,9 +95,40 @@ produces a master secret, which HKDF splits down three branches:
 - `auth` — a token sent once. The server stores only `SHA-256(auth)` in
   `auth_verifier` and uses it to gate access to the ciphertext.
 - `roster` — seals the batch's member list (below). Stays in the browser.
+- `name` — seals each file's name (below). Stays in the browser.
 
 Knowing the auth branch cannot yield the encryption branch, so the stored
 verifier is useless for decryption even to someone holding the database.
+
+### File names
+
+A name is sealed on its own, in a blob of its own, under its own HKDF branch —
+`pyxis-e2e-name-v1` — of the same secret. It is *not* part of the file's
+ciphertext, and that is the point: a recipient's listing shows every name in a
+batch after one cheap request, without fetching a byte of any file and without
+spending a download slot.
+
+```
+enc_name = 12-byte nonce || AES-GCM(name key, {"v":1,"name":…,"type":…})
+AAD      = "pyxis-name-v1|" || the manifest's file id
+```
+
+The AAD is the client-generated manifest id, so a sealed name belongs to exactly
+one file: the server cannot move a name onto another object, cannot swap two
+names inside a batch, and cannot pick the id itself.
+
+This is why the container had to reach **version 4**. Until then the name lived
+in the manifest — and a manifest cannot be encrypted, because it is the AAD of
+every chunk. It is stored in a column, embedded in the object's own header, and
+served verbatim to anyone who asks. Version 4 takes the name out of it
+(`files.original_name` goes NULL, the manifest has no `name` field) and the
+sealed blob becomes the only copy anyone holds. A version 4 manifest that still
+carries a name is refused at upload rather than stored.
+
+What this costs: the owner's **My files** cannot read its own names either — it
+has no link and so no key. The uploading browser remembers them locally for its
+own lists; every other page shows the icon, size, date and a placeholder. See
+[Known limits](#known-limits).
 
 Uploads that are not end-to-end encrypted are **rejected** (HTTP 400). There is
 no server-side encryption path to fall back to, and no code left that could
@@ -127,10 +164,12 @@ and is not:
 Those bytes are passed to AES-GCM as **additional authenticated data for every
 chunk**. Truncation now fails (the count is authenticated), an empty blob fails
 (there is always at least one chunk, whose only content is the tag over the
-manifest), substitution fails, renaming fails, and moving a file into a
-different batch fails. The landing page shows the server's copy of the name
-until decryption succeeds, then replaces it with the manifest's and says so if
-the two disagree.
+manifest), substitution fails, and moving a file into a different batch fails.
+Renaming failed too, while the name was still in there — from version 4 that job
+belongs to the sealed name blob, whose AAD is this manifest's id. On a
+pre-version-4 share the landing page shows the server's copy of the name until
+decryption succeeds, then replaces it with the manifest's and says so if the two
+disagree.
 
 **Version 3** puts that manifest *inside* the stored object:
 
@@ -153,9 +192,24 @@ blobs, and the reader checks it against the embedded copy — a server that send
 a different one is caught, not obeyed. On upload the server checks the same
 thing in reverse, so the row and the file can never describe different things.
 
+**Version 4** keeps that framing — `"PYX4"` and the same header — and takes the
+**name out of the manifest**:
+
+```
+{"v":4,"id":"<32 random bytes, base64url>","batch":"<uuid or empty>",
+ "size":197842,"chunks":4,"chunk":65536,"type":"application/pdf"}
+```
+
+The manifest is stored and served in the clear; it has to be, since it is the
+AAD. So every name in one was a name the server could read — in the `manifest`
+column, and in the object's own header — whatever the `original_name` column
+said. From version 4 the name is sealed separately (see
+[File names](#file-names)), `original_name` stays NULL, and what still binds the
+name to this exact file is the manifest id, which is the sealed blob's AAD.
+
 Version confusion fails closed in both directions and needs no separate check:
-the chunks of a version 2 or 3 file are sealed against their manifest, so
-reading one as version 1 fails, and reading a version 1 file as either of the
+the chunks of a version 2, 3 or 4 file are sealed against their manifest, so
+reading one as version 1 fails, and reading a version 1 file as any of the
 others fails too.
 
 The manifest is authenticated **as bytes**. The server stores exactly what the
@@ -416,7 +470,8 @@ in force.
 | `POST /batches` | Open a batch, returns its id |
 | `POST /batches/{id}/roster` | Store the sealed member list (owner only, monotonic `seq`) |
 | `POST /upload` | Upload one file, optionally into a batch |
-| `GET /history` | Your uploads (admins see all) |
+| `GET /history` | Your own uploads — an admin's own, too |
+| `GET /admin/files` | Every account's uploads. Admin only |
 | `POST /delete/{id}` | Delete a file |
 | `POST /delete` | Delete the files named by repeated `id` fields (the list's multi-select) |
 | `GET /account`, `POST /account/password` | Self-service account |
@@ -427,12 +482,14 @@ database is on a different one than the binary expects — a half-finished upgra
 should take an instance out of the load balancer, not serve from it.
 
 There is no API for uploading plaintext. A client must encrypt in the browser
-container format and POST the ciphertext with `e2e=1`, an `e2e_version` of 2 or
-3, and a `manifest`; anything else is rejected. Version 2 is still accepted
-because its integrity guarantee is identical to version 3's — only its
-self-description is weaker — and refusing it would break a browser holding a
-cached copy of the previous `e2e.js` mid-session. `web/static/e2e.js` is the
-reference implementation, and `chunkformat_test.go` mirrors it in Go.
+container format and POST the ciphertext with `e2e=1`, an `e2e_version` of 2, 3
+or 4, and a `manifest`; a version 4 upload must also carry a sealed `enc_name`,
+and must *not* put a name in its manifest. Anything else is rejected. Versions 2
+and 3 are still accepted because their integrity guarantee is identical to
+version 4's — they merely leak the name — and refusing them would break a
+browser holding a cached copy of the previous `e2e.js` mid-session.
+`web/static/e2e.js` is the reference implementation, and `chunkformat_test.go`
+mirrors it in Go.
 
 ---
 
@@ -670,6 +727,20 @@ download rather than bounding idleness.
 - **Version 1 shares keep the version 1 guarantee.** They cannot be upgraded in
   place — that would need the key — so until they expire their length and name
   stay unauthenticated. The landing page says so rather than implying otherwise.
+- **Shares created before container version 4 keep a server-readable name.**
+  Their manifests carry it, and a manifest is the AAD of every chunk — rewriting
+  one destroys the file — so those names cannot be sealed after the fact. They
+  leave with the share, at its expiry plus the 30-day retirement.
+- **A file list cannot show a sealed name.** The name is encrypted under the key
+  in the share link, and no page that isn't the link has that key. The browser
+  that uploaded a file keeps the name in `localStorage` for its own lists, which
+  is per-device and disappears with site data; anywhere else the row shows the
+  icon, size, date and "Encrypted file name". Filtering matches only what the
+  page can actually read.
+- **The MIME type is still stored in the clear**, in the row and in the
+  manifest. It is what the icon and the preview decision are made from before
+  anything is decrypted. A sealed name carries an authenticated copy of the type
+  as well, and the page prefers that once it is open.
 - **Version 2 objects are not self-describing.** Their integrity is identical to
   version 3's, but the manifest lives only in the database, so the blob alone
   cannot be interpreted. Version 2 was current for one day and no share was ever

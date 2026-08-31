@@ -53,7 +53,8 @@ const maxRosterLen = 256 << 10
 
 type batchMember struct {
 	ID          string
-	Name        string
+	Name        string // empty from container version 4 on; the name is in EncName
+	EncName     []byte // sealed name blob, opaque to the server
 	Size        int64
 	ContentType string
 	StoredName  string
@@ -245,7 +246,7 @@ func (a *App) loadBatchMeta(r *http.Request, id uuid.UUID) (*batchMeta, error) {
 
 func (a *App) loadBatchMembers(r *http.Request, batchID string) ([]batchMember, error) {
 	rows, err := a.db.Query(r.Context(),
-		`SELECT id, original_name, size_bytes, content_type, stored_name, wrapped_key,
+		`SELECT id, original_name, enc_name, size_bytes, content_type, stored_name, wrapped_key,
 		        e2e_version, manifest
 		 FROM files
 		 WHERE batch_id = $1 AND archived_at IS NULL
@@ -257,9 +258,13 @@ func (a *App) loadBatchMembers(r *http.Request, batchID string) ([]batchMember, 
 	var out []batchMember
 	for rows.Next() {
 		var m batchMember
-		if err := rows.Scan(&m.ID, &m.Name, &m.Size, &m.ContentType,
+		var name *string
+		if err := rows.Scan(&m.ID, &name, &m.EncName, &m.Size, &m.ContentType,
 			&m.StoredName, &m.WrappedKey, &m.E2EVersion, &m.Manifest); err != nil {
 			return nil, err
+		}
+		if name != nil {
+			m.Name = *name
 		}
 		out = append(out, m)
 	}
@@ -390,8 +395,14 @@ func (a *App) handleBatchManifest(w http.ResponseWriter, r *http.Request, bm *ba
 			kind = previewKind(m.ContentType, m.Size)
 		}
 		files = append(files, map[string]any{
-			"id":          m.ID,
+			"id": m.ID,
+			// Empty from container version 4 on. `encName` is the sealed blob
+			// the browser opens instead — one short decryption per member, no
+			// ciphertext fetched and no download slot spent, which is the whole
+			// reason the name is sealed apart from the file.
 			"name":        m.Name,
+			"encName":     base64.RawURLEncoding.EncodeToString(m.EncName),
+			"manifestId":  manifestIDOf(m.Manifest),
 			"size":        m.Size,
 			"contentType": m.ContentType,
 			"wrappedKey":  base64.RawURLEncoding.EncodeToString(m.WrappedKey),
@@ -460,7 +471,8 @@ func (a *App) handleBatchFileRaw(w http.ResponseWriter, r *http.Request, bm *bat
 		return
 	}
 
-	var storedName, origName string
+	var storedName string
+	var origName *string
 	var uploadedAt time.Time
 	err = a.db.QueryRow(r.Context(),
 		`SELECT stored_name, original_name, uploaded_at FROM files
@@ -486,9 +498,13 @@ func (a *App) handleBatchFileRaw(w http.ResponseWriter, r *http.Request, bm *bat
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	name := id.String()
+	if origName != nil {
+		name = downloadName(*origName, id.String())
+	}
 	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`attachment; filename="%s.enc"`, quoteForHeader(origName)))
-	http.ServeContent(w, r, origName+".enc", uploadedAt, f)
+		fmt.Sprintf(`attachment; filename="%s.enc"`, quoteForHeader(name)))
+	http.ServeContent(w, r, name+".enc", uploadedAt, f)
 
 	a.archiveBatchIfSpent(r, bm)
 }

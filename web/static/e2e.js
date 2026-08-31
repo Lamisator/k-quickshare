@@ -70,13 +70,22 @@
   const ROSTER_NONCE = 12;
 
   // Container version this build writes. Everything at or below it can be read.
-  const VERSION = 3;
+  const VERSION = 4;
 
-  // Version 3 header: 4-byte magic then a big-endian uint16 manifest length.
-  // uint16 is deliberate — a manifest is a short JSON object and the server
-  // caps it at 4 KiB, so a 64 KiB ceiling is already far more than the format
-  // can legitimately carry.
-  const MAGIC = [0x50, 0x59, 0x58, 0x33]; // "PYX3"
+  // Version 3 and 4 share a header: 4-byte magic then a big-endian uint16
+  // manifest length. uint16 is deliberate — a manifest is a short JSON object
+  // and the server caps it at 4 KiB, so a 64 KiB ceiling is already far more
+  // than the format can legitimately carry.
+  //
+  // Version 4 keeps that framing and changes what the manifest may say: the
+  // file NAME is no longer in it. A manifest is stored in the clear — it is the
+  // AAD, so it cannot be encrypted — which meant every name the server held was
+  // readable, in the manifest column and in the object's own header, whatever
+  // the files column said. In version 4 the name travels sealed, on its own key
+  // branch, in a blob of its own (sealName below), so a listing can show names
+  // without fetching a byte of ciphertext and the server can read none of them.
+  const MAGIC3 = [0x50, 0x59, 0x58, 0x33]; // "PYX3"
+  const MAGIC4 = [0x50, 0x59, 0x58, 0x34]; // "PYX4"
   const HEADER_FIXED = 6;
 
   // KDF labels, indexed by container version.
@@ -94,14 +103,21 @@
       auth: 'pyxis-e2e-auth-v1',
       batch: 'pyxis-e2e-batch-v1',
       roster: 'pyxis-e2e-roster-v1',
+      // Only version 4 seals names, but the label lives on the shared row: no
+      // older share ever derived this branch, so nothing can collide with it.
+      name: 'pyxis-e2e-name-v1',
     },
   };
-  // Versions 2 and 3 changed the framing, not the key schedule: the same secret
-  // must still derive the same keys, or older shares would stop opening.
+  // Versions 2, 3 and 4 changed the framing and what the manifest carries, not
+  // the key schedule: the same secret must still derive the same keys, or older
+  // shares would stop opening.
   LABELS[2] = LABELS[1];
   LABELS[3] = LABELS[1];
+  LABELS[4] = LABELS[1];
 
   const ROSTER_AAD_PREFIX = 'pyxis-roster-v2|';
+  const NAME_AAD_PREFIX = 'pyxis-name-v1|';
+  const NAME_NONCE = 12;
 
   const subtle = (window.crypto && window.crypto.subtle) || null;
   const te = new TextEncoder();
@@ -159,6 +175,12 @@
     return importAes(await hkdf32(secret, new Uint8Array(0), labels(version).url));
   }
 
+  // The name branch of a single-file URL secret. Batch shares get theirs from
+  // deriveBatchKeys; this is the same branch for a share that is its own file.
+  async function deriveNameKey(secret, version) {
+    return importAes(await hkdf32(secret, new Uint8Array(0), labels(version).name));
+  }
+
   // --- batch keys ----------------------------------------------------------
   //
   // A batch link carries ONE secret, but every member file is encrypted under
@@ -175,11 +197,16 @@
   async function deriveBatchKeys(secret, version) {
     const l = labels(version);
     const empty = new Uint8Array(0);
-    const [wrap, roster] = await Promise.all([
+    const [wrap, roster, name] = await Promise.all([
       hkdf32(secret, empty, l.batch),
       hkdf32(secret, empty, l.roster),
+      hkdf32(secret, empty, l.name),
     ]);
-    return { key: await importAes(wrap), roster: await importAes(roster) };
+    return {
+      key: await importAes(wrap),
+      roster: await importAes(roster),
+      name: await importAes(name),
+    };
   }
 
   async function wrapFileKey(batchKey, rawFileKey) {
@@ -201,19 +228,25 @@
     return importAes(new Uint8Array(raw));
   }
 
-  // Returns { key, auth, roster } — only `auth` ever leaves the browser.
+  // Returns { key, auth, roster, name } — only `auth` ever leaves the browser.
   async function derivePasswordKeys(password, salt, version) {
     const l = labels(version);
     const base = await subtle.importKey('raw', te.encode(password), 'PBKDF2', false, ['deriveBits']);
     const bits = await subtle.deriveBits(
       { name: 'PBKDF2', hash: 'SHA-256', salt: salt, iterations: PBKDF2_ITER }, base, 256);
     const master = new Uint8Array(bits);
-    const [encKey, auth, rosterKey] = await Promise.all([
+    const [encKey, auth, rosterKey, nameKey] = await Promise.all([
       hkdf32(master, salt, l.enc),
       hkdf32(master, salt, l.auth),
       hkdf32(master, salt, l.roster),
+      hkdf32(master, salt, l.name),
     ]);
-    return { key: await importAes(encKey), auth: auth, roster: await importAes(rosterKey) };
+    return {
+      key: await importAes(encKey),
+      auth: auth,
+      roster: await importAes(rosterKey),
+      name: await importAes(nameKey),
+    };
   }
 
   // --- manifests -----------------------------------------------------------
@@ -234,6 +267,10 @@
   // are the AAD, and any re-serialisation that differs by a single byte — a
   // space, a reordered key, a different number format — makes the file
   // permanently undecryptable.
+  // No `name` since version 4: these bytes are stored and served in the clear,
+  // so anything in here is something the server knows. The name is sealed
+  // separately; what still binds it to this file is the manifest id, which is
+  // the name blob's AAD.
   function buildManifest(fields) {
     return te.encode(JSON.stringify({
       v: VERSION,
@@ -242,7 +279,6 @@
       size: fields.size,
       chunks: chunkCount(fields.size),
       chunk: CHUNK,
-      name: fields.name,
       type: fields.type || 'application/octet-stream',
     }));
   }
@@ -251,7 +287,7 @@
   // own `v` is the container version it was written for.
   function parseManifest(bytes) {
     const m = JSON.parse(td.decode(bytes));
-    if (m.v !== 2 && m.v !== 3) throw new Error('unsupported manifest version ' + m.v);
+    if (m.v !== 2 && m.v !== 3 && m.v !== 4) throw new Error('unsupported manifest version ' + m.v);
     if (typeof m.size !== 'number' || m.size < 0) throw new Error('manifest size is invalid');
     if (m.chunk !== CHUNK) throw new Error('unsupported chunk size ' + m.chunk);
     if (m.chunks !== chunkCount(m.size)) throw new Error('manifest chunk count is inconsistent');
@@ -265,21 +301,28 @@
     return diff === 0;
   }
 
-  // readHeader pulls the embedded manifest out of a version 3 object.
+  function magicFor(version) {
+    return version >= 4 ? MAGIC4 : MAGIC3;
+  }
+
+  // readHeader pulls the embedded manifest out of a version 3 or 4 object. Both
+  // magics are accepted because the framing is the same; which one is present
+  // says whether the manifest may still carry a name.
   function readHeader(ct) {
     if (ct.length < HEADER_FIXED) throw new Error('object is too short to be a container');
-    for (let i = 0; i < MAGIC.length; i++) {
-      if (ct[i] !== MAGIC[i]) throw new Error('not a Pyxis v3 container');
+    const magic = ct[3] === MAGIC4[3] ? MAGIC4 : MAGIC3;
+    for (let i = 0; i < magic.length; i++) {
+      if (ct[i] !== magic[i]) throw new Error('not a Pyxis container');
     }
     const len = (ct[4] << 8) | ct[5];
     if (len === 0 || ct.length < HEADER_FIXED + len) throw new Error('container header is truncated');
     return { manifest: ct.subarray(HEADER_FIXED, HEADER_FIXED + len), body: HEADER_FIXED + len };
   }
 
-  function writeHeader(manifest) {
+  function writeHeader(manifest, version) {
     if (manifest.length > 0xffff) throw new Error('manifest is too large for the header');
     const head = new Uint8Array(HEADER_FIXED + manifest.length);
-    head.set(MAGIC, 0);
+    head.set(magicFor(version || VERSION), 0);
     head[4] = (manifest.length >> 8) & 0xff;
     head[5] = manifest.length & 0xff;
     head.set(manifest, HEADER_FIXED);
@@ -313,7 +356,7 @@
     // The header goes in front, so the stored object says what it is. It is
     // covered by the chunks' AAD rather than a MAC of its own: change the
     // length or the manifest and every chunk stops verifying.
-    const parts = [writeHeader(manifest)];
+    const parts = [writeHeader(manifest, VERSION)];
     for (let i = 0; i < chunks; i++) {
       if (aborted(signal)) throw abortError();
       const slice = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, total));
@@ -416,6 +459,50 @@
     return { blob: await decryptLegacy(cipherBuf, aesKey, type, onProgress), manifest: null };
   }
 
+  // --- sealed names --------------------------------------------------------
+  //
+  // A name is sealed on its own, in its own blob, under its own HKDF branch of
+  // the share secret — not folded into the file's ciphertext. That is the whole
+  // point: a listing can show every name in a batch after one cheap request,
+  // without pulling a single chunk of any file, without spending a download
+  // slot, and without the server ever holding a name it can read.
+  //
+  // The manifest id is the AAD, so a sealed name belongs to exactly one file:
+  // the server cannot move a name onto another object, and cannot swap two
+  // names within a batch. The id is generated in the browser, so it is not the
+  // server's to choose either.
+  function nameAAD(fileId) {
+    return te.encode(NAME_AAD_PREFIX + fileId);
+  }
+
+  async function sealName(nameKey, fileId, fields) {
+    const body = te.encode(JSON.stringify({
+      v: 1,
+      name: fields.name,
+      type: fields.type || 'application/octet-stream',
+    }));
+    const nonce = randomBytes(NAME_NONCE);
+    const sealed = await subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: nameAAD(fileId) }, nameKey, body);
+    const out = new Uint8Array(NAME_NONCE + sealed.byteLength);
+    out.set(nonce, 0);
+    out.set(new Uint8Array(sealed), NAME_NONCE);
+    return out;
+  }
+
+  // Throws if the blob was sealed for another file or under another secret —
+  // GCM verifies both before a single character of the name is returned.
+  async function openName(nameKey, fileId, sealed) {
+    if (!sealed || sealed.length <= NAME_NONCE) throw new Error('malformed sealed name');
+    const body = await subtle.decrypt(
+      { name: 'AES-GCM', iv: sealed.subarray(0, NAME_NONCE), additionalData: nameAAD(fileId) },
+      nameKey, sealed.subarray(NAME_NONCE));
+    const n = JSON.parse(td.decode(new Uint8Array(body)));
+    if (n.v !== 1) throw new Error('unsupported sealed name version ' + n.v);
+    if (typeof n.name !== 'string' || !n.name) throw new Error('sealed name is empty');
+    return n;
+  }
+
   // --- batch roster --------------------------------------------------------
   //
   // The roster is the authenticated MEMBER LIST of a batch. Per-file manifests
@@ -448,10 +535,12 @@
       rosterKey, sealed.subarray(ROSTER_NONCE));
     const r = JSON.parse(td.decode(new Uint8Array(body)));
     // Accept every roster version that has ever been sealed. The roster format
-    // did not change between 2 and 3 — only the file container did — and
-    // refusing an older one would make a batch uploaded before the change
-    // report its own member list as unverifiable.
-    if (r.v !== 2 && r.v !== 3) throw new Error('unsupported roster version ' + r.v);
+    // has not changed since 2 — only the file container has — and refusing an
+    // older one would make a batch uploaded before the change report its own
+    // member list as unverifiable. Names have always been sealed in here, which
+    // is why version 4 could take them out of the manifest without touching
+    // this format at all.
+    if (r.v < 2 || r.v > 4) throw new Error('unsupported roster version ' + r.v);
     if (r.batch !== batchId) throw new Error('roster names a different batch');
     if (!Array.isArray(r.files)) throw new Error('roster has no file list');
     return r;
@@ -466,6 +555,7 @@
     sha256b64u: sha256b64u,
     importAes: importAes,
     deriveUrlKey: deriveUrlKey,
+    deriveNameKey: deriveNameKey,
     derivePasswordKeys: derivePasswordKeys,
     deriveBatchKeys: deriveBatchKeys,
     wrapFileKey: wrapFileKey,
@@ -482,6 +572,8 @@
     HEADER_FIXED: HEADER_FIXED,
     sealRoster: sealRoster,
     openRoster: openRoster,
+    sealName: sealName,
+    openName: openName,
     SALT_LEN: 16,
     KEY_LEN: 32,
   };

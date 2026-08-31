@@ -257,6 +257,25 @@ var migrations = []migration{
 			`CREATE INDEX IF NOT EXISTS auth_failures_window_idx ON auth_failures (window_start)`,
 		},
 	},
+	{
+		version: 7,
+		name:    "sealed_file_names",
+		// File names used to be stored in the clear, and in two places: this
+		// column, and the `name` field of the manifest — which cannot be
+		// encrypted, because it is the AAD of every chunk. Container version 4
+		// takes the name out of the manifest and seals it separately, under its
+		// own HKDF branch of the share secret, so a listing can show names
+		// without fetching ciphertext and the server can read none of them.
+		//
+		// original_name stays, and stays populated for rows written before
+		// version 4: their manifests still carry the name in the clear, so
+		// blanking the column would cost those shares their listing without
+		// making anything private. They age out with their 30-day retirement.
+		stmts: []string{
+			`ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_name BYTEA`,
+			`ALTER TABLE files ALTER COLUMN original_name DROP NOT NULL`,
+		},
+	},
 }
 
 // migrateUsernameCaseUnique adds the case-insensitive uniqueness constraint,

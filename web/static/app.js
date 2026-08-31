@@ -317,10 +317,33 @@
     const manifestAttr = e2eRoot.getAttribute('data-manifest') || '';
     const manifestBytes = manifestAttr ? E2E.b64uDecode(manifestAttr) : null;
 
-    // The name used for the saved file. Starts as the server's copy so the page
-    // has something to show, and is replaced by the authenticated one as soon
-    // as a decryption succeeds.
-    let fileName = e2eRoot.getAttribute('data-name');
+    // The name used for the saved file. A version 4 share has none on the page
+    // — the server holds only a sealed blob — so it starts as the placeholder
+    // the template rendered and is replaced as soon as that blob is opened,
+    // which needs no ciphertext at all. Older shares start with the server's
+    // copy and swap it for the authenticated one after decryption.
+    let fileName = e2eRoot.getAttribute('data-name') || '';
+    const encNameAttr = e2eRoot.getAttribute('data-enc-name') || '';
+    const manifestID = e2eRoot.getAttribute('data-manifest-id') || '';
+
+    function showName(name) {
+      fileName = name;
+      const heading = document.querySelector('.dl-file-title h1');
+      if (heading) heading.textContent = name;
+      document.title = name + ' · Pyxis';
+    }
+
+    // Opening the sealed name is one short decryption, so it happens the moment
+    // a key exists — before the file is fetched, and whether or not it ever is.
+    async function openSealedName(nameKey) {
+      if (!encNameAttr || !nameKey) return;
+      try {
+        const opened = await E2E.openName(nameKey, manifestID, E2E.b64uDecode(encNameAttr));
+        showName(opened.name);
+      } catch (err) {
+        warn(t('name_unsealable'));
+      }
+    }
 
     let fileKey = null;
     let plainBlob = null;
@@ -376,11 +399,11 @@
     // way — but the recipient is told, because a file that arrives under a
     // different name than the sender gave it is worth knowing about.
     function adoptManifest(m) {
+      // A version 4 manifest carries no name — that is the point of it — so
+      // there is nothing here to disagree with the sealed one.
       if (!m || !m.name || m.name === fileName) return;
       warn(t('e2e_name_changed', fileName, m.name));
-      fileName = m.name;
-      const heading = document.querySelector('.dl-file-title h1');
-      if (heading) heading.textContent = m.name;
+      showName(m.name);
     }
 
     async function renderPreview() {
@@ -429,8 +452,16 @@
         keyMissing.hidden = false;
         dlBtn.classList.add('btn-disabled');
       } else {
-        E2E.deriveUrlKey(E2E.b64uDecode(secret), e2eVersion)
-          .then((k) => { fileKey = k; return startSession(); })
+        const raw = E2E.b64uDecode(secret);
+        Promise.all([
+          E2E.deriveUrlKey(raw, e2eVersion),
+          encNameAttr ? E2E.deriveNameKey(raw, e2eVersion) : Promise.resolve(null),
+        ])
+          .then(async ([k, nk]) => {
+            fileKey = k;
+            await openSealedName(nk);
+            return startSession();
+          })
           .catch(() => fail(t('e2e_failed')));
       }
     } else {
@@ -444,7 +475,7 @@
         errBox.hidden = true;
         try {
           setProgress(t('e2e_deriving'), 0.5);
-          const { key, auth } = await E2E.derivePasswordKeys(pwInput.value, salt, e2eVersion);
+          const { key, auth, name: nameKey } = await E2E.derivePasswordKeys(pwInput.value, salt, e2eVersion);
           const res = await fetch('/files/' + fileId, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -455,6 +486,7 @@
           if (!res.ok) { fail(t('e2e_wrong_pw')); pwInput.value = ''; return; }
           fileKey = key;
           lockBox.hidden = true;
+          await openSealedName(nameKey);
           await startSession();
         } catch (err) {
           fail(t('e2e_failed') + ' (' + err.message + ')');
@@ -494,6 +526,7 @@
 
     let batchKey = null;
     let rosterKey = null;
+    let nameKey = null;
     let batchVersion = 1;
     let members = [];
 
@@ -525,7 +558,30 @@
       const data = await res.json();
       members = data.files || [];
       batchVersion = Number(data.e2eVersion) || 1;
+      await openNames();
       await verifyRoster(data);
+    }
+
+    // From container version 4 the listing carries no names, only a sealed blob
+    // per member. Opening them costs one AES-GCM decryption each — no
+    // ciphertext is fetched and no download slot is spent — which is exactly
+    // why the name is sealed apart from the file it belongs to.
+    async function openNames() {
+      for (const m of members) {
+        if (m.name || !m.encName || !nameKey) continue;
+        try {
+          const opened = await E2E.openName(nameKey, m.manifestId, E2E.b64uDecode(m.encName));
+          m.name = opened.name;
+          // The type it was sealed with is authenticated; the column beside it
+          // is not, so prefer the sealed one for what the page shows.
+          if (opened.type) m.contentType = opened.type;
+        } catch (err) {
+          // A name that will not open under this link's key is a name this page
+          // has no business guessing at.
+          m.name = t('name_sealed');
+          m.unverified = true;
+        }
+      }
     }
 
     // verifyRoster checks the listing the server just returned against the
@@ -575,6 +631,9 @@
         }
         byID.delete(m.id);
         const digest = m.manifest ? await E2E.sha256b64u(E2E.b64uDecode(m.manifest)) : '';
+        // Both names in this comparison are sealed under the same secret, from
+        // two independent blobs: the roster the uploader wrote, and the name
+        // blob stored beside the file. The server can produce neither.
         if (entry.manifest !== digest || entry.name !== m.name ||
             Number(entry.size) !== Number(m.size) || entry.type !== m.contentType) {
           m.unverified = true;
@@ -1232,7 +1291,12 @@
         keyMissing.hidden = false;
       } else {
         E2E.deriveBatchKeys(E2E.b64uDecode(secret), E2E.VERSION)
-          .then((k) => { batchKey = k.key; rosterKey = k.roster; return startBatch(); })
+          .then((k) => {
+            batchKey = k.key;
+            rosterKey = k.roster;
+            nameKey = k.name;
+            return startBatch();
+          })
           .catch(() => fail(t('batch_failed')));
       }
     } else {
@@ -1257,6 +1321,7 @@
           if (!res.ok) { fail(t('e2e_wrong_pw')); pwInput.value = ''; return; }
           batchKey = derived.key;
           rosterKey = derived.roster;
+          nameKey = derived.name;
           lockBox.hidden = true;
           await startBatch();
         } catch (err) {
@@ -1323,8 +1388,92 @@
   document.addEventListener('submit', (e) => {
     const form = e.target.closest && e.target.closest('form[data-confirm]');
     if (!form) return;
-    if (!confirm(form.getAttribute('data-confirm'))) e.preventDefault();
+    if (!confirm(form.getAttribute('data-confirm'))) {
+      e.preventDefault();
+      return;
+    }
+    // A deleted file's remembered name is dead weight; drop it as it goes.
+    if (form.id === 'bulk-delete') {
+      forgetNames(Array.from(form.querySelectorAll('input[name="id"]:checked'), (b) => b.value));
+    } else if (form.classList.contains('file-delete')) {
+      const li = form.closest('.file-item');
+      if (li) forgetNames([li.getAttribute('data-id')]);
+    }
   });
+
+  // ---- names this browser remembers -------------------------------------------
+  //
+  // A version 4 name is sealed under the key in the share link, so the file
+  // list — which has no link and no key — genuinely cannot read it. That is the
+  // point, but it would leave the owner's own file manager showing a column of
+  // "Encrypted file name".
+  //
+  // So the browser that uploaded a file keeps the name it already knew, here,
+  // for its own lists. It never leaves this device, it is not a key, and losing
+  // it costs nothing but the label: another browser shows the placeholder, and
+  // the file itself is unaffected either way.
+  const NAME_STORE = 'pyxis_names';
+  const NAME_STORE_MAX = 2000;
+
+  function readNameStore() {
+    try {
+      const raw = localStorage.getItem(NAME_STORE);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) {
+      return {}; // private mode, blocked storage, corrupted value — all the same here
+    }
+  }
+
+  function rememberName(id, name) {
+    if (!id || !name) return;
+    try {
+      const store = readNameStore();
+      store[id] = name;
+      const ids = Object.keys(store);
+      // Oldest first: JSON objects keep insertion order for string keys, so
+      // trimming the front drops what was learned longest ago.
+      if (ids.length > NAME_STORE_MAX) {
+        for (const old of ids.slice(0, ids.length - NAME_STORE_MAX)) delete store[old];
+      }
+      localStorage.setItem(NAME_STORE, JSON.stringify(store));
+    } catch (e) { /* a name we cannot remember is not worth an error */ }
+  }
+
+  function forgetNames(ids) {
+    if (!ids || !ids.length) return;
+    try {
+      const store = readNameStore();
+      for (const id of ids) delete store[id];
+      localStorage.setItem(NAME_STORE, JSON.stringify(store));
+    } catch (e) { /* nothing to do */ }
+  }
+
+  // Fills sealed rows in with what this browser remembers. The row keeps saying
+  // where the name came from, because a remembered name is not an authenticated
+  // one: nothing here has verified it against the file.
+  function applyRememberedNames(root) {
+    const rows = (root || document).querySelectorAll('.file-name-sealed');
+    if (!rows.length) return;
+    const store = readNameStore();
+    for (const el of rows) {
+      const li = el.closest('.file-item');
+      const name = li && store[li.getAttribute('data-id')];
+      if (!name) continue;
+      el.textContent = name;
+      el.classList.remove('file-name-sealed');
+      el.classList.add('file-name-remembered');
+      el.title = t('files.name_remembered');
+      // The filter searches what the row says, so it has to know too.
+      li.setAttribute('data-search',
+        (li.getAttribute('data-search') || '') + ' ' + name);
+      const form = li.querySelector('.file-delete');
+      if (form) form.setAttribute('data-confirm', t('confirm_delete', name));
+      const box = li.querySelector('.file-select input[type="checkbox"]');
+      if (box) box.setAttribute('aria-label', name);
+    }
+  }
+  applyRememberedNames();
 
   // ---- history page: batch groups ---------------------------------------------
   //
@@ -1513,30 +1662,80 @@
   // 0 means "no limit advertised", in which case only the server decides.
   const MAX_UPLOAD = Number(form.getAttribute('data-max-upload')) || 0;
 
-  // Two independent reasons the share options can be read-only: the batch link
-  // has been created and its terms are frozen, or Single-Use is driving them.
-  // Both are folded into applyOptionState so neither can re-enable a field the
-  // other still wants disabled — declared before resetOptions() runs, which
-  // calls it.
+  const stepParams = document.getElementById('step-params');
+  const stepFiles = document.getElementById('step-files');
+  const stepConfirm = document.getElementById('opt-confirm');
+  const stepEdit = document.getElementById('step-edit');
+  const step1Chip = document.getElementById('step1-chip');
+  const step2Sub = document.getElementById('step2-sub');
+
+  // Three independent reasons the share options can be read-only: step 1 has
+  // been confirmed, the batch link has been created and its terms are frozen,
+  // or Single-Use is driving them. All are folded into applyOptionState so none
+  // can re-enable a field another still wants disabled — declared before
+  // resetOptions() runs, which calls it.
   let optionsLocked = false;
+  let paramsConfirmed = false;
   let singleUse = false;
   let preSingleUse = null;
 
   function applyOptionState() {
+    const frozen = optionsLocked || paramsConfirmed;
     for (const el of [expiresSel, expiresAtInput, passwordInput, maxDownloadsInput]) {
-      if (el) el.disabled = optionsLocked;
+      if (el) el.disabled = frozen;
     }
     // Single-Use owns expiry and the download limit; the password stays free.
-    if (!optionsLocked && singleUse) {
+    if (!frozen && singleUse) {
       for (const el of [expiresSel, expiresAtInput, maxDownloadsInput]) {
         if (el) el.disabled = true;
       }
     }
-    if (optionsBox) optionsBox.classList.toggle('options-locked', optionsLocked);
+    if (optionsBox) optionsBox.classList.toggle('options-locked', frozen);
     if (singleUseBtn) {
-      singleUseBtn.disabled = optionsLocked;
+      singleUseBtn.disabled = frozen;
       singleUseBtn.setAttribute('aria-pressed', singleUse ? 'true' : 'false');
     }
+  }
+
+  // The gate between the two steps. Step 2 is inert until step 1 is confirmed:
+  // the file input is disabled, so neither a click nor a keyboard activation of
+  // the dropzone label opens a picker, and handleFiles turns a drop away on its
+  // own — the styling only describes a state the DOM already enforces.
+  function applyStepState() {
+    if (stepFiles) {
+      stepFiles.classList.toggle('step-locked', !paramsConfirmed);
+      stepFiles.setAttribute('aria-disabled', paramsConfirmed ? 'false' : 'true');
+    }
+    if (fileInput) fileInput.disabled = !paramsConfirmed;
+    if (stepParams) stepParams.classList.toggle('step-done', paramsConfirmed);
+    if (step1Chip) step1Chip.hidden = !paramsConfirmed;
+    if (stepConfirm) stepConfirm.hidden = paramsConfirmed;
+    // Going back is only honest while nothing has been shared under these
+    // terms; the batch freezes them the moment its first file lands.
+    if (stepEdit) stepEdit.hidden = !paramsConfirmed || optionsLocked;
+    if (step2Sub) {
+      step2Sub.textContent = t(paramsConfirmed ? 'upload.step2_open' : 'upload.step2_locked');
+    }
+  }
+
+  function setParamsConfirmed(on) {
+    paramsConfirmed = on;
+    applyOptionState();
+    applyStepState();
+  }
+
+  if (stepConfirm) {
+    stepConfirm.addEventListener('click', () => {
+      setParamsConfirmed(true);
+      if (stepFiles) stepFiles.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+  }
+  if (stepEdit) {
+    stepEdit.addEventListener('click', () => {
+      if (optionsLocked) return; // the batch already exists; nothing to reopen
+      setParamsConfirmed(false);
+      if (stepParams) stepParams.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
   }
 
   function syncCustomExpiry() {
@@ -1583,8 +1782,10 @@
     if (expiresAtInput) expiresAtInput.value = '';
     singleUse = false;
     preSingleUse = null;
+    paramsConfirmed = false;
     syncCustomExpiry();
     applyOptionState();
+    applyStepState();
   }
   resetOptions();
   window.addEventListener('pageshow', (e) => {
@@ -1613,6 +1814,7 @@
   ['dragenter', 'dragover'].forEach((ev) =>
     dropzone.addEventListener(ev, (e) => {
       e.preventDefault();
+      if (!paramsConfirmed) return; // no drop target until the gate opens
       dropzone.classList.add('dropzone-hover');
     })
   );
@@ -1647,6 +1849,13 @@
 
   function handleFiles(files) {
     if (!files || files.length === 0) return;
+    // A drop lands on the dropzone whether or not its input is disabled, so
+    // the gate is enforced here too rather than by the styling alone.
+    if (!paramsConfirmed) {
+      toast(t('upload.step2_locked'));
+      if (stepParams) stepParams.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      return;
+    }
     if (sessionSection) sessionSection.hidden = false;
     // One snapshot for the whole drop: a retry must repeat the share settings
     // the user actually chose, not whatever the form holds later on.
@@ -1841,19 +2050,34 @@
       // size, count, name, type and batch. The id is generated here rather than
       // taken from the server's row: it has to exist before the upload, and it
       // must be something the server cannot choose.
+      // The id is generated here rather than taken from the server's row: it
+      // has to exist before the upload, it must be something the server cannot
+      // choose, and it is what binds the sealed name to this one file.
+      const fileID = E2E.newFileId();
       manifestBytes = E2E.buildManifest({
-        id: E2E.newFileId(),
+        id: fileID,
         batch: batch.id,
         size: file.size,
-        name: file.name,
         type: file.type || 'application/octet-stream',
       });
+
+      // The name never goes up in the clear, and never in the manifest — those
+      // bytes are stored and served as they are. It travels sealed under its
+      // own branch of the batch secret, so a listing can show it without
+      // touching the file and the server cannot read it at all.
+      fd.append('enc_name', E2E.b64uEncode(
+        await E2E.sealName(batch.name, fileID, {
+          name: file.name,
+          type: file.type || 'application/octet-stream',
+        })));
 
       const cipher = await E2E.encryptFile(file, key, manifestBytes, (f) => {
         fill.style.width = Math.round(f * 100) + '%';
         status.textContent = t('e2e_encrypting');
       }, ctl);
-      fd.append('file', cipher, file.name);
+      // The part is named after the id, not the file: a multipart filename is
+      // plaintext metadata the server would otherwise see and log.
+      fd.append('file', cipher, fileID + '.enc');
       fd.append('e2e', '1');
       fd.append('e2e_version', String(E2E.VERSION));
       fd.append('manifest', E2E.b64uEncode(manifestBytes));
@@ -1912,6 +2136,9 @@
         let created = null;
         try { created = JSON.parse(xhr.responseText); } catch (e) { /* handled below */ }
         if (created && created.id) {
+          // This browser sealed the name a moment ago, so it is the one place
+          // that can still read it without the link.
+          rememberName(created.id, file.name);
           recordMember(created.id, file, manifestBytes);
         } else {
           // Without the server's row id the member cannot be entered into the
@@ -1949,7 +2176,7 @@
   // have been sent to somebody. "Start a new link" is the way out.
 
   const batchState = {
-    id: null, fragment: '', key: null, rosterKey: null,
+    id: null, fragment: '', key: null, rosterKey: null, name: null,
     count: 0, creating: null,
     // The authenticated member list, rebuilt and re-sealed after every file so
     // the link is verifiable at every moment of an upload session, not only
@@ -2017,6 +2244,7 @@
   function setOptionsLocked(locked) {
     optionsLocked = locked;
     applyOptionState();
+    applyStepState();
   }
 
   // Concurrent uploads all await the same creation: handleFiles starts every
@@ -2034,12 +2262,14 @@
 
       let key;
       let rosterKey;
+      let nameKey;
       let fragment = '';
       if (opts.password) {
         const salt = E2E.randomBytes(E2E.SALT_LEN);
         const derived = await E2E.derivePasswordKeys(opts.password, salt, E2E.VERSION);
         key = derived.key;
         rosterKey = derived.roster;
+        nameKey = derived.name;
         body.set('auth_salt', E2E.b64uEncode(salt));
         body.set('auth_verifier', E2E.b64uEncode(derived.auth));
       } else {
@@ -2050,6 +2280,7 @@
         const derived = await E2E.deriveBatchKeys(secret, E2E.VERSION);
         key = derived.key;
         rosterKey = derived.roster;
+        nameKey = derived.name;
       }
 
       const res = await fetch('/batches', {
@@ -2068,6 +2299,7 @@
       batchState.fragment = fragment;
       batchState.key = key;
       batchState.rosterKey = rosterKey;
+      batchState.name = nameKey;
       batchState.roster = [];
       batchState.rosterSeq = 0;
       setOptionsLocked(true);
@@ -2104,11 +2336,15 @@
       batchState.fragment = '';
       batchState.key = null;
       batchState.rosterKey = null;
+      batchState.name = null;
       batchState.roster = [];
       batchState.rosterSeq = 0;
       batchState.count = 0;
       batchState.creating = null;
       setOptionsLocked(false);
+      // A new link means new terms: step 1 opens again and has to be confirmed
+      // before the next file can go anywhere.
+      setParamsConfirmed(false);
       batchShare.hidden = true;
       // The queue described the previous link; clearing avoids implying those
       // files are reachable through the next one.

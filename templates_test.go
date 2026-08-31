@@ -44,6 +44,11 @@ func TestTemplatesRender(t *testing.T) {
 		{ID: uuid.NewString(), OriginalName: "alone.txt", Size: 12, ContentType: "text/plain",
 			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid,
 			CanDelete: true, IconKind: "text", BatchID: &loneBatchID},
+		// A container version 4 upload: the server has no name for it, only a
+		// sealed blob, so the row has to render without one.
+		{ID: uuid.NewString(), Size: 4096, ContentType: "application/pdf",
+			EncName: "c2VhbGVkLW5hbWUtYmxvYg", UploadedAt: now, UploaderName: "marius",
+			UploadedBy: &uid, CanDelete: true, IconKind: "pdf"},
 	}
 	fileGroups, hasBatches := groupFiles(files)
 
@@ -83,6 +88,7 @@ func TestTemplatesRender(t *testing.T) {
 	cases := map[string]map[string]any{
 		"index.html": {"MaxUpload": int64(1 << 30)},
 		"history.html": {"Active": "files", "Groups": fileGroups, "HasBatches": hasBatches,
+			"Heading": "My files", "Sub": "yours", "Everyone": false,
 			"ActiveCount": 2, "TotalSize": int64(999), "TotalDL": 4},
 		"login.html": {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
 		"account.html": {"Active": "account", "Error": "", "Success": "ok",
@@ -102,16 +108,23 @@ func TestTemplatesRender(t *testing.T) {
 			"ContentType": "image/jpeg", "UploadedAt": now, "ExpiresAt": exp.UTC(),
 			"HasLimit": true, "MaxDL": 3, "DownloadsLeft": 2,
 			"PreviewKind": "", "IconKind": "image", "User": (*User)(nil),
-			"E2EVersion": e2eVersionV3, "Manifest": "eyJ2IjoyfQ"},
+			"E2EVersion": e2eVersionV3, "Manifest": "eyJ2IjoyfQ", "EncName": "", "ManifestID": ""},
+		// Version 4: no name on the page at all, only the sealed blob and the
+		// manifest id that binds it, which is what the browser opens it with.
+		{"State": "e2e", "E2EMode": "url", "ID": "id4", "Name": "", "Size": int64(4096),
+			"ContentType": "application/pdf", "UploadedAt": now,
+			"HasLimit": false, "PreviewKind": "", "IconKind": "pdf", "User": (*User)(nil),
+			"E2EVersion": e2eVersionV4, "Manifest": "eyJ2Ijo0fQ",
+			"EncName": "c2VhbGVkLW5hbWUtYmxvYg", "ManifestID": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},
 		{"State": "e2e", "E2EMode": "url", "ID": "id1", "Name": "blob.bin", "Size": int64(5),
 			"ContentType": "application/octet-stream", "UploadedAt": now,
 			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil),
 			// A share from before the manifest existed: version 1, no manifest.
-			"E2EVersion": e2eVersionLegacy, "Manifest": ""},
+			"E2EVersion": e2eVersionLegacy, "Manifest": "", "EncName": "", "ManifestID": ""},
 		{"State": "e2e", "E2EMode": "password", "ID": "id1", "Name": "secret.txt", "Size": int64(5),
 			"ContentType": "text/plain", "UploadedAt": now, "AuthSalt": "c2FsdHNhbHRzYWx0c2E",
 			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil),
-			"E2EVersion": e2eVersionV3, "Manifest": "eyJ2IjoyfQ"},
+			"E2EVersion": e2eVersionV3, "Manifest": "eyJ2IjoyfQ", "EncName": "", "ManifestID": ""},
 	}
 	// Shapes of the shell quota bar that the case above never reaches: a file
 	// limit with no byte limit (the bar then tracks files), an entirely
@@ -134,6 +147,18 @@ func TestTemplatesRender(t *testing.T) {
 		{"Usage": UsageSummary{UsedBytes: 19 << 30, UsedFiles: 4,
 			Quota: UserQuota{Bytes: 20 << 30}, Custom: true}},
 		{"Usage": nil},
+	}
+	// The same template serves /admin/files, and an empty list on either page.
+	listCases := []map[string]any{
+		{"Active": "allfiles", "Groups": fileGroups, "HasBatches": hasBatches,
+			"Heading": "All files", "Sub": "everyone's", "Everyone": true,
+			"ActiveCount": 2, "TotalSize": int64(999), "TotalDL": 4},
+		{"Active": "allfiles", "Groups": []FileGroup(nil), "HasBatches": false,
+			"Heading": "All files", "Sub": "everyone's", "Everyone": true,
+			"ActiveCount": 0, "TotalSize": int64(0), "TotalDL": 0},
+		{"Active": "files", "Groups": []FileGroup(nil), "HasBatches": false,
+			"Heading": "My files", "Sub": "yours", "Everyone": false,
+			"ActiveCount": 0, "TotalSize": int64(0), "TotalDL": 0},
 	}
 	batchCases := []map[string]any{
 		{"State": "batch", "E2EMode": "url", "Unlocked": true, "ID": uuid.NewString(),
@@ -171,6 +196,12 @@ func TestTemplatesRender(t *testing.T) {
 			extra["MinPasswordLen"] = minPasswordLen
 			if err := tmpl.ExecuteTemplate(&sb, "account.html", merge(lang, extra)); err != nil {
 				t.Errorf("shell quota bar case %d [%s]: %v", i, lang, err)
+			}
+		}
+		for i, extra := range listCases {
+			var sb strings.Builder
+			if err := tmpl.ExecuteTemplate(&sb, "history.html", merge(lang, extra)); err != nil {
+				t.Errorf("history.html case %d [%s]: %v", i, lang, err)
 			}
 		}
 		for i, extra := range batchCases {

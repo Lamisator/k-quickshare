@@ -13,11 +13,17 @@
 {{else}}
 {{/* data-manifest is the file's authenticated metadata, verbatim as stored. It
      is the AAD of every chunk, so app.js can only decrypt if these bytes make
-     the round trip unchanged — and the name/size/type printed below come from
-     the database, which nothing binds to the ciphertext, so app.js replaces
-     them with the manifest's values once decryption has vouched for them. */}}
+     the round trip unchanged.
+
+     From container version 4 the server has no name to print: .Name is empty,
+     the heading renders a placeholder, and app.js replaces it as soon as it has
+     opened data-enc-name — one short blob, no ciphertext, no download spent.
+     Older shares print the database's copy, which nothing binds to the
+     ciphertext, so app.js still replaces it with the manifest's value once
+     decryption has vouched for that. */}}
 <div class="dl-card dl-card-wide" id="dl-root" data-e2e="1" data-mode="{{.E2EMode}}" data-file="{{.ID}}"
-     data-name="{{.Name}}" data-size="{{.Size}}" data-type="{{.ContentType}}"
+     data-name="{{.Name}}" data-enc-name="{{.EncName}}" data-manifest-id="{{.ManifestID}}"
+     data-size="{{.Size}}" data-type="{{.ContentType}}"
      data-e2e-version="{{.E2EVersion}}" data-manifest="{{.Manifest}}"
      data-preview-kind="{{.PreviewKind}}"{{if .AuthSalt}} data-salt="{{.AuthSalt}}"{{end}}{{if .HasLimit}} data-limited="1"{{end}}>
   <p class="dl-kicker">{{T .Lang "dl.wants_to_share"}} · <span class="e2e-badge">{{T .Lang "dl.e2e"}}</span></p>
@@ -25,7 +31,7 @@
   <div class="dl-file-head">
     {{template "fileicon" .IconKind}}
     <div class="dl-file-title">
-      <h1>{{.Name}}</h1>
+      <h1>{{if .Name}}{{.Name}}{{else}}{{T .Lang "dl.name_sealed"}}{{end}}</h1>
       <span class="muted">{{humanSize .Size}} · {{.ContentType}}</span>
     </div>
   </div>

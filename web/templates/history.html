@@ -1,9 +1,11 @@
 {{template "header" .}}
 {{template "filesprite" .}}
 
+{{/* Two pages share this template: /history (your own uploads) and
+     /admin/files (every account's, admin only). Only the words differ. */}}
 <div class="page-head">
-  <h1>{{T .Lang "files.heading"}}</h1>
-  <p class="page-sub">{{T .Lang "files.sub"}}</p>
+  <h1>{{.Heading}}</h1>
+  <p class="page-sub">{{.Sub}}</p>
 </div>
 
 <div class="stats-row">
@@ -125,7 +127,7 @@
 </ul>
 <p class="empty" id="no-results" hidden>{{T .Lang "js.no_results"}}</p>
 {{else}}
-<p class="empty">{{T .Lang "files.empty"}}</p>
+<p class="empty">{{if .Everyone}}{{T .Lang "files.all_empty"}}{{else}}{{T .Lang "files.empty"}}{{end}}</p>
 {{end}}
 
 {{template "footer" .}}
@@ -135,17 +137,24 @@
      left off the row: they would be the same sentence repeated per member. */}}
 {{define "filerow"}}
 {{- $f := .F}}{{$lang := .Lang}}{{$in := .InGroup}}
-<li class="file-item{{if $f.Archived}} file-archived{{end}}{{if $in}} file-child{{end}}" data-search="{{$f.OriginalName}} {{$f.ContentType}} {{$f.UploaderName}}">
+{{- /* From container version 4 the server has no name for this file: it is
+       sealed under the key in the share link, which this page does not have.
+       The row shows a placeholder, and app.js fills in a real name only if this
+       browser is the one that uploaded it and still remembers. */ -}}
+{{- $sealed := not $f.OriginalName}}
+{{- $label := $f.OriginalName}}{{if $sealed}}{{$label = T $lang "files.name_sealed"}}{{end}}
+<li class="file-item{{if $f.Archived}} file-archived{{end}}{{if $in}} file-child{{end}}"
+    data-id="{{$f.ID}}" data-search="{{$f.OriginalName}} {{$f.ContentType}} {{$f.UploaderName}}">
   {{if $f.CanDelete}}
   <label class="file-select">
-    <input type="checkbox" form="bulk-delete" name="id" value="{{$f.ID}}" aria-label="{{T $lang "files.select_file" $f.OriginalName}}">
+    <input type="checkbox" form="bulk-delete" name="id" value="{{$f.ID}}" aria-label="{{T $lang "files.select_file" $label}}">
   </label>
   {{end}}
   {{template "fileicon" $f.IconKind}}
   <div class="file-main">
     <div class="file-name-row">
-      {{if or $f.Archived $f.Keyed}}<span class="file-name">{{$f.OriginalName}}</span>
-      {{else}}<a class="file-name" href="{{if $f.BatchID}}/b/{{$f.BatchID}}{{else}}/files/{{$f.ID}}{{end}}">{{$f.OriginalName}}</a>{{end}}
+      {{if or $f.Archived $f.Keyed}}<span class="file-name{{if $sealed}} file-name-sealed{{end}}"{{if $sealed}} title="{{T $lang "files.name_sealed_tip"}}"{{end}}>{{$label}}</span>
+      {{else}}<a class="file-name{{if $sealed}} file-name-sealed{{end}}" href="{{if $f.BatchID}}/b/{{$f.BatchID}}{{else}}/files/{{$f.ID}}{{end}}"{{if $sealed}} title="{{T $lang "files.name_sealed_tip"}}"{{end}}>{{$label}}</a>{{end}}
       {{if not $in}}
       {{if $f.Archived}}<span class="chip chip-archived">{{T $lang "files.archived"}}</span>{{end}}
       {{if $f.BatchID}}<span class="chip chip-batch" title="{{T $lang "files.batch_tip"}}">{{T $lang "files.batch"}}</span>{{end}}
@@ -183,7 +192,7 @@
     <a class="btn btn-ghost btn-sm" href="{{if $f.BatchID}}/b/{{$f.BatchID}}{{else}}/files/{{$f.ID}}{{end}}" target="_blank" rel="noopener">{{T $lang "files.open"}}</a>
     {{end}}
     {{if $f.CanDelete}}
-    <form class="file-delete" action="/delete/{{$f.ID}}" method="post" data-confirm="{{T $lang "js.confirm_delete" $f.OriginalName}}">
+    <form class="file-delete" action="/delete/{{$f.ID}}" method="post" data-confirm="{{T $lang "js.confirm_delete" $label}}">
       <button type="submit" class="btn btn-danger btn-sm" title="{{T $lang "files.delete"}}">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
       </button>

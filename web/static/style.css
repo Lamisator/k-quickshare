@@ -423,6 +423,65 @@ code {
   clip: rect(0, 0, 0, 0); border: 0;
 }
 
+/* ---- the two upload steps ---- */
+
+.step {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 1.1rem 1.15rem 1.15rem;
+  margin-bottom: 0.9rem;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+.step-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  margin-bottom: 0.6rem;
+}
+.step-titles { flex: 1; min-width: 0; }
+.step-title { font-size: 1rem; margin: 0; }
+.step-sub { margin: 0.15rem 0 0; font-size: 0.85rem; color: var(--text-dim); }
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.step-chip { flex-shrink: 0; }
+.step-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+.step-hint { font-size: 0.82rem; color: var(--text-dim); }
+
+/* Locked: visibly present, plainly not ready. The dropzone inside is inert
+   because its input is disabled, not because a style says so. */
+.step-locked { opacity: 0.55; border-style: dashed; }
+.step-locked .step-num { background: var(--surface-2); color: var(--text-dim); }
+.step-locked .dropzone {
+  cursor: not-allowed;
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+.step-locked .dropzone:hover { border-color: var(--border); color: var(--text-muted); }
+.step-locked .dropzone-icon { color: var(--text-dim); }
+.step-locked .dropzone-text { color: var(--text-muted); }
+/* Settled step 1: the fields stay readable, but nothing invites a change. */
+.step-done { opacity: 0.75; }
+.step-done .step-num { background: var(--success-soft, var(--surface-2)); color: var(--success); }
+.step-collapsed .step-body { display: none; }
+
 /* ---- Single-Use preset ---- */
 
 .quick-opts {
@@ -1122,6 +1181,16 @@ code {
   word-break: break-all;
 }
 .file-name:hover { color: var(--accent-bright); }
+/* A name this page cannot read: the file's own name is sealed under the key in
+   its share link. Set apart from a real one on purpose. */
+.file-name-sealed {
+  font-style: italic;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+/* A name only this browser remembers, from when it did the uploading. Nothing
+   has authenticated it, so it is marked as the second-hand thing it is. */
+.file-name-remembered { border-bottom: 1px dotted var(--border-strong); }
 
 .file-meta {
   display: flex;

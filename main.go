@@ -219,6 +219,7 @@ func main() {
 	mux.Handle("/account/password", app.requireUserHandler(app.handleAccountPassword))
 
 	// gated (admin)
+	mux.Handle("/admin/files", http.HandlerFunc(app.requireAdmin(app.handleAdminFiles)))
 	mux.Handle("/admin/users", http.HandlerFunc(app.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
