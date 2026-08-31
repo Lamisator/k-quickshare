@@ -212,6 +212,9 @@ func main() {
 	mux.Handle("/upload", app.requireUserHandler(app.handleUpload))
 	mux.Handle("/batches", app.requireUserHandler(app.handleCreateBatch))
 	mux.Handle("/delete/", app.requireUserHandler(app.handleDelete))
+	// Bulk delete from the file list. Registered as its own exact pattern so it
+	// cannot collide with a share id under /delete/.
+	mux.Handle("/delete", app.requireUserHandler(app.handleBulkDelete))
 	mux.Handle("/account", app.requireUserHandler(app.handleAccount))
 	mux.Handle("/account/password", app.requireUserHandler(app.handleAccountPassword))
 

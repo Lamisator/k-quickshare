@@ -97,6 +97,11 @@ var translations = map[string]map[string]string{
 	"js.e2e_unavailable": {"en": "Encryption unavailable — upload refused", "de": "Verschlüsselung nicht verfügbar — Upload abgelehnt"},
 	"js.e2e_insecure":    {"en": "Nothing was sent: encryption requires a secure (HTTPS) connection.", "de": "Es wurde nichts gesendet: Die Verschlüsselung erfordert eine sichere (HTTPS-)Verbindung."},
 
+	// --- file list multi-select ---
+	"js.selected": {"en": "%s selected", "de": "%s ausgewählt"},
+	"js.confirm_delete_many": {"en": "Delete %s selected files? Their links stop working immediately.",
+		"de": "%s ausgewählte Dateien löschen? Ihre Links funktionieren danach sofort nicht mehr."},
+
 	// --- integrity of the decrypted result ---
 	"js.e2e_legacy": {"en": "This link uses an older format: the contents are authenticated, but the file's length and name are not. It was shared before the current format existed.",
 		"de": "Dieser Link nutzt ein älteres Format: Der Inhalt ist authentifiziert, Länge und Name der Datei jedoch nicht. Er wurde vor dem aktuellen Format erstellt."},
@@ -195,6 +200,12 @@ var translations = map[string]map[string]string{
 	"files.qr":            {"en": "Show QR code", "de": "QR-Code anzeigen"},
 	"files.keyed":         {"en": "key in link", "de": "Schlüssel im Link"},
 	"files.keyed_tip":     {"en": "The decryption key is only part of the original share link — the server doesn't store it. Copy the link right after uploading.", "de": "Der Entschlüsselungsschlüssel ist nur Teil des ursprünglichen Freigabe-Links — der Server speichert ihn nicht. Kopiere den Link direkt nach dem Hochladen."},
+
+	// --- file list multi-select ---
+	"files.select_all":      {"en": "Select all", "de": "Alle auswählen"},
+	"files.select_file":     {"en": "Select “%s”", "de": "„%s“ auswählen"},
+	"files.delete_selected": {"en": "Delete selected", "de": "Auswahl löschen"},
+	"files.none_selected":   {"en": "Nothing selected", "de": "Nichts ausgewählt"},
 
 	// --- relative time ---
 	"time.expired": {"en": "expired", "de": "abgelaufen"},
@@ -509,7 +520,8 @@ func jsStrings(lang string) map[string]string {
 	keys := []string{
 		"js.done", "js.failed", "js.too_large", "js.login", "js.network",
 		"js.copy", "js.copied", "js.toast_copied", "js.toast_copyerr",
-		"js.confirm_delete", "js.protected", "js.no_results",
+		"js.confirm_delete", "js.confirm_delete_many", "js.selected",
+		"js.protected", "js.no_results",
 		"js.quota", "js.rate_limited", "js.qr_title",
 		"js.e2e_encrypting", "js.e2e_decrypting", "js.e2e_downloading",
 		"js.e2e_deriving", "js.e2e_failed", "js.e2e_wrong_pw", "js.e2e_unsupported",

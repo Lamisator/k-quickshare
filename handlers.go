@@ -930,11 +930,112 @@ func (a *App) handleDelete(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
+	a.removeBlob(stored)
+	if wantsJSON(r) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		return
+	}
+	http.Redirect(w, r, "/history", http.StatusSeeOther)
+}
+
+// removeBlob drops the ciphertext a deleted row pointed at. An archived row's
+// blob is already gone, so a missing file is the normal case, not an error.
+func (a *App) removeBlob(stored string) {
+	if stored == "" {
+		return
+	}
 	if err := os.Remove(filepath.Join(a.filesDir, stored)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Printf("delete blob %s: %v", stored, err)
 	}
+}
+
+// maxBulkDelete caps one request. The file list itself is capped at 500 rows,
+// so "select all" can never legitimately ask for more than this.
+const maxBulkDelete = 500
+
+// handleBulkDelete removes several files in one request — the file list's
+// multi-select. Ownership is enforced in the DELETE itself rather than in a
+// separate SELECT: a check-then-delete would have to decide what to do when
+// only some of the ids pass, and this way a row simply is not touched unless
+// the caller may touch it.
+func (a *App) handleBulkDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user := userFromContext(r.Context())
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	raw := r.Form["id"]
+	if len(raw) > maxBulkDelete {
+		http.Error(w, fmt.Sprintf("too many files selected (max %d)", maxBulkDelete),
+			http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// Placeholders rather than one array parameter: the ids are still bound,
+	// never interpolated, and it keeps the query readable in the logs.
+	args := make([]any, 0, len(raw)+1)
+	holes := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for _, s := range raw {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if seen[id.String()] {
+			continue
+		}
+		seen[id.String()] = true
+		holes = append(holes, fmt.Sprintf("$%d", len(args)+1))
+		args = append(args, id.String())
+	}
+	if len(args) == 0 {
+		a.bulkDeleteDone(w, r, 0)
+		return
+	}
+
+	q := `DELETE FROM files WHERE id IN (` + strings.Join(holes, ",") + `)`
+	if !user.IsAdmin {
+		q += fmt.Sprintf(" AND uploaded_by = $%d", len(args)+1)
+		args = append(args, user.ID.String())
+	}
+	q += ` RETURNING stored_name`
+
+	rows, err := a.db.Query(r.Context(), q, args...)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	var stored []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
+		stored = append(stored, name)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	// Only once the rows are certainly gone: a blob removed for a DELETE that
+	// then failed would leave a listed file that cannot be downloaded.
+	for _, name := range stored {
+		a.removeBlob(name)
+	}
+	a.bulkDeleteDone(w, r, len(stored))
+}
+
+func (a *App) bulkDeleteDone(w http.ResponseWriter, r *http.Request, n int) {
 	if wantsJSON(r) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "count": n})
 		return
 	}
 	http.Redirect(w, r, "/history", http.StatusSeeOther)

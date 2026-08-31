@@ -670,6 +670,44 @@ code {
   border: 1px solid rgba(224, 178, 110, 0.3);
 }
 .batch-row .btn { flex-shrink: 0; }
+
+/* Each row carries its own download button, and that button IS its progress
+   readout: the card's shared bar sits above the list, so once a preview is
+   open it is scrolled out of sight exactly when a transfer is running. */
+.row-download {
+  position: relative;
+  overflow: hidden;
+  align-self: flex-start;
+  margin-top: 0.4rem;
+  min-width: 12rem;
+  justify-content: flex-start;
+}
+.row-download-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  background: var(--accent-soft);
+  border-right: 1px solid var(--accent);
+  opacity: 0;
+  transition: width 0.15s ease;
+  pointer-events: none;
+}
+.row-download.is-busy .row-download-fill { opacity: 1; }
+.row-download.is-busy { color: var(--accent-bright); }
+.row-download-label {
+  position: relative;
+  font-variant-numeric: tabular-nums;
+}
+/* A finished transfer keeps the bar full rather than snapping back to empty,
+   so a download that ran while the row was off-screen still says so. */
+.row-download.is-done .row-download-fill {
+  opacity: 1;
+  background: var(--success-soft, rgba(110, 201, 154, 0.14));
+  border-right-color: var(--success);
+}
+.row-download.is-done { color: var(--success); }
 .batch-empty {
   padding: 1rem;
   text-align: center;
@@ -853,6 +891,60 @@ code {
 .chip-lock { background: var(--accent-soft); border-color: transparent; color: var(--accent-bright); }
 .chip-expiry { color: var(--warning); }
 .chip-warn { color: var(--warning); background: rgba(240, 198, 116, 0.14); border-color: transparent; }
+
+/* ---- multi-select ---- */
+
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.bulk-bar[hidden] { display: none; }
+.bulk-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.bulk-count {
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+  /* pushes the delete button to the far edge */
+  margin-right: auto;
+}
+/* The button stays visible but inert with an empty selection: a control that
+   disappears is harder to find again than one that is plainly not ready. */
+#bulk-delete-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.file-select {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  /* a click target larger than the 16px box, without moving the row */
+  padding: 0.35rem;
+  margin: -0.35rem 0 -0.35rem -0.35rem;
+  cursor: pointer;
+}
+.file-select input,
+.bulk-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.file-item:has(.file-select input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
 
 .file-actions {
   display: flex;

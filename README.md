@@ -405,6 +405,7 @@ in force.
 | `POST /upload` | Upload one file, optionally into a batch |
 | `GET /history` | Your uploads (admins see all) |
 | `POST /delete/{id}` | Delete a file |
+| `POST /delete` | Delete the files named by repeated `id` fields (the list's multi-select) |
 | `GET /account`, `POST /account/password` | Self-service account |
 | `/admin/users`, `/admin/settings` | Admin only |
 

@@ -49,6 +49,28 @@
     return true;
   }
 
+  // fetchWithProgress streams a response body and reports how much of it has
+  // arrived, so a transfer says something before decryption begins. The length
+  // it divides by is the ciphertext's — the only size the server knows — which
+  // is fine: the fraction is the same for the plaintext.
+  async function fetchWithProgress(url, onProgress) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const total = Number(res.headers.get('Content-Length') || 0);
+    const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+    if (!reader) return res.arrayBuffer();
+    const parts = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      got += value.length;
+      if (total && onProgress) onProgress(got / total);
+    }
+    return new Blob(parts).arrayBuffer();
+  }
+
   // saveBlob hands a blob to the browser as a download. Batch members and the
   // zip are built in this tab and never exist as a server URL, so an object
   // URL is the only way to offer them.
@@ -233,25 +255,8 @@
       if (plainBlob) return plainBlob;
       if (inFlight) return inFlight;
       inFlight = (async () => {
-        const res = await fetch('/files/' + fileId + '/raw');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const total = Number(res.headers.get('Content-Length') || 0);
-        const reader = res.body && res.body.getReader ? res.body.getReader() : null;
-        let buf;
-        if (reader) {
-          const parts = [];
-          let got = 0;
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            parts.push(value);
-            got += value.length;
-            if (total) setProgress(t('e2e_downloading'), got / total);
-          }
-          buf = await new Blob(parts).arrayBuffer();
-        } else {
-          buf = await res.arrayBuffer();
-        }
+        const buf = await fetchWithProgress('/files/' + fileId + '/raw',
+          (f) => setProgress(t('e2e_downloading'), f));
         setProgress(t('e2e_decrypting'), 0);
         const onProgress = (f) => setProgress(t('e2e_decrypting'), f);
         // A version 2 share without its manifest cannot be authenticated at
@@ -522,17 +527,18 @@
     // The result is memoised per member: every /raw fetch counts as a download,
     // so previewing and then downloading the same file must not spend two.
     const plainCache = new Map();
-    function decryptMember(m, onProgress) {
+    function decryptMember(m, onStage) {
       if (plainCache.has(m.id)) return plainCache.get(m.id);
+      const stage = onStage || (() => {});
       const p = (async () => {
         const fileKey = await E2E.unwrapFileKey(batchKey, E2E.b64uDecode(m.wrappedKey));
-        const res = await fetch('/b/' + batchId + '/f/' + m.id + '/raw');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const buf = await res.arrayBuffer();
+        const buf = await fetchWithProgress('/b/' + batchId + '/f/' + m.id + '/raw',
+          (f) => stage(t('e2e_downloading'), f));
         if (Number(m.e2eVersion) === 2 && !m.manifest) throw new Error('missing manifest');
         const out = await E2E.openFile(
           Number(m.e2eVersion), buf, fileKey,
-          m.manifest ? E2E.b64uDecode(m.manifest) : null, m.contentType, onProgress);
+          m.manifest ? E2E.b64uDecode(m.manifest) : null, m.contentType,
+          (f) => stage(t('e2e_decrypting'), f));
         // The manifest is the authenticated name, so it wins over the row the
         // server sent — including for the file the browser then saves.
         if (out.manifest) m.name = out.manifest.name || m.name;
@@ -544,8 +550,63 @@
       return p;
     }
 
+    // ---- per-file download buttons that show their own progress ------------
+    //
+    // The card's progress bar sits above the list, so the moment a preview is
+    // open — which is exactly when a transfer is running — it has scrolled out
+    // of sight. Each row therefore carries its own download button whose
+    // background doubles as that file's progress bar, right under its name.
+    const rowUI = new Map();
+
+    function makeRowDownload(m) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-ghost btn-sm row-download';
+      const fill = document.createElement('span');
+      fill.className = 'row-download-fill';
+      const label = document.createElement('span');
+      label.className = 'row-download-label';
+      label.textContent = t('batch_download');
+      btn.appendChild(fill);
+      btn.appendChild(label);
+      btn.addEventListener('click', () => downloadMember(m, btn));
+      rowUI.set(m.id, { btn: btn, fill: fill, label: label });
+      return btn;
+    }
+
+    function setRowProgress(m, label, frac) {
+      const ui = rowUI.get(m.id);
+      if (!ui) return;
+      const pct = Math.round(Math.max(0, Math.min(1, frac)) * 100);
+      ui.btn.classList.add('is-busy');
+      ui.btn.classList.remove('is-done');
+      ui.fill.style.width = pct + '%';
+      ui.label.textContent = label + ' ' + pct + '%';
+    }
+
+    // A finished transfer keeps a full bar instead of snapping back to empty:
+    // a file that came down while its row was off-screen should still say so.
+    function endRowProgress(m, ok) {
+      const ui = rowUI.get(m.id);
+      if (!ui) return;
+      ui.btn.classList.remove('is-busy');
+      ui.btn.classList.toggle('is-done', !!ok);
+      ui.fill.style.width = ok ? '100%' : '0%';
+      ui.label.textContent = t('batch_download');
+    }
+
+    // Progress goes to both places at once: the card's bar says what the page
+    // as a whole is doing, the row's button says it where the file actually is.
+    // Previewing a file decrypts it the same way a download does, so a preview
+    // drives its row's button too.
+    const report = (m) => (label, frac) => {
+      setProgress(label, frac);
+      setRowProgress(m, label, frac);
+    };
+
     function renderList() {
       listEl.textContent = '';
+      rowUI.clear();
       let total = 0;
       for (const m of members) total += Number(m.size) || 0;
       summaryEl.textContent = fileCountLabel(members.length) + ' · ' + fmtSize(total);
@@ -589,6 +650,7 @@
           badge.title = t('batch_row_unverified_hint');
           meta.appendChild(badge);
         }
+        meta.appendChild(makeRowDownload(m));
 
         const actions = document.createElement('div');
         actions.className = 'batch-row-actions';
@@ -600,16 +662,10 @@
           pv.addEventListener('click', () => togglePreview(m, pv, li));
           actions.appendChild(pv);
         }
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'btn btn-ghost btn-sm';
-        btn.textContent = t('batch_download');
-        btn.addEventListener('click', () => downloadMember(m, btn));
-        actions.appendChild(btn);
 
         li.appendChild(icon);
         li.appendChild(meta);
-        li.appendChild(actions);
+        if (actions.childNodes.length > 0) li.appendChild(actions);
         listEl.appendChild(li);
       }
     }
@@ -625,7 +681,8 @@
       errBox.hidden = true;
       try {
         setProgress(t('batch_fetching', m.name), 0);
-        const blob = await decryptMember(m, (f) => setProgress(t('e2e_decrypting'), f));
+        setRowProgress(m, t('e2e_downloading'), 0);
+        const blob = await decryptMember(m, report(m));
         const box = document.createElement('div');
         box.className = 'dl-preview batch-preview';
         if (await renderPreviewInto(box, m.previewKind, blob, m.name)) {
@@ -639,6 +696,10 @@
         fail(t('e2e_failed') + ' (' + err.message + ')');
       } finally {
         btn.disabled = false;
+        // Back to idle, not to "done": the bytes are decrypted and cached, but
+        // nothing was saved, and a green full bar on a Download button would
+        // say otherwise.
+        endRowProgress(m, false);
         clearProgress();
       }
     }
@@ -646,14 +707,18 @@
     async function downloadMember(m, btn) {
       btn.disabled = true;
       errBox.hidden = true;
+      let ok = false;
       try {
         setProgress(t('batch_fetching', m.name), 0);
-        const blob = await decryptMember(m, (f) => setProgress(t('e2e_decrypting'), f));
+        setRowProgress(m, t('e2e_downloading'), 0);
+        const blob = await decryptMember(m, report(m));
+        ok = true;
         saveBlob(blob, m.name);
       } catch (err) {
         fail(t('e2e_failed') + ' (' + err.message + ')');
       } finally {
         btn.disabled = false;
+        endRowProgress(m, ok);
         clearProgress();
       }
     }
@@ -674,10 +739,14 @@
         for (let i = 0; i < included.length; i++) {
           const m = included[i];
           setProgress(t('batch_fetching', m.name), i / included.length);
+          setRowProgress(m, t('e2e_downloading'), 0);
           // Read the name AFTER decrypting: that is when the manifest's
           // authenticated name replaces the server's, and an object literal
           // would otherwise capture the old one before the await resolves.
-          const blob = await decryptMember(m);
+          // Row progress is driven per file so the list shows how far the
+          // archive has got even when the card's bar is scrolled away.
+          const blob = await decryptMember(m, (label, f) => setRowProgress(m, label, f));
+          endRowProgress(m, true);
           entries.push({ name: m.name, blob: blob });
         }
         if (entries.length === 0) throw new Error(t('batch_empty'));
@@ -688,6 +757,12 @@
         fail(err && err.name === 'ZipTooLargeError'
           ? t('batch_zip_too_large')
           : t('e2e_failed') + ' (' + err.message + ')');
+        // The member that threw is still showing a half-filled bar; nothing
+        // else will clear it, and a stuck progress bar reads as "still going".
+        for (const m of members) {
+          const ui = rowUI.get(m.id);
+          if (ui && ui.btn.classList.contains('is-busy')) endRowProgress(m, false);
+        }
       } finally {
         zipBtn.disabled = false;
         clearProgress();
@@ -794,16 +869,22 @@
 
   // ---- localized delete confirmations -----------------------------------------
 
-  document.querySelectorAll('form[data-confirm]').forEach((form) => {
-    form.addEventListener('submit', (e) => {
-      if (!confirm(form.getAttribute('data-confirm'))) e.preventDefault();
-    });
+  // Delegated rather than bound per form at load: the bulk-delete form's
+  // message carries the number of selected files, so its data-confirm is
+  // rewritten as the selection changes and cannot be read once up front.
+  document.addEventListener('submit', (e) => {
+    const form = e.target.closest && e.target.closest('form[data-confirm]');
+    if (!form) return;
+    if (!confirm(form.getAttribute('data-confirm'))) e.preventDefault();
   });
 
   // ---- history page: live search ----------------------------------------------
 
   const search = document.getElementById('file-search');
   const fileList = document.getElementById('file-list');
+  // Set by the multi-select block below, which has to react to rows being
+  // filtered away; declared here because the search handler runs first.
+  let onListFiltered = () => {};
   if (search && fileList) {
     const noResults = document.getElementById('no-results');
     search.addEventListener('input', () => {
@@ -815,7 +896,75 @@
         if (hit) visible++;
       });
       if (noResults) noResults.hidden = visible > 0;
+      onListFiltered();
     });
+  }
+
+  // ---- history page: multi-select + bulk delete --------------------------------
+  //
+  // The checkboxes sit in the list items but belong to the bulk form via their
+  // form="" attribute, so the page needs no wrapper form around the list — one
+  // would have to contain the per-row delete forms, which HTML forbids.
+
+  const bulkForm = document.getElementById('bulk-delete');
+  if (bulkForm && fileList) {
+    const bulkAll = document.getElementById('bulk-all');
+    const bulkCount = document.getElementById('bulk-count');
+    const bulkBtn = document.getElementById('bulk-delete-btn');
+    const emptyLabel = bulkCount.textContent;
+    let anchor = null; // last box clicked, for shift-range selection
+
+    const boxes = () =>
+      Array.from(fileList.querySelectorAll('.file-select input[type="checkbox"]'));
+    // Only rows the search leaves visible take part: "select all" has to mean
+    // what the list is showing, not what it would show unfiltered.
+    const visibleBoxes = () => boxes().filter((b) => !b.closest('.file-item').hidden);
+
+    if (boxes().length === 0) bulkForm.hidden = true;
+
+    function sync() {
+      const all = visibleBoxes();
+      const picked = all.filter((b) => b.checked);
+      bulkBtn.disabled = picked.length === 0;
+      bulkCount.textContent = picked.length === 0 ? emptyLabel : t('selected', picked.length);
+      bulkForm.setAttribute('data-confirm', t('confirm_delete_many', picked.length));
+      bulkAll.checked = all.length > 0 && picked.length === all.length;
+      bulkAll.indeterminate = picked.length > 0 && picked.length < all.length;
+    }
+
+    bulkAll.addEventListener('change', () => {
+      for (const b of visibleBoxes()) b.checked = bulkAll.checked;
+      anchor = null;
+      sync();
+    });
+
+    fileList.addEventListener('click', (e) => {
+      const box = e.target.closest && e.target.closest('.file-select input[type="checkbox"]');
+      if (!box) return;
+      const all = visibleBoxes();
+      const from = anchor ? all.indexOf(anchor) : -1;
+      const to = all.indexOf(box);
+      if (e.shiftKey && from >= 0 && to >= 0 && from !== to) {
+        const lo = Math.min(from, to);
+        const hi = Math.max(from, to);
+        for (let i = lo; i <= hi; i++) all[i].checked = box.checked;
+      }
+      anchor = box;
+    });
+    // The count is driven by `change` rather than the click above so it is
+    // right no matter how a box was toggled — label click, keyboard, or shift.
+    fileList.addEventListener('change', sync);
+
+    // A row hidden by the search must not stay selected: it would be deleted
+    // by a button whose count never mentioned it.
+    onListFiltered = () => {
+      for (const b of boxes()) {
+        if (b.closest('.file-item').hidden) b.checked = false;
+      }
+      sync();
+    };
+
+    sync();
   }
 
   // ---- upload page --------------------------------------------------------------

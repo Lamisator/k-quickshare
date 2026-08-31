@@ -37,9 +37,30 @@
   <input type="search" id="file-search" class="search-input" placeholder="{{T .Lang "files.search"}}" autocomplete="off">
 </div>
 
+{{/* The selection checkboxes live inside the list items but belong to this
+     form, which is why they carry form="bulk-delete" instead of the form
+     wrapping the list: a <form> around the <ul> would nest the per-row delete
+     forms inside it, which HTML does not allow. */}}
+<form class="bulk-bar" id="bulk-delete" action="/delete" method="post">
+  <label class="bulk-check">
+    <input type="checkbox" id="bulk-all">
+    <span>{{T .Lang "files.select_all"}}</span>
+  </label>
+  <span class="bulk-count muted" id="bulk-count">{{T .Lang "files.none_selected"}}</span>
+  <button type="submit" class="btn btn-danger btn-sm" id="bulk-delete-btn" disabled>
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+    {{T .Lang "files.delete_selected"}}
+  </button>
+</form>
+
 <ul class="file-list" id="file-list">
   {{range .Files}}
   <li class="file-item{{if .Archived}} file-archived{{end}}" data-search="{{.OriginalName}} {{.ContentType}} {{.UploaderName}}">
+    {{if .CanDelete}}
+    <label class="file-select">
+      <input type="checkbox" form="bulk-delete" name="id" value="{{.ID}}" aria-label="{{T $.Lang "files.select_file" .OriginalName}}">
+    </label>
+    {{end}}
     {{template "fileicon" .IconKind}}
     <div class="file-main">
       <div class="file-name-row">
