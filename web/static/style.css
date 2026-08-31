@@ -1210,6 +1210,89 @@ code {
   gap: 0.4rem;
   flex-shrink: 0;
 }
+
+/* ---- batch groups ---- */
+
+/* The toolbar keeps the search box growing and parks the fold controls at its
+   trailing edge. */
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+.list-toolbar .search-row { flex: 1; margin-bottom: 0; }
+.group-controls { display: flex; gap: 0.4rem; flex-shrink: 0; }
+
+/* The group is a card with a header; its members are plain rows tucked inside
+   it, so the outer <li> carries no border of its own. */
+.file-group { display: block; }
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.8rem 1.05rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.15s ease;
+  cursor: pointer;
+}
+.group-head:hover { border-color: var(--border-strong); }
+/* Collapsed, the header is the whole card; expanded, it grows into the list
+   below it. */
+.file-group:not(.group-collapsed) .group-head {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+.group-head:has(.group-select:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.group-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.group-toggle:hover { background: var(--bg-hover); color: var(--text); }
+/* The caret belongs to the icon beside it, not to the checkbox before it. */
+.group-head .group-toggle { margin-right: -0.35rem; }
+.group-caret { transition: transform 0.15s ease; }
+.group-collapsed .group-caret { transform: rotate(-90deg); }
+.ficon-batch { color: var(--accent-bright); background: var(--accent-soft); }
+
+/* The indent: members sit inside the group card, offset from its left edge so
+   the nesting is visible without a second border around them. */
+.file-sublist {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 0.5rem 0.5rem 2.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-bottom-left-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
+}
+.group-collapsed .file-sublist { display: none; }
+/* A child row is quieter than a top-level one: the share's terms are stated
+   once, in the header above it. */
+.file-child {
+  padding: 0.55rem 0.75rem;
+  background: var(--surface);
+}
 .file-actions form { display: inline; }
 .btn-copy.copied { color: var(--success); border-color: var(--success); }
 
@@ -1951,6 +2034,13 @@ body.bare {
   .main { padding: 1.25rem 0.85rem 2.5rem; }
   .options { grid-template-columns: 1fr; }
   .file-item { flex-wrap: wrap; }
+  .list-toolbar { flex-wrap: wrap; }
+  .list-toolbar .search-row { flex-basis: 100%; }
+  .group-controls { margin-left: auto; }
+  .file-sublist { padding: 0.45rem 0.45rem 0.45rem 1rem; }
+  /* Same as a row: the actions drop to a line of their own rather than
+     squeezing the title to one letter per line. */
+  .group-head { flex-wrap: wrap; gap: 0.6rem; padding: 0.8rem 0.85rem; }
   .file-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
   .stats-row { grid-template-columns: 1fr 1fr; }
 

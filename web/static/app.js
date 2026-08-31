@@ -1326,15 +1326,61 @@
     if (!confirm(form.getAttribute('data-confirm'))) e.preventDefault();
   });
 
+  // ---- history page: batch groups ---------------------------------------------
+  //
+  // Files uploaded in one visit share a link, an expiry and a download counter,
+  // so the server nests them under one group header. Folding is a class on the
+  // group, deliberately not the `hidden` property the search uses: a folded
+  // member is still in the list, and "select all" has to keep meaning every row
+  // the filter left there, folded or not.
+
+  const fileList = document.getElementById('file-list');
+  const groups = () =>
+    fileList ? Array.from(fileList.querySelectorAll('.file-group')) : [];
+
+  function setFolded(group, folded) {
+    group.classList.toggle('group-collapsed', folded);
+    const toggle = group.querySelector('.group-toggle');
+    if (toggle) toggle.setAttribute('aria-expanded', folded ? 'false' : 'true');
+  }
+
+  if (fileList) {
+    fileList.addEventListener('click', (e) => {
+      const head = e.target.closest && e.target.closest('.group-head');
+      if (!head) return;
+      // The whole header folds the group, except where it already carries a
+      // control of its own: the checkbox, the batch link, copy/QR/open.
+      if (e.target.closest('a, label, input, button:not(.group-toggle)')) return;
+      const group = head.closest('.file-group');
+      setFolded(group, !group.classList.contains('group-collapsed'));
+    });
+
+    const expandAll = document.getElementById('expand-all');
+    const collapseAll = document.getElementById('collapse-all');
+    if (expandAll) {
+      expandAll.addEventListener('click', () => {
+        for (const g of groups()) setFolded(g, false);
+      });
+    }
+    if (collapseAll) {
+      collapseAll.addEventListener('click', () => {
+        for (const g of groups()) setFolded(g, true);
+      });
+    }
+  }
+
   // ---- history page: live search ----------------------------------------------
 
   const search = document.getElementById('file-search');
-  const fileList = document.getElementById('file-list');
   // Set by the multi-select block below, which has to react to rows being
   // filtered away; declared here because the search handler runs first.
   let onListFiltered = () => {};
   if (search && fileList) {
     const noResults = document.getElementById('no-results');
+    // A match inside a folded group would otherwise stay invisible, so a live
+    // query opens every group that has one. The fold the user chose is put back
+    // when the query is cleared.
+    let foldMemory = null;
     search.addEventListener('input', () => {
       const q = search.value.trim().toLowerCase();
       let visible = 0;
@@ -1343,6 +1389,20 @@
         li.hidden = !hit;
         if (hit) visible++;
       });
+      const all = groups();
+      if (q && !foldMemory) {
+        foldMemory = new Map(all.map((g) => [g, g.classList.contains('group-collapsed')]));
+      }
+      for (const g of all) {
+        // A group whose every member was filtered away goes with them: its
+        // header would otherwise advertise files the list is not showing.
+        g.hidden = g.querySelectorAll('.file-item:not([hidden])').length === 0;
+        if (q) setFolded(g, false);
+      }
+      if (!q && foldMemory) {
+        for (const [g, folded] of foldMemory) setFolded(g, folded);
+        foldMemory = null;
+      }
       if (noResults) noResults.hidden = visible > 0;
       onListFiltered();
     });
@@ -1362,11 +1422,15 @@
     const emptyLabel = bulkCount.textContent;
     let anchor = null; // last box clicked, for shift-range selection
 
-    const boxes = () =>
-      Array.from(fileList.querySelectorAll('.file-select input[type="checkbox"]'));
+    // A group header's checkbox drives its members and submits nothing itself,
+    // so it never counts as a selectable row.
+    const ROW_BOX = '.file-select input[type="checkbox"]:not(.group-select)';
+    const boxes = () => Array.from(fileList.querySelectorAll(ROW_BOX));
     // Only rows the search leaves visible take part: "select all" has to mean
     // what the list is showing, not what it would show unfiltered.
     const visibleBoxes = () => boxes().filter((b) => !b.closest('.file-item').hidden);
+    const groupBoxes = (group) =>
+      Array.from(group.querySelectorAll(ROW_BOX)).filter((b) => !b.closest('.file-item').hidden);
 
     if (boxes().length === 0) bulkForm.hidden = true;
 
@@ -1378,6 +1442,14 @@
       bulkForm.setAttribute('data-confirm', t('confirm_delete_many', picked.length));
       bulkAll.checked = all.length > 0 && picked.length === all.length;
       bulkAll.indeterminate = picked.length > 0 && picked.length < all.length;
+      for (const g of groups()) {
+        const gb = g.querySelector('.group-select');
+        if (!gb) continue;
+        const mine = groupBoxes(g);
+        const on = mine.filter((b) => b.checked).length;
+        gb.checked = mine.length > 0 && on === mine.length;
+        gb.indeterminate = on > 0 && on < mine.length;
+      }
     }
 
     bulkAll.addEventListener('change', () => {
@@ -1387,7 +1459,7 @@
     });
 
     fileList.addEventListener('click', (e) => {
-      const box = e.target.closest && e.target.closest('.file-select input[type="checkbox"]');
+      const box = e.target.closest && e.target.closest(ROW_BOX);
       if (!box) return;
       const all = visibleBoxes();
       const from = anchor ? all.indexOf(anchor) : -1;
@@ -1401,7 +1473,14 @@
     });
     // The count is driven by `change` rather than the click above so it is
     // right no matter how a box was toggled — label click, keyboard, or shift.
-    fileList.addEventListener('change', sync);
+    fileList.addEventListener('change', (e) => {
+      const gb = e.target.closest && e.target.closest('.group-select');
+      if (gb) {
+        for (const b of groupBoxes(gb.closest('.file-group'))) b.checked = gb.checked;
+        anchor = null;
+      }
+      sync();
+    });
 
     // A row hidden by the search must not stay selected: it would be deleted
     // by a button whose count never mentioned it.

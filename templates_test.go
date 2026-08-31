@@ -23,6 +23,7 @@ func TestTemplatesRender(t *testing.T) {
 		IsAdmin: true, IsSuperAdmin: true, HasPassword: true, OIDCSubject: "sub123"}
 	uid := user.ID.String()
 	batchID := uuid.NewString()
+	loneBatchID := uuid.NewString()
 	files := []File{
 		{ID: uuid.NewString(), OriginalName: "photo.jpg", Size: 12345, ContentType: "image/jpeg",
 			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid, ExpiresAt: &exp,
@@ -31,11 +32,20 @@ func TestTemplatesRender(t *testing.T) {
 			UploadedAt: now, DownloadCount: 1, IconKind: "text", Keyed: true},
 		{ID: uuid.NewString(), OriginalName: "old.zip", Size: 99, ContentType: "application/zip",
 			UploadedAt: now, DownloadCount: 5, Archived: true, CanDelete: true, IconKind: "archive"},
-		// Batch member: links to /b/{batch}, not /files/{id}.
+		// Batch members: two of them, so they fold under a group header that
+		// links to /b/{batch} rather than each row linking for itself.
 		{ID: uuid.NewString(), OriginalName: "in-batch.png", Size: 512, ContentType: "image/png",
 			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid, ExpiresAt: &exp,
 			CanDelete: true, IconKind: "image", BatchID: &batchID},
+		{ID: uuid.NewString(), OriginalName: "in-batch.pdf", Size: 900, ContentType: "application/pdf",
+			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid, ExpiresAt: &exp,
+			CanDelete: true, IconKind: "pdf", BatchID: &batchID},
+		// A batch with one member stays a plain row: there is nothing to fold.
+		{ID: uuid.NewString(), OriginalName: "alone.txt", Size: 12, ContentType: "text/plain",
+			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid,
+			CanDelete: true, IconKind: "text", BatchID: &loneBatchID},
 	}
+	fileGroups, hasBatches := groupFiles(files)
 
 	customBytes := int64(5 << 30)
 	userRows := []UserRow{
@@ -72,8 +82,8 @@ func TestTemplatesRender(t *testing.T) {
 
 	cases := map[string]map[string]any{
 		"index.html": {"MaxUpload": int64(1 << 30)},
-		"history.html": {"Active": "files", "Files": files, "ActiveCount": 2,
-			"TotalSize": int64(999), "TotalDL": 4},
+		"history.html": {"Active": "files", "Groups": fileGroups, "HasBatches": hasBatches,
+			"ActiveCount": 2, "TotalSize": int64(999), "TotalDL": 4},
 		"login.html": {"User": (*User)(nil), "OIDCEnabled": true, "Next": "/", "Error": "x"},
 		"account.html": {"Active": "account", "Error": "", "Success": "ok",
 			"StepUpRequired": false, "MinPasswordLen": minPasswordLen},
@@ -334,6 +344,62 @@ func TestTranslationsComplete(t *testing.T) {
 				t.Errorf("key %q missing %s translation", key, lang)
 			}
 		}
+	}
+}
+
+// TestGroupFilesFolding pins how the history list folds. A batch has to appear
+// once, at the position of its newest member, with the whole share summed under
+// it; anything else — a lone file, or a batch that only ever held one file —
+// has to stay the plain row it was, or the list would grow a fold control that
+// hides nothing.
+func TestGroupFilesFolding(t *testing.T) {
+	b1, b2 := "batch-1", "batch-2"
+	files := []File{
+		{ID: "a", Size: 100, BatchID: &b1, CanDelete: true},
+		{ID: "b", Size: 10},
+		{ID: "c", Size: 200, BatchID: &b1},
+		{ID: "d", Size: 5, BatchID: &b2, CanDelete: true},
+		{ID: "e", Size: 300, BatchID: &b1, CanDelete: true},
+	}
+	groups, batched := groupFiles(files)
+	if !batched {
+		t.Fatal("batched = false with a multi-member batch present")
+	}
+	if len(groups) != 3 {
+		t.Fatalf("got %d groups, want 3", len(groups))
+	}
+
+	// batch-1 keeps the slot of its newest member — ahead of the lone file that
+	// was uploaded after its second member.
+	g := groups[0]
+	if !g.IsBatch() || g.BatchID != b1 || g.Count() != 3 {
+		t.Errorf("group 0 = %+v, want the 3-file batch-1", g)
+	}
+	if g.Size != 600 {
+		t.Errorf("batch-1 size = %d, want 600", g.Size)
+	}
+	if g.Deletable != 2 {
+		t.Errorf("batch-1 deletable = %d, want 2", g.Deletable)
+	}
+	if g.Head().ID != "a" {
+		t.Errorf("batch-1 head = %q, want the newest member \"a\"", g.Head().ID)
+	}
+	for i, want := range []string{"a", "c", "e"} {
+		if g.Files[i].ID != want {
+			t.Errorf("batch-1 member %d = %q, want %q", i, g.Files[i].ID, want)
+		}
+	}
+
+	if groups[1].IsBatch() || groups[1].Files[0].ID != "b" || groups[1].BatchID != "" {
+		t.Errorf("group 1 = %+v, want the unbatched file \"b\"", groups[1])
+	}
+	// One member: a batch id, but nothing to fold.
+	if groups[2].IsBatch() || groups[2].Files[0].ID != "d" || groups[2].BatchID != b2 {
+		t.Errorf("group 2 = %+v, want the single-member batch-2", groups[2])
+	}
+
+	if _, batched := groupFiles(files[1:2]); batched {
+		t.Error("batched = true for a list with no batch in it")
 	}
 }
 

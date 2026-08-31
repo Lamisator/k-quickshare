@@ -317,6 +317,22 @@ func loadTemplates() (*template.Template, error) {
 			return t.UTC().Format(time.RFC3339)
 		},
 		"until": humanUntil,
+		// A {{template}} call carries one value, and the file-row partial needs
+		// both the file and the language the page is rendering in.
+		"dict": func(kv ...any) (map[string]any, error) {
+			if len(kv)%2 != 0 {
+				return nil, fmt.Errorf("dict: odd argument count")
+			}
+			m := make(map[string]any, len(kv)/2)
+			for i := 0; i < len(kv); i += 2 {
+				k, ok := kv[i].(string)
+				if !ok {
+					return nil, fmt.Errorf("dict: key %d is not a string", i)
+				}
+				m[k] = kv[i+1]
+			}
+			return m, nil
+		},
 	}
 	tmpl := template.New("").Funcs(funcs)
 	return tmpl.ParseFS(templatesFS, "web/templates/*.html")

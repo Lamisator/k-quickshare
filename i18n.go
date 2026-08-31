@@ -222,6 +222,13 @@ var translations = map[string]map[string]string{
 	"files.keyed":         {"en": "key in link", "de": "Schlüssel im Link"},
 	"files.keyed_tip":     {"en": "The decryption key is only part of the original share link — the server doesn't store it. Copy the link right after uploading.", "de": "Der Entschlüsselungsschlüssel ist nur Teil des ursprünglichen Freigabe-Links — der Server speichert ihn nicht. Kopiere den Link direkt nach dem Hochladen."},
 
+	// --- batch grouping in the file list ---
+	"files.batch_of":     {"en": "%d files in one share", "de": "%d Dateien in einer Freigabe"},
+	"files.expand_all":   {"en": "Expand all", "de": "Alle ausklappen"},
+	"files.collapse_all": {"en": "Collapse all", "de": "Alle einklappen"},
+	"files.toggle_group": {"en": "Show or hide the files in this share", "de": "Dateien dieser Freigabe ein- oder ausblenden"},
+	"files.select_batch": {"en": "Select every file in this share", "de": "Alle Dateien dieser Freigabe auswählen"},
+
 	// --- file list multi-select ---
 	"files.select_all":      {"en": "Select all", "de": "Alle auswählen"},
 	"files.select_file":     {"en": "Select “%s”", "de": "„%s“ auswählen"},

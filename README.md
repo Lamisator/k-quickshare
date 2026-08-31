@@ -39,6 +39,9 @@ dependencies beyond the two containers.
 **Sharing**
 - Drag-and-drop upload with per-file progress, transfer rate, cancel and retry.
 - Every file uploaded in one visit is collected under **one share link**.
+- **My files** folds each of those batches into a collapsible group — the share's
+  terms are stated once on the header, its members indented beneath it, and the
+  whole group selects, expands or collapses in one click.
 - Recipients download files individually or all at once as a ZIP built in their browser.
 - Inline preview for images, video, audio, PDF and text.
 - Expiry by preset or an arbitrary date; download limits; optional share password.
@@ -265,6 +268,16 @@ A batch member is reachable **only** through its batch. `/files/{id}/raw` return
 404 for anything with a `batch_id`, and `/files/{id}` redirects to the batch —
 otherwise a member's UUID would serve its bytes with the batch's password, expiry
 and limit all bypassed.
+
+In **My files** the members of a batch are listed under one group header rather
+than as separate rows: they share a link, an expiry and a download counter, so
+repeating those on every row would state the same terms five times over — and,
+worse, imply five links. The header carries them, along with the copy/QR/open
+buttons; the rows below it keep only what is theirs, their name, size and their
+own delete button. A batch that only ever held one file stays a plain row, since
+there is nothing to fold. Groups start expanded and can be folded individually or
+all at once; a filter query reaches into folded groups and opens the ones that
+match, and the folds you chose come back when the query is cleared.
 
 Two consequences worth knowing:
 

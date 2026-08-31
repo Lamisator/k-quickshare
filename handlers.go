@@ -43,6 +43,55 @@ type File struct {
 	BatchID       *string // set when this file is shared as part of a batch link
 }
 
+// FileGroup is one row of the history list. Files uploaded in one visit share a
+// batch id, one link, one expiry and one download counter, so they fold under a
+// single collapsible header instead of repeating those terms on every row. A
+// file with no batch — or the only member of one — is a group of one and
+// renders as an ordinary row.
+type FileGroup struct {
+	BatchID   string
+	Files     []File
+	Size      int64 // members summed: what the share as a whole weighs
+	Deletable int   // members this viewer may delete, which the group checkbox drives
+}
+
+// Head is the member whose share terms stand for the whole group: the batch,
+// not the member, owns the expiry, the limit and the lock, and handleHistory
+// coalesces those onto every row, so the first member carries them all.
+func (g FileGroup) Head() File    { return g.Files[0] }
+func (g FileGroup) Count() int    { return len(g.Files) }
+func (g FileGroup) IsBatch() bool { return len(g.Files) > 1 }
+
+// groupFiles folds batch members together while keeping the list newest-first:
+// a batch takes the position of its newest member, and later members join it
+// there instead of appearing again further down.
+func groupFiles(files []File) (groups []FileGroup, batched bool) {
+	at := make(map[string]int, len(files))
+	for _, f := range files {
+		if f.BatchID != nil {
+			if i, ok := at[*f.BatchID]; ok {
+				groups[i].Files = append(groups[i].Files, f)
+				groups[i].Size += f.Size
+				if f.CanDelete {
+					groups[i].Deletable++
+				}
+				batched = true
+				continue
+			}
+			at[*f.BatchID] = len(groups)
+		}
+		g := FileGroup{Files: []File{f}, Size: f.Size}
+		if f.BatchID != nil {
+			g.BatchID = *f.BatchID
+		}
+		if f.CanDelete {
+			g.Deletable = 1
+		}
+		groups = append(groups, g)
+	}
+	return groups, batched
+}
+
 // --- pages ----------------------------------------------------------------
 
 func (a *App) handleUploadPage(w http.ResponseWriter, r *http.Request) {
@@ -156,10 +205,13 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	groups, batched := groupFiles(files)
+
 	a.render(w, r, "history.html", map[string]any{
 		"Title":       a.tr(r, "title.files") + " · Pyxis",
 		"Active":      "files",
-		"Files":       files,
+		"Groups":      groups,
+		"HasBatches":  batched,
 		"ActiveCount": activeCount,
 		"TotalSize":   totalSize,
 		"TotalDL":     totalDL,
