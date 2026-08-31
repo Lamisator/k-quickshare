@@ -25,6 +25,38 @@
   // falls back to the generic page rather than rendering an empty box.
   const ICON_KINDS = ['image', 'video', 'audio', 'pdf', 'text', 'doc', 'archive', 'generic'];
 
+  // From container version 5 the server is told nothing about a file's type, so
+  // it can no longer pick the icon or decide whether a preview is on offer.
+  // Both moves here, where the type is known — it comes out of the sealed name
+  // blob, which costs one short decryption and no ciphertext at all. These two
+  // mirror iconKind() and previewKind() in handlers.go, which still run for
+  // shares written before version 5.
+  function iconKindFor(contentType, name) {
+    const ct = String(contentType || '').toLowerCase().split(';')[0].trim();
+    const dot = String(name || '').lastIndexOf('.');
+    const ext = dot > 0 ? String(name).slice(dot + 1).toLowerCase() : '';
+    if (ct.startsWith('image/')) return 'image';
+    if (ct.startsWith('video/')) return 'video';
+    if (ct.startsWith('audio/')) return 'audio';
+    if (ct === 'application/pdf' || ext === 'pdf') return 'pdf';
+    if (ct.startsWith('text/') || ct === 'application/json' || ct === 'application/xml') return 'text';
+    if (['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst', '7z', 'rar'].indexOf(ext) >= 0) return 'archive';
+    if (['doc', 'docx', 'odt', 'xls', 'xlsx', 'ods', 'ppt', 'pptx', 'odp'].indexOf(ext) >= 0) return 'doc';
+    return 'generic';
+  }
+
+  function previewKindFor(contentType, size) {
+    const ct = String(contentType || '').toLowerCase().split(';')[0].trim();
+    if (ct.startsWith('image/')) return 'image';
+    if (ct.startsWith('video/')) return 'video';
+    if (ct.startsWith('audio/')) return 'audio';
+    if (ct === 'application/pdf') return 'pdf';
+    if (ct.startsWith('text/') || ct === 'application/json' || ct === 'application/xml') {
+      return Number(size) <= 2 * 1024 * 1024 ? 'text' : '';
+    }
+    return '';
+  }
+
   function fileIcon(kind) {
     const k = ICON_KINDS.indexOf(kind) >= 0 ? kind : 'generic';
     const span = document.createElement('span');
@@ -297,8 +329,13 @@
     const E2E = window.PYXIS_E2E;
     const fileId = e2eRoot.getAttribute('data-file');
     const mode = e2eRoot.getAttribute('data-mode');
-    const fileType = e2eRoot.getAttribute('data-type');
-    const previewKind = e2eRoot.getAttribute('data-preview-kind');
+    let fileType = e2eRoot.getAttribute('data-type');
+    const fileSize = Number(e2eRoot.getAttribute('data-size')) || 0;
+    // Empty from container version 5 on: the server no longer knows the type,
+    // so it cannot decide whether a preview is on offer. The sealed name blob
+    // settles both, before any ciphertext is fetched.
+    let previewKind = e2eRoot.getAttribute('data-preview-kind');
+    const previewsAllowed = e2eRoot.getAttribute('data-limited') !== '1';
     const errBox = document.getElementById('e2e-error');
     const warnBox = document.getElementById('e2e-warning');
     const keyMissing = document.getElementById('key-missing');
@@ -340,6 +377,18 @@
       try {
         const opened = await E2E.openName(nameKey, manifestID, E2E.b64uDecode(encNameAttr));
         showName(opened.name);
+        if (opened.type) {
+          fileType = opened.type;
+          const icon = document.querySelector('.dl-file-head .ficon');
+          if (icon) icon.replaceWith(fileIcon(iconKindFor(fileType, opened.name)));
+          const meta = document.querySelector('.dl-file-title .muted');
+          if (meta) meta.textContent = fmtSize(fileSize) + ' · ' + fileType;
+          // The server sent no preview kind for a version 5 share; now that the
+          // type is known, this page can make that decision itself.
+          if (!previewKind && previewsAllowed) {
+            previewKind = previewKindFor(fileType, fileSize);
+          }
+        }
       } catch (err) {
         warn(t('name_unsealable'));
       }
@@ -572,9 +621,16 @@
         try {
           const opened = await E2E.openName(nameKey, m.manifestId, E2E.b64uDecode(m.encName));
           m.name = opened.name;
-          // The type it was sealed with is authenticated; the column beside it
-          // is not, so prefer the sealed one for what the page shows.
+          // The type it was sealed with is authenticated, and from container
+          // version 5 it is the ONLY copy: the server has none. The icon and
+          // the preview decision follow from it here rather than arriving with
+          // the listing.
           if (opened.type) m.contentType = opened.type;
+          m.iconKind = iconKindFor(m.contentType, m.name);
+          // A limited batch offers no previews at all — pulling one spends a
+          // download slot — and the server says so by sending previewKind
+          // empty for every member. Only widen that when it is allowed to.
+          if (m.previewsAllowed) m.previewKind = previewKindFor(m.contentType, m.size);
         } catch (err) {
           // A name that will not open under this link's key is a name this page
           // has no business guessing at.
@@ -791,7 +847,7 @@
         name.title = m.name;
         const sub = document.createElement('span');
         sub.className = 'batch-row-sub muted';
-        sub.textContent = fmtSize(m.size) + ' · ' + m.contentType;
+        sub.textContent = m.contentType ? fmtSize(m.size) + ' · ' + m.contentType : fmtSize(m.size);
         sub.title = sub.textContent;
         meta.appendChild(name);
         meta.appendChild(sub);
@@ -1425,11 +1481,12 @@
     }
   }
 
-  function rememberName(id, name) {
+  function rememberName(id, name, type) {
     if (!id || !name) return;
     try {
       const store = readNameStore();
-      store[id] = name;
+      // {n, t}; a bare string is what earlier versions wrote and is still read.
+      store[id] = { n: name, t: type || '' };
       const ids = Object.keys(store);
       // Oldest first: JSON objects keep insertion order for string keys, so
       // trimming the front drops what was learned longest ago.
@@ -1458,8 +1515,20 @@
     const store = readNameStore();
     for (const el of rows) {
       const li = el.closest('.file-item');
-      const name = li && store[li.getAttribute('data-id')];
+      const entry = li && store[li.getAttribute('data-id')];
+      if (!entry) continue;
+      const name = typeof entry === 'string' ? entry : entry.n;
+      const type = typeof entry === 'string' ? '' : entry.t;
       if (!name) continue;
+      // The server sends the generic icon for a version 5 row, having no idea
+      // what the file is. This browser does know, for its own uploads.
+      const use = li.querySelector('.ficon-svg use');
+      const icon = li.querySelector('.ficon');
+      if (use && icon && (type || name)) {
+        const kind = iconKindFor(type, name);
+        use.setAttribute('href', '#fi-' + kind);
+        icon.className = 'ficon ficon-' + kind;
+      }
       el.textContent = name;
       el.classList.remove('file-name-sealed');
       el.classList.add('file-name-remembered');
@@ -2082,7 +2151,6 @@
       fd.append('e2e_version', String(E2E.VERSION));
       fd.append('manifest', E2E.b64uEncode(manifestBytes));
       fd.append('plain_size', String(file.size));
-      fd.append('content_type', file.type || 'application/octet-stream');
     } catch (err) {
       if (err && err.name === 'AbortError') return; // cancel handler already rendered
       fail('e2e_failed', t('reason_encrypt', (err && err.message) || String(err)));
@@ -2138,7 +2206,7 @@
         if (created && created.id) {
           // This browser sealed the name a moment ago, so it is the one place
           // that can still read it without the link.
-          rememberName(created.id, file.name);
+          rememberName(created.id, file.name, file.type || 'application/octet-stream');
           recordMember(created.id, file, manifestBytes);
         } else {
           // Without the server's row id the member cannot be entered into the

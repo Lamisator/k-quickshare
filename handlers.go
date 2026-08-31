@@ -175,6 +175,7 @@ func (a *App) renderFileList(w http.ResponseWriter, r *http.Request, everyone bo
 		var (
 			f            File
 			origName     *string
+			contentType  *string
 			encName      []byte
 			uploaderID   *string
 			uploader     *string
@@ -184,7 +185,7 @@ func (a *App) renderFileList(w http.ResponseWriter, r *http.Request, everyone bo
 			keyMode      int
 			batchKeyMode *int
 		)
-		if err := rows.Scan(&f.ID, &origName, &encName, &f.StoredName, &f.Size, &f.ContentType,
+		if err := rows.Scan(&f.ID, &origName, &encName, &f.StoredName, &f.Size, &contentType,
 			&f.UploadedAt, &uploaderID, &uploader,
 			&expires, &f.HasPassword, &maxDL, &f.DownloadCount, &archivedAt, &keyMode,
 			&f.BatchID, &batchKeyMode); err != nil {
@@ -193,6 +194,9 @@ func (a *App) renderFileList(w http.ResponseWriter, r *http.Request, everyone bo
 		}
 		if origName != nil {
 			f.OriginalName = *origName
+		}
+		if contentType != nil {
+			f.ContentType = *contentType
 		}
 		if len(encName) > 0 {
 			f.EncName = base64.RawURLEncoding.EncodeToString(encName)
@@ -217,9 +221,9 @@ func (a *App) renderFileList(w http.ResponseWriter, r *http.Request, everyone bo
 			(expires != nil && time.Now().After(*expires)) ||
 			(f.HasLimit && f.DownloadCount >= f.MaxDL)
 		f.CanDelete = user.IsAdmin || (uploaderID != nil && *uploaderID == user.ID.String())
-		// The extension is not always available any more — a sealed name has
-		// none the server can see — so the icon comes from the MIME type, and
-		// the page refines it once the browser has opened the name.
+		// Neither the name nor the type is available for a version 5 row, so
+		// the icon is the generic one and the page refines it only where a
+		// browser can open the sealed blob — or, in a list, remembers it.
 		f.IconKind = iconKind(f.ContentType, f.OriginalName)
 		if !f.Archived {
 			activeCount++
@@ -542,9 +546,10 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Version 1 is still read — old shares must keep opening — but writing it
-	// again would mean storing a file whose length, chunk count and name
-	// nothing authenticates, which is the whole reason the manifest exists.
+	// Older versions are still read — old shares must keep opening — but
+	// writing one again would mean storing a file whose metadata the server can
+	// read (versions 1-4) or which nothing authenticates (version 1), and both
+	// are the reason the current version exists.
 	//
 	// Checked after the size limit so an over-large file still gets told its
 	// size and the limit, which is the answer the person uploading can act on.
@@ -552,7 +557,10 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if verr != nil || e2eVersion < e2eMinUploadVersion || e2eVersion > e2eCurrentVersion {
 		dst.Close()
 		_ = os.Remove(dstPath)
-		http.Error(w, fmt.Sprintf("uploads must use e2e_version %d..%d",
+		// A browser holding a cached e2e.js from before version 5 lands here.
+		// Say what to do about it: the alternative to reloading is storing one
+		// more file the server can describe.
+		http.Error(w, fmt.Sprintf("uploads must use e2e_version %d..%d — reload the page and try again",
 			e2eMinUploadVersion, e2eCurrentVersion), http.StatusBadRequest)
 		return
 	}
@@ -590,9 +598,13 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	} else if e2eVersion >= e2eVersionV4 {
 		switch {
 		case len(encName) == 0:
-			nerr = errors.New("an e2e_version 4 upload must carry a sealed enc_name")
+			nerr = fmt.Errorf("an e2e_version %d upload must carry a sealed enc_name", e2eVersion)
 		case len(encName) > maxEncNameLen:
 			nerr = fmt.Errorf("enc_name is %d bytes, the maximum is %d", len(encName), maxEncNameLen)
+		case e2eVersion >= e2eVersionV5 && !validEncNameLen(len(encName)):
+			// An unpadded blob would leak the length of the name inside it,
+			// which is exactly what the padding is for.
+			nerr = fmt.Errorf("enc_name is %d bytes, which is not a padded sealed name", len(encName))
 		}
 	} else if len(encName) > 0 {
 		nerr = fmt.Errorf("enc_name needs e2e_version %d or newer", e2eVersionV4)
@@ -655,15 +667,19 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Type comes from the MANIFEST, not from the multipart headers or a side
-	// form field. Those are unauthenticated: a downloader has no way to tell
-	// whether what it is shown is what the sender chose. The manifest travels
-	// inside the AAD of every chunk, so taking the stored column from it keeps
-	// what the pages display in step with what the browser can verify after
-	// decrypting.
-	contentType := manifest.Type
-	if contentType == "" {
-		contentType = "application/octet-stream"
+	// From version 5 the server stores no type at all: the manifest carries
+	// none, the client sends none, and the only copy is inside the sealed blob.
+	// Before that, the type came from the MANIFEST rather than the multipart
+	// headers or a side form field — those are unauthenticated, and a
+	// downloader would have no way to tell whether what it was shown is what
+	// the sender chose.
+	var contentType *string
+	if e2eVersion < e2eVersionV5 {
+		ct := manifest.Type
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		contentType = &ct
 	}
 	// From version 4 there is no name to store: the column stays NULL and the
 	// sealed blob is the only copy the server holds. Older versions keep
@@ -826,14 +842,14 @@ func (a *App) dispatchFileRoutes(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	fm := &fileMeta{ID: id.String()}
-	var origName *string
+	var origName, contentType *string
 	err := a.db.QueryRow(r.Context(),
 		`SELECT original_name, enc_name, stored_name, size_bytes, content_type, uploaded_at,
 		        expires_at, max_downloads, download_count,
 		        key_mode, enc_salt, auth_verifier, archived_at, batch_id,
 		        e2e_version, manifest
 		 FROM files WHERE id = $1`, id.String()).
-		Scan(&origName, &fm.EncName, &fm.StoredName, &fm.Size, &fm.ContentType, &fm.UploadedAt,
+		Scan(&origName, &fm.EncName, &fm.StoredName, &fm.Size, &contentType, &fm.UploadedAt,
 			&fm.ExpiresAt, &fm.MaxDownloads, &fm.DownloadCount,
 			&fm.KeyMode, &fm.EncSalt, &fm.AuthVerifier, &fm.ArchivedAt, &fm.BatchID,
 			&fm.E2EVersion, &fm.Manifest)
@@ -842,6 +858,9 @@ func (a *App) loadFileMeta(r *http.Request, id uuid.UUID) (*fileMeta, error) {
 	}
 	if origName != nil {
 		fm.OriginalName = *origName
+	}
+	if contentType != nil {
+		fm.ContentType = *contentType
 	}
 	return fm, nil
 }

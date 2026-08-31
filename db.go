@@ -276,6 +276,21 @@ var migrations = []migration{
 			`ALTER TABLE files ALTER COLUMN original_name DROP NOT NULL`,
 		},
 	},
+	{
+		version: 8,
+		name:    "sealed_content_types",
+		// Sealing the name left the MIME type in the clear, in this column and
+		// in the manifest, which still described every file well enough to
+		// count someone's photographs. Container version 5 seals the type
+		// alongside the name and writes neither here.
+		//
+		// Existing rows keep their type for the same reason they keep their
+		// name: their manifests carry it, and a manifest is the AAD of every
+		// chunk, so it cannot be rewritten. They age out with the share.
+		stmts: []string{
+			`ALTER TABLE files ALTER COLUMN content_type DROP NOT NULL`,
+		},
+	},
 }
 
 // migrateUsernameCaseUnique adds the case-insensitive uniqueness constraint,

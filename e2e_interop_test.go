@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -44,12 +45,18 @@ const (
 	// A name sealed by the browser under jsNameKeyHex for the manifest id below.
 	// The nonce is random, so this is one captured blob rather than a value Go
 	// can recompute — which is the point: the server stores it and can say
-	// nothing about what is inside.
-	jsSealedNamePlain = "quarterly-report.pdf"
-	jsSealedName      = "duuaynm5f8_9SzN4cMjgnLUkNtud5rUfGVCBnT0k8KVG7mXSXJZDkmomqj-Vmss2HgImiAaLr8V23lskxbQ-XTXIOq-dpnZK0UjqH-z0SUMRdHeKQBcpDhCp"
+	// nothing about what is inside. It is padded, so its length says nothing
+	// about the name's length either: 12-byte nonce + 512-byte padded body +
+	// 16-byte tag, for every ordinary name there is.
+	jsSealedNamePlain = "a.txt"
+	jsSealedName      = "FPCCFybCBlG0gANQkqSAdFnsB5jHSE-G4NdbIHnGF_ytPW8sZ2IrqDgr2YUpESPpizeUXzB4lrEc2zzHHx6z9hGmqfV9LrUoVl9Yw4wGE5y0kX2eTrGVgEpulbJUqTNzRSPHYaTOaYNI10QiMQ-21DdXSqEGgUimq03V4B1O2BKxRjIMttqYfgRZjgPrK4SKSgsfWwgXmqlVzL6ubDfC7o4zXtPd-5901AYOdcRXdrmeIjCQZaSUZ6DsPFXcY9oyc3SKhscKwmO8JK77icpuTjNuCAMh7bY_54k7XUjaih_80fwrKHP_B9lg1O4sC20nbeeRsouxbUXfF5yVPVY6uE-ZzXSj6o54RdBqm1k3nb1WIkU6pizdO3u8Q89x48qTCFf4kMEqurZ1EQZ6ofpFYYmoTqricweiHurEpS-OOqd88TqYTJUFK4yJgWE1CrKPS7oEfqcKy4IEWQ271NMq999SQA7HEX6SCuVqNiJFimZP5re5kKPzt3dFEtj7rcW8VxmVJlF8CH9X6X-Qwygj6pyA3hr4egFedbu_vq6faI1977YcrA3ijX3HVXCyP3ZWBCwVsnB6LLXX4vcx2__333gzTamTqLftOfjxU2Yzl1wxkvKD__M6byX1ULwQAdiQUZMvPHO_xAZItXOqYngxmw7vfi-hC5IOJOOgcUsoHmJuJrj8d2oKp1OvA3CxGgWtFHgtfTBx9tSpKftp"
 
-	// The version 4 manifest for that same file, as e2e.js writes it: no name.
+	// The version 4 manifest for that file: no name, but still a type.
 	jsV4ManifestJSON = `{"v":4,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"type":"application/pdf"}`
+
+	// The version 5 manifest, as e2e.js writes it: nothing about the content at
+	// all, only what the ciphertext's own length already gives away.
+	jsV5ManifestJSON = `{"v":5,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536}`
 
 	jsPlainLen = 197842
 
@@ -388,29 +395,77 @@ func TestParseManifestRejectsInconsistentUploads(t *testing.T) {
 	}
 }
 
-// TestManifestV4CarriesNoName pins the rule that makes version 4 worth having.
-// A manifest is stored and served in the clear — it is the AAD, so it cannot be
-// encrypted — which means anything in it is something the server knows and can
-// hand to anyone who asks. From version 4 the name is not in it, and a client
-// that puts one there anyway is refused rather than quietly stored.
-func TestManifestV4CarriesNoName(t *testing.T) {
+// TestManifestKeepsNothingAboutTheContent pins the rule these versions exist
+// for. A manifest is stored and served in the clear — it is the AAD, so it
+// cannot be encrypted — which means anything in it is something the server
+// knows and can hand to anyone who asks. Version 4 took out the name, version 5
+// the type; a client that puts either back is refused rather than stored.
+func TestManifestKeepsNothingAboutTheContent(t *testing.T) {
 	const id = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
-	withName := `{"v":4,"id":"` + id + `","batch":"","size":0,"chunks":1,"chunk":65536,"name":"secret-plans.pdf","type":"t"}`
-	if _, err := parseManifest([]byte(withName), 0, "", e2eVersionV4); err == nil {
-		t.Error("a version 4 manifest carrying a name was accepted; the name would be readable by the server")
+	head := `{"v":%d,"id":"` + id + `","batch":"","size":0,"chunks":1,"chunk":65536`
+
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		version int
+	}{
+		{"version 4 carrying a name", fmt.Sprintf(head, 4) + `,"name":"secret-plans.pdf","type":"t"}`, e2eVersionV4},
+		{"version 5 carrying a name", fmt.Sprintf(head, 5) + `,"name":"secret-plans.pdf"}`, e2eVersionV5},
+		{"version 5 carrying a type", fmt.Sprintf(head, 5) + `,"type":"image/jpeg"}`, e2eVersionV5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseManifest([]byte(tc.raw), 0, "", tc.version); err == nil {
+				t.Error("accepted a manifest that hands the server what the version exists to hide")
+			}
+		})
 	}
-	m, err := parseManifest([]byte(jsV4ManifestJSON), 0, "", e2eVersionV4)
+
+	m, err := parseManifest([]byte(jsV5ManifestJSON), 0, "", e2eVersionV5)
 	if err != nil {
-		t.Fatalf("a nameless version 4 manifest was rejected: %v", err)
+		t.Fatalf("the browser's own version 5 manifest was rejected: %v", err)
 	}
-	if m.Name != "" {
-		t.Errorf("parsed name = %q, want empty", m.Name)
+	if m.Name != "" || m.Type != "" {
+		t.Errorf("parsed name = %q, type = %q, want both empty", m.Name, m.Type)
 	}
-	// The rule only applies from version 4: a version 3 manifest must still
-	// carry its name, because that is the only copy those shares have.
-	older := `{"v":3,"id":"` + id + `","batch":"","size":0,"chunks":1,"chunk":65536,"type":"t"}`
-	if _, err := parseManifest([]byte(older), 0, "", e2eVersionV3); err == nil {
+
+	// The rules apply from their own version onwards, and not before: those
+	// shares have no other copy of what their manifests carry.
+	if _, err := parseManifest([]byte(jsV4ManifestJSON), 0, "", e2eVersionV4); err != nil {
+		t.Errorf("a version 4 manifest with a type was rejected: %v", err)
+	}
+	if _, err := parseManifest([]byte(fmt.Sprintf(head, 3)+`,"type":"t"}`), 0, "", e2eVersionV3); err == nil {
 		t.Error("a version 3 manifest with no name was accepted")
+	}
+	if _, err := parseManifest([]byte(fmt.Sprintf(head, 4)+`}`), 0, "", e2eVersionV4); err == nil {
+		t.Error("a version 4 manifest with no type was accepted")
+	}
+}
+
+// TestSealedNameLengthSaysNothing pins the padding. Without it the sealed blob
+// is exactly as long as the name inside it, so the column would still be
+// telling anyone holding the database how long each file's name is.
+func TestSealedNameLengthSaysNothing(t *testing.T) {
+	sealed, err := base64.RawURLEncoding.DecodeString(jsSealedName)
+	if err != nil {
+		t.Fatalf("vector is not base64url: %v", err)
+	}
+	// The browser sealed a five-character name into this. Anything shorter than
+	// a full pad block would mean the padding had stopped happening.
+	if len(sealed) != encNameExact {
+		t.Errorf("sealed %q is %d bytes, want the padded %d", jsSealedNamePlain, len(sealed), encNameExact)
+	}
+	if !validEncNameLen(len(sealed)) {
+		t.Error("the browser's own sealed name is rejected by the server's length rule")
+	}
+	for _, n := range []int{0, 28, 27 + encNamePad, 29 + encNamePad, encNameExact + 1, maxEncNameLen + encNamePad} {
+		if validEncNameLen(n) {
+			t.Errorf("accepted %d bytes, which no padded sealed name can be", n)
+		}
+	}
+	// Two pad blocks is a long name, and still a length the server accepts —
+	// the point is that it is a bucket, not a measurement.
+	if !validEncNameLen(encNameNonce + 2*encNamePad + gcmOverhead) {
+		t.Error("a two-block sealed name was rejected")
 	}
 }
 
@@ -423,8 +478,8 @@ func TestSealedNameMatchesBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("vector is not base64url: %v", err)
 	}
-	// 12-byte nonce, then AES-GCM over a short JSON body, then a 16-byte tag.
-	if len(sealed) <= 12+gcmOverhead {
+	// 12-byte nonce, then AES-GCM over the padded body, then a 16-byte tag.
+	if len(sealed) <= encNameNonce+gcmOverhead {
 		t.Fatalf("sealed name is %d bytes, too short to be nonce+ciphertext+tag", len(sealed))
 	}
 	if len(sealed) > maxEncNameLen {
@@ -490,6 +545,9 @@ func TestContainerGeometryPerVersion(t *testing.T) {
 		{e2eVersionV3, 0, containerHeaderFixed + manifestLen + gcmOverhead},
 		{e2eVersionV3, chunkPlainSize + 1,
 			containerHeaderFixed + manifestLen + chunkPlainSize + 1 + 2*gcmOverhead},
+		// Versions 4 and 5 changed what the manifest says, not the geometry.
+		{e2eVersionV4, 0, containerHeaderFixed + manifestLen + gcmOverhead},
+		{e2eVersionV5, 0, containerHeaderFixed + manifestLen + gcmOverhead},
 	}
 	for _, c := range cases {
 		if got := e2eCipherLen(c.plain, manifestLen, c.version); got != c.want {
@@ -502,6 +560,15 @@ func TestContainerGeometryPerVersion(t *testing.T) {
 	}
 	if e2eHeaderLen(manifestLen, e2eVersionV3) != containerHeaderFixed+manifestLen {
 		t.Error("version 3 header length does not follow the manifest")
+	}
+	if e2eHeaderLen(manifestLen, e2eVersionV5) != containerHeaderFixed+manifestLen {
+		t.Error("version 5 header length does not follow the manifest")
+	}
+	// Each version's magic must be its own, or a reader could be talked into
+	// interpreting one format as another.
+	if bytes.Equal(magicForVersion(e2eVersionV3), magicForVersion(e2eVersionV4)) ||
+		bytes.Equal(magicForVersion(e2eVersionV4), magicForVersion(e2eVersionV5)) {
+		t.Error("two container versions share a magic")
 	}
 }
 

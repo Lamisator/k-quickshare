@@ -72,22 +72,39 @@ const (
 	//     server stores and cannot open. A listing decrypts names on their own,
 	//     without fetching ciphertext; the manifest id is the blob's AAD, so a
 	//     name still belongs to exactly one file.
+	// 5 — version 4 with the MIME TYPE taken out of the manifest as well:
+	//         "PYX5" || uint16be manifestLen || manifest || chunks…
+	//     Version 4 sealed the name and left the type, which still told the
+	//     server that an account had uploaded eleven 7 MB JPEGs under one link.
+	//     A version 5 manifest says nothing about the content at all — version,
+	//     id, batch, size and chunk geometry, every one of which is derivable
+	//     from the ciphertext the server is already holding. The type joins the
+	//     name in the sealed blob, which is padded from that point on so its
+	//     length gives away nothing either.
 	e2eVersionLegacy = 1
 	e2eVersionV2     = 2
 	e2eVersionV3     = 3
 	e2eVersionV4     = 4
+	e2eVersionV5     = 5
 
-	// What new uploads may declare. Versions 2 and 3 are still accepted because
-	// their integrity guarantee is identical to version 4's — they merely leak
-	// the name — and refusing them would break a browser holding a cached copy
-	// of the previous e2e.js mid-session.
-	e2eMinUploadVersion = e2eVersionV2
-	e2eCurrentVersion   = e2eVersionV4
+	// What new uploads may declare. Older versions are read for as long as their
+	// shares live, but nothing may be WRITTEN in a format that hands the server
+	// a name or a type: that is the whole point of version 5, and accepting one
+	// more version 4 upload would mean one more file the server can describe. A
+	// browser holding a cached e2e.js is told to reload rather than indulged.
+	e2eMinUploadVersion = e2eVersionV5
+	e2eCurrentVersion   = e2eVersionV5
 
-	// A sealed name is 12-byte nonce || AES-GCM(short JSON) || 16-byte tag. The
-	// ceiling is generous for a file name and still far too small to smuggle
-	// anything through the column.
-	maxEncNameLen = 1024
+	// A sealed name is 12-byte nonce || AES-GCM(padded body) || 16-byte tag, and
+	// from blob version 2 the body is padded to a multiple of encNamePad. Every
+	// ordinary name therefore produces exactly encNameExact bytes, and the
+	// column says nothing about the length of what it holds.
+	encNameNonce = 12
+	encNamePad   = 512
+	encNameExact = encNameNonce + encNamePad + gcmOverhead
+	// Four pad blocks is far more than any file name needs and still small
+	// enough that the column cannot be used to store anything else.
+	maxEncNameLen = encNameNonce + 4*encNamePad + gcmOverhead
 
 	// A manifest is a short JSON object. The ceiling exists so a client cannot
 	// make the server store, and every downloader fetch, an arbitrary blob
@@ -142,14 +159,30 @@ func e2eChunkCount(plain int64, version int) int64 {
 var (
 	containerMagic   = []byte{'P', 'Y', 'X', '3'}
 	containerMagicV4 = []byte{'P', 'Y', 'X', '4'}
+	containerMagicV5 = []byte{'P', 'Y', 'X', '5'}
 )
 
 // magicForVersion is the four bytes a container of this version must start with.
 func magicForVersion(version int) []byte {
-	if version >= e2eVersionV4 {
+	switch {
+	case version >= e2eVersionV5:
+		return containerMagicV5
+	case version >= e2eVersionV4:
 		return containerMagicV4
+	default:
+		return containerMagic
 	}
-	return containerMagic
+}
+
+// validEncNameLen reports whether a sealed name has a length the padding scheme
+// can actually produce. A blob of any other size was not padded as version 5
+// requires, and its length would leak what the padding exists to hide.
+func validEncNameLen(n int) bool {
+	if n > maxEncNameLen {
+		return false
+	}
+	body := n - encNameNonce - gcmOverhead
+	return body >= encNamePad && body%encNamePad == 0
 }
 
 // e2eHeaderLen is how many bytes precede the chunk stream. Only version 3 has
@@ -245,12 +278,16 @@ func parseManifest(raw []byte, plainSize int64, batchID string, version int) (*f
 		return nil, fmt.Errorf("manifest chunk count %d, want %d",
 			m.Chunks, e2eChunkCount(plainSize, version))
 	case version >= e2eVersionV4 && m.Name != "":
-		// A version 4 manifest that still carries a name is a client leaking
-		// the very thing this version exists to hide. Refuse it rather than
-		// store it: these bytes are served to every downloader verbatim.
-		return nil, errors.New("a version 4 manifest must not carry a file name")
+		// A manifest that still carries a name is a client leaking the very
+		// thing these versions exist to hide. Refuse it rather than store it:
+		// these bytes are served to every downloader verbatim.
+		return nil, errors.New("a version 4 or later manifest must not carry a file name")
 	case version < e2eVersionV4 && m.Name == "":
 		return nil, errors.New("manifest carries no file name")
+	case version >= e2eVersionV5 && m.Type != "":
+		return nil, errors.New("a version 5 manifest must not carry a content type")
+	case version < e2eVersionV5 && m.Type == "":
+		return nil, errors.New("manifest carries no content type")
 	case m.Batch != batchID:
 		// Both directions matter: a member must name its batch, and a
 		// standalone share must not claim one.

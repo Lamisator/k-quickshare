@@ -70,7 +70,7 @@
   const ROSTER_NONCE = 12;
 
   // Container version this build writes. Everything at or below it can be read.
-  const VERSION = 4;
+  const VERSION = 5;
 
   // Version 3 and 4 share a header: 4-byte magic then a big-endian uint16
   // manifest length. uint16 is deliberate — a manifest is a short JSON object
@@ -86,7 +86,21 @@
   // without fetching a byte of ciphertext and the server can read none of them.
   const MAGIC3 = [0x50, 0x59, 0x58, 0x33]; // "PYX3"
   const MAGIC4 = [0x50, 0x59, 0x58, 0x34]; // "PYX4"
+  const MAGIC5 = [0x50, 0x59, 0x58, 0x35]; // "PYX5"
   const HEADER_FIXED = 6;
+
+  // Version 5 finishes what 4 started. Version 4 took the name out of the
+  // manifest and left the MIME type in it, which meant the server still knew
+  // that an account had uploaded eleven JPEGs of 7.5 MB each — a shape, if not
+  // a story. In version 5 the manifest carries nothing about the CONTENT at
+  // all: version, id, batch, size and chunk geometry, every one of which the
+  // server can already derive from the ciphertext it is holding.
+  //
+  // The type moves into the sealed name blob, which is padded from version 2 of
+  // that blob onwards, so its length says nothing about the length of the name
+  // it holds. What remains visible to the server is what being the server
+  // shows it anyway: the size, the time, the account and the batch.
+  const NAME_PAD = 512;
 
   // KDF labels, indexed by container version.
   //
@@ -114,6 +128,7 @@
   LABELS[2] = LABELS[1];
   LABELS[3] = LABELS[1];
   LABELS[4] = LABELS[1];
+  LABELS[5] = LABELS[1];
 
   const ROSTER_AAD_PREFIX = 'pyxis-roster-v2|';
   const NAME_AAD_PREFIX = 'pyxis-name-v1|';
@@ -267,10 +282,13 @@
   // are the AAD, and any re-serialisation that differs by a single byte — a
   // space, a reordered key, a different number format — makes the file
   // permanently undecryptable.
-  // No `name` since version 4: these bytes are stored and served in the clear,
-  // so anything in here is something the server knows. The name is sealed
-  // separately; what still binds it to this file is the manifest id, which is
-  // the name blob's AAD.
+  // These bytes are stored and served in the clear — they are the AAD, they
+  // cannot be encrypted — so anything in here is something the server knows.
+  // Since version 5 that is nothing it could not already work out from the
+  // ciphertext: no name (version 4 removed it), no type (version 5 removed
+  // it), only the geometry needed to read the object. Name and type are sealed
+  // separately; what binds them to this file is the manifest id, which is the
+  // sealed blob's AAD.
   function buildManifest(fields) {
     return te.encode(JSON.stringify({
       v: VERSION,
@@ -279,7 +297,6 @@
       size: fields.size,
       chunks: chunkCount(fields.size),
       chunk: CHUNK,
-      type: fields.type || 'application/octet-stream',
     }));
   }
 
@@ -287,7 +304,10 @@
   // own `v` is the container version it was written for.
   function parseManifest(bytes) {
     const m = JSON.parse(td.decode(bytes));
-    if (m.v !== 2 && m.v !== 3 && m.v !== 4) throw new Error('unsupported manifest version ' + m.v);
+    // Bounded by VERSION rather than a list of numbers: a hardcoded list is a
+    // thing to forget on the next bump, and forgetting it makes every new share
+    // unreadable by the client that wrote it.
+    if (m.v < 2 || m.v > VERSION) throw new Error('unsupported manifest version ' + m.v);
     if (typeof m.size !== 'number' || m.size < 0) throw new Error('manifest size is invalid');
     if (m.chunk !== CHUNK) throw new Error('unsupported chunk size ' + m.chunk);
     if (m.chunks !== chunkCount(m.size)) throw new Error('manifest chunk count is inconsistent');
@@ -302,6 +322,7 @@
   }
 
   function magicFor(version) {
+    if (version >= 5) return MAGIC5;
     return version >= 4 ? MAGIC4 : MAGIC3;
   }
 
@@ -310,7 +331,7 @@
   // says whether the manifest may still carry a name.
   function readHeader(ct) {
     if (ct.length < HEADER_FIXED) throw new Error('object is too short to be a container');
-    const magic = ct[3] === MAGIC4[3] ? MAGIC4 : MAGIC3;
+    const magic = ct[3] === MAGIC5[3] ? MAGIC5 : (ct[3] === MAGIC4[3] ? MAGIC4 : MAGIC3);
     for (let i = 0; i < magic.length; i++) {
       if (ct[i] !== magic[i]) throw new Error('not a Pyxis container');
     }
@@ -371,7 +392,7 @@
 
   // decryptChunks is the shared body of versions 2 and 3: the manifest is
   // already known, `offset` is where the chunk stream starts.
-  async function decryptChunks(ct, offset, aesKey, manifestBytes, onProgress) {
+  async function decryptChunks(ct, offset, aesKey, manifestBytes, onProgress, type) {
     const m = parseManifest(manifestBytes);
 
     // The length is fixed by the authenticated chunk count, so a truncated or
@@ -398,7 +419,13 @@
     if (plain !== m.size) {
       throw new Error('decrypted ' + plain + ' bytes, the manifest declares ' + m.size);
     }
-    return { blob: new Blob(parts, { type: m.type || 'application/octet-stream' }), manifest: m };
+    // A version 5 manifest states no type — that is the point of it — so the
+    // caller passes the one it opened out of the sealed name blob. Older
+    // manifests still carry theirs and keep using it.
+    return {
+      blob: new Blob(parts, { type: m.type || type || 'application/octet-stream' }),
+      manifest: m,
+    };
   }
 
   // decryptFile reverses encryptFile and returns { blob, manifest }.
@@ -408,13 +435,13 @@
   // already rendered — and it must match the embedded bytes exactly. Only the
   // embedded copy is ever used as AAD, so a server that sends a different one
   // is caught rather than obeyed.
-  async function decryptFile(cipherBuf, aesKey, expected, onProgress) {
+  async function decryptFile(cipherBuf, aesKey, expected, onProgress, type) {
     const ct = new Uint8Array(cipherBuf);
     const head = readHeader(ct);
     if (expected && expected.length && !bytesEqual(expected, head.manifest)) {
       throw new Error('the stored metadata does not match the file');
     }
-    return decryptChunks(ct, head.body, aesKey, head.manifest, onProgress);
+    return decryptChunks(ct, head.body, aesKey, head.manifest, onProgress, type);
   }
 
   // decryptV2 reads a version 2 object: the same chunk stream, but with the
@@ -454,7 +481,7 @@
   // version 1 file as either of the others fails too.
   async function openFile(version, cipherBuf, aesKey, manifestBytes, type, onProgress) {
     const v = Number(version) || 1;
-    if (v >= 3) return decryptFile(cipherBuf, aesKey, manifestBytes, onProgress);
+    if (v >= 3) return decryptFile(cipherBuf, aesKey, manifestBytes, onProgress, type);
     if (v === 2) return decryptV2(cipherBuf, aesKey, manifestBytes, onProgress);
     return { blob: await decryptLegacy(cipherBuf, aesKey, type, onProgress), manifest: null };
   }
@@ -475,12 +502,40 @@
     return te.encode(NAME_AAD_PREFIX + fileId);
   }
 
+  // The plaintext is padded before sealing, because AES-GCM ciphertext is the
+  // length of its input: without padding, a 540-byte blob and a 560-byte blob
+  // would tell the server how long the file's name is. Blob version 2 is
+  //
+  //     uint16be jsonLength || json || zero padding, to a multiple of NAME_PAD
+  //
+  // so every ordinary name produces exactly the same number of bytes. Version 1
+  // (container version 4, unpadded raw JSON) is still read: those shares exist.
+  // The two are told apart by their first byte — a version 1 blob starts with
+  // '{', a version 2 blob with the high byte of a length under 4 KiB.
+  function padNameBody(json) {
+    const total = Math.ceil((2 + json.length) / NAME_PAD) * NAME_PAD;
+    const out = new Uint8Array(total);
+    out[0] = (json.length >> 8) & 0xff;
+    out[1] = json.length & 0xff;
+    out.set(json, 2);
+    return out;
+  }
+
+  function unpadNameBody(body) {
+    if (body[0] === 0x7b) return body;                    // version 1: bare JSON
+    const len = (body[0] << 8) | body[1];
+    if (len === 0 || 2 + len > body.length) throw new Error('sealed name is malformed');
+    return body.subarray(2, 2 + len);
+  }
+
   async function sealName(nameKey, fileId, fields) {
-    const body = te.encode(JSON.stringify({
-      v: 1,
+    const json = te.encode(JSON.stringify({
+      v: 2,
       name: fields.name,
       type: fields.type || 'application/octet-stream',
     }));
+    if (2 + json.length > 4096) throw new Error('file name is too long to seal');
+    const body = padNameBody(json);
     const nonce = randomBytes(NAME_NONCE);
     const sealed = await subtle.encrypt(
       { name: 'AES-GCM', iv: nonce, additionalData: nameAAD(fileId) }, nameKey, body);
@@ -497,8 +552,10 @@
     const body = await subtle.decrypt(
       { name: 'AES-GCM', iv: sealed.subarray(0, NAME_NONCE), additionalData: nameAAD(fileId) },
       nameKey, sealed.subarray(NAME_NONCE));
-    const n = JSON.parse(td.decode(new Uint8Array(body)));
-    if (n.v !== 1) throw new Error('unsupported sealed name version ' + n.v);
+    const n = JSON.parse(td.decode(unpadNameBody(new Uint8Array(body))));
+    if (n.v !== 1 && n.v !== 2) throw new Error('unsupported sealed name version ' + n.v);
+    // (The blob has its own small version, not the container's: 1 unpadded,
+    // 2 padded. Both are read; only 2 is written.)
     if (typeof n.name !== 'string' || !n.name) throw new Error('sealed name is empty');
     return n;
   }
@@ -540,7 +597,7 @@
     // member list as unverifiable. Names have always been sealed in here, which
     // is why version 4 could take them out of the manifest without touching
     // this format at all.
-    if (r.v < 2 || r.v > 4) throw new Error('unsupported roster version ' + r.v);
+    if (r.v < 2 || r.v > VERSION) throw new Error('unsupported roster version ' + r.v);
     if (r.batch !== batchId) throw new Error('roster names a different batch');
     if (!Array.isArray(r.files)) throw new Error('roster has no file list');
     return r;

@@ -258,13 +258,16 @@ func (a *App) loadBatchMembers(r *http.Request, batchID string) ([]batchMember, 
 	var out []batchMember
 	for rows.Next() {
 		var m batchMember
-		var name *string
-		if err := rows.Scan(&m.ID, &name, &m.EncName, &m.Size, &m.ContentType,
+		var name, contentType *string
+		if err := rows.Scan(&m.ID, &name, &m.EncName, &m.Size, &contentType,
 			&m.StoredName, &m.WrappedKey, &m.E2EVersion, &m.Manifest); err != nil {
 			return nil, err
 		}
 		if name != nil {
 			m.Name = *name
+		}
+		if contentType != nil {
+			m.ContentType = *contentType
 		}
 		out = append(out, m)
 	}
@@ -396,10 +399,12 @@ func (a *App) handleBatchManifest(w http.ResponseWriter, r *http.Request, bm *ba
 		}
 		files = append(files, map[string]any{
 			"id": m.ID,
-			// Empty from container version 4 on. `encName` is the sealed blob
-			// the browser opens instead — one short decryption per member, no
-			// ciphertext fetched and no download slot spent, which is the whole
-			// reason the name is sealed apart from the file.
+			// Empty from container version 4 on (name) and 5 on (type, and with
+			// it the icon and the preview decision that follow from it).
+			// `encName` is the sealed blob the browser opens instead — one short
+			// decryption per member, no ciphertext fetched and no download slot
+			// spent, which is the whole reason these are sealed apart from the
+			// file. What is left here is what the server cannot help knowing.
 			"name":        m.Name,
 			"encName":     base64.RawURLEncoding.EncodeToString(m.EncName),
 			"manifestId":  manifestIDOf(m.Manifest),
@@ -408,7 +413,11 @@ func (a *App) handleBatchManifest(w http.ResponseWriter, r *http.Request, bm *ba
 			"wrappedKey":  base64.RawURLEncoding.EncodeToString(m.WrappedKey),
 			"previewKind": kind,
 			"iconKind":    iconKind(m.ContentType, m.Name),
-			"e2eVersion":  m.E2EVersion,
+			// Whether previews are on offer at all is a fact about the download
+			// limit, not about the file, so the client is told it directly and
+			// works the rest out once it has opened the name.
+			"previewsAllowed": previews,
+			"e2eVersion":      m.E2EVersion,
 			// Verbatim: the AAD of every one of this member's chunks.
 			"manifest": base64.RawURLEncoding.EncodeToString(m.Manifest),
 		})

@@ -41,8 +41,9 @@ dependencies beyond the two containers.
   dropzone open — nothing can be shared under settings nobody chose.
 - Drag-and-drop upload with per-file progress, transfer rate, cancel and retry.
 - Every file uploaded in one visit is collected under **one share link**.
-- **File names are encrypted too**, sealed apart from the file so a recipient
-  sees a listing without downloading anything and the server sees nothing.
+- **File names and types are encrypted too**, sealed apart from the file so a
+  recipient sees a listing without downloading anything and the server sees
+  nothing about the content — not a name, not a type, not even a name's length.
 - **My files** folds each of those batches into a collapsible group — the share's
   terms are stated once on the header, its members indented beneath it, and the
   whole group selects, expands or collapses in one click.
@@ -100,35 +101,53 @@ produces a master secret, which HKDF splits down three branches:
 Knowing the auth branch cannot yield the encryption branch, so the stored
 verifier is useless for decryption even to someone holding the database.
 
-### File names
+### File names and types
 
 A name is sealed on its own, in a blob of its own, under its own HKDF branch —
 `pyxis-e2e-name-v1` — of the same secret. It is *not* part of the file's
 ciphertext, and that is the point: a recipient's listing shows every name in a
 batch after one cheap request, without fetching a byte of any file and without
-spending a download slot.
+spending a download slot. The **MIME type** travels in the same blob, so the
+icon and the preview decision are made in the browser rather than by a server
+that would have to be told what the file is.
 
 ```
-enc_name = 12-byte nonce || AES-GCM(name key, {"v":1,"name":…,"type":…})
+enc_name = 12-byte nonce || AES-GCM(name key, padded {"v":2,"name":…,"type":…})
 AAD      = "pyxis-name-v1|" || the manifest's file id
+padding  = uint16be jsonLength || json || zeros, to a multiple of 512 bytes
 ```
+
+The padding matters as much as the encryption: AES-GCM ciphertext is exactly as
+long as its input, so an unpadded blob would tell anyone holding the database
+how long each file's name is. Padded, every ordinary name produces exactly 540
+stored bytes, and the server rejects a blob of any other shape.
 
 The AAD is the client-generated manifest id, so a sealed name belongs to exactly
 one file: the server cannot move a name onto another object, cannot swap two
 names inside a batch, and cannot pick the id itself.
 
-This is why the container had to reach **version 4**. Until then the name lived
-in the manifest — and a manifest cannot be encrypted, because it is the AAD of
-every chunk. It is stored in a column, embedded in the object's own header, and
-served verbatim to anyone who asks. Version 4 takes the name out of it
-(`files.original_name` goes NULL, the manifest has no `name` field) and the
-sealed blob becomes the only copy anyone holds. A version 4 manifest that still
-carries a name is refused at upload rather than stored.
+This is why the container had to reach **version 4**, and then **version 5**.
+Until then the name and the type lived in the manifest — and a manifest cannot
+be encrypted, because it is the AAD of every chunk. It is stored in a column,
+embedded in the object's own header, and served verbatim to anyone who asks.
+Version 4 took the name out; version 5 took the type out too, because "eleven
+JPEGs of 7 MB each, uploaded at 17:11 under one link" is a description of
+someone's afternoon. `files.original_name` and `files.content_type` are both
+NULL for a version 5 row, and the sealed blob is the only copy anyone holds. A
+manifest that carries either is refused at upload rather than stored, and
+uploads below version 5 are refused outright — a cached `e2e.js` is told to
+reload rather than allowed to write one more legible row.
 
-What this costs: the owner's **My files** cannot read its own names either — it
-has no link and so no key. The uploading browser remembers them locally for its
-own lists; every other page shows the icon, size, date and a placeholder. See
-[Known limits](#known-limits).
+**What the server can still see, and why it is not fixable here:** the exact
+size, the time of upload, which account uploaded, which files share a link, and
+the expiry and download limit it is being asked to enforce. Those are facts
+about the transaction rather than the content — a server that could not see them
+could not do its job — and no amount of encryption at rest removes them.
+
+What this costs: the owner's **My files** cannot read its own names or types
+either — it has no link and so no key. The uploading browser remembers both
+locally for its own lists; every other page shows a generic icon, the size, the
+date and a placeholder. See [Known limits](#known-limits).
 
 Uploads that are not end-to-end encrypted are **rejected** (HTTP 400). There is
 no server-side encryption path to fall back to, and no code left that could
@@ -207,8 +226,20 @@ said. From version 4 the name is sealed separately (see
 [File names](#file-names)), `original_name` stays NULL, and what still binds the
 name to this exact file is the manifest id, which is the sealed blob's AAD.
 
+**Version 5** does the same to the type, leaving a manifest that describes only
+what the ciphertext's own length already gives away:
+
+```
+{"v":5,"id":"<32 random bytes, base64url>","batch":"<uuid or empty>",
+ "size":197842,"chunks":4,"chunk":65536}
+```
+
+Both the name and the type now live in the sealed blob, and `content_type` joins
+`original_name` at NULL. The icon and the preview decision move to the browser
+with them, since the server no longer has the input either one needs.
+
 Version confusion fails closed in both directions and needs no separate check:
-the chunks of a version 2, 3 or 4 file are sealed against their manifest, so
+the chunks of a version 2 or later file are sealed against their manifest, so
 reading one as version 1 fails, and reading a version 1 file as any of the
 others fails too.
 
@@ -482,12 +513,11 @@ database is on a different one than the binary expects — a half-finished upgra
 should take an instance out of the load balancer, not serve from it.
 
 There is no API for uploading plaintext. A client must encrypt in the browser
-container format and POST the ciphertext with `e2e=1`, an `e2e_version` of 2, 3
-or 4, and a `manifest`; a version 4 upload must also carry a sealed `enc_name`,
-and must *not* put a name in its manifest. Anything else is rejected. Versions 2
-and 3 are still accepted because their integrity guarantee is identical to
-version 4's — they merely leak the name — and refusing them would break a
-browser holding a cached copy of the previous `e2e.js` mid-session.
+container format and POST the ciphertext with `e2e=1`, `e2e_version=5`, a
+`manifest` that names neither the file nor its type, and a padded sealed
+`enc_name`. Anything else is rejected, earlier container versions included: they
+still *read*, for as long as their shares live, but accepting one more of them
+as a write would mean one more file the server can describe.
 `web/static/e2e.js` is the reference implementation, and `chunkformat_test.go`
 mirrors it in Go.
 
@@ -727,20 +757,28 @@ download rather than bounding idleness.
 - **Version 1 shares keep the version 1 guarantee.** They cannot be upgraded in
   place — that would need the key — so until they expire their length and name
   stay unauthenticated. The landing page says so rather than implying otherwise.
-- **Shares created before container version 4 keep a server-readable name.**
-  Their manifests carry it, and a manifest is the AAD of every chunk — rewriting
-  one destroys the file — so those names cannot be sealed after the fact. They
-  leave with the share, at its expiry plus the 30-day retirement.
+- **Shares created before container version 5 keep server-readable metadata** —
+  a name before version 4, a MIME type before version 5. Their manifests carry
+  it, and a manifest is the AAD of every chunk — rewriting one destroys the file
+  — so it cannot be sealed after the fact. It leaves with the share, at its
+  expiry plus the 30-day retirement.
 - **A file list cannot show a sealed name.** The name is encrypted under the key
   in the share link, and no page that isn't the link has that key. The browser
   that uploaded a file keeps the name in `localStorage` for its own lists, which
   is per-device and disappears with site data; anywhere else the row shows the
   icon, size, date and "Encrypted file name". Filtering matches only what the
   page can actually read.
-- **The MIME type is still stored in the clear**, in the row and in the
-  manifest. It is what the icon and the preview decision are made from before
-  anything is decrypted. A sealed name carries an authenticated copy of the type
-  as well, and the page prefers that once it is open.
+- **Size, timing and shape are not hidden, and cannot be.** The server records
+  the exact byte size, when the upload happened, which account did it, which
+  files share a link, and the expiry and download limit it enforces. A 7.8 MB
+  file with no name and no type is still visibly a photograph-sized thing.
+  Padding the ciphertext itself would fix the size; it would also mean storing
+  and transferring bytes nobody wants, and it is not done.
+- **Icons are generic wherever the type cannot be read.** From container version
+  5 the server is not told the MIME type, so it cannot pick an icon or decide
+  whether to offer a preview; the browser does both, once it has opened the
+  sealed blob. A recipient with the link sees the right icon and the preview. A
+  file list shows the generic one unless that browser uploaded the file.
 - **Version 2 objects are not self-describing.** Their integrity is identical to
   version 3's, but the manifest lives only in the database, so the blob alone
   cannot be interpreted. Version 2 was current for one day and no share was ever

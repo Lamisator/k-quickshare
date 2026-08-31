@@ -49,6 +49,11 @@ func TestTemplatesRender(t *testing.T) {
 		{ID: uuid.NewString(), Size: 4096, ContentType: "application/pdf",
 			EncName: "c2VhbGVkLW5hbWUtYmxvYg", UploadedAt: now, UploaderName: "marius",
 			UploadedBy: &uid, CanDelete: true, IconKind: "pdf"},
+		// A version 5 upload: no name AND no type, so not even the icon is
+		// anything but generic.
+		{ID: uuid.NewString(), Size: 8192, EncName: "c2VhbGVkLW5hbWUtYmxvYg",
+			UploadedAt: now, UploaderName: "marius", UploadedBy: &uid,
+			CanDelete: true, IconKind: "generic"},
 	}
 	fileGroups, hasBatches := groupFiles(files)
 
@@ -115,6 +120,13 @@ func TestTemplatesRender(t *testing.T) {
 			"ContentType": "application/pdf", "UploadedAt": now,
 			"HasLimit": false, "PreviewKind": "", "IconKind": "pdf", "User": (*User)(nil),
 			"E2EVersion": e2eVersionV4, "Manifest": "eyJ2Ijo0fQ",
+			"EncName": "c2VhbGVkLW5hbWUtYmxvYg", "ManifestID": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},
+		// Version 5: no type either, so no icon bucket and no preview decision
+		// until the browser opens the sealed blob.
+		{"State": "e2e", "E2EMode": "url", "ID": "id5", "Name": "", "Size": int64(8192),
+			"ContentType": "", "UploadedAt": now,
+			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil),
+			"E2EVersion": e2eVersionV5, "Manifest": "eyJ2Ijo1fQ",
 			"EncName": "c2VhbGVkLW5hbWUtYmxvYg", "ManifestID": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},
 		{"State": "e2e", "E2EMode": "url", "ID": "id1", "Name": "blob.bin", "Size": int64(5),
 			"ContentType": "application/octet-stream", "UploadedAt": now,

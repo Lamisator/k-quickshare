@@ -32,7 +32,10 @@
     {{template "fileicon" .IconKind}}
     <div class="dl-file-title">
       <h1>{{if .Name}}{{.Name}}{{else}}{{T .Lang "dl.name_sealed"}}{{end}}</h1>
-      <span class="muted">{{humanSize .Size}} · {{.ContentType}}</span>
+      {{/* The type is blank for a version 5 share — the server has none — and
+           app.js fills it in from the sealed blob, so no separator is printed
+           for something that is not there yet. */}}
+      <span class="muted">{{humanSize .Size}}{{if .ContentType}} · {{.ContentType}}{{end}}</span>
     </div>
   </div>
 
