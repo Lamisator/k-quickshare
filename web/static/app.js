@@ -611,6 +611,9 @@
       for (const m of members) total += Number(m.size) || 0;
       summaryEl.textContent = fileCountLabel(members.length) + ' · ' + fmtSize(total);
       zipBtn.hidden = members.length === 0;
+      // Nothing to open a gallery on unless the server marked something
+      // previewable, and an empty gallery is worse than no button.
+      if (previewAllBtn) previewAllBtn.hidden = previewableMembers().length === 0;
       if (members.length === 0) {
         const li = document.createElement('li');
         li.className = 'batch-empty';
@@ -721,6 +724,300 @@
         endRowProgress(m, ok);
         clearProgress();
       }
+    }
+
+    // ---- "Preview all" gallery ---------------------------------------------
+    //
+    // One large stage over a grid strip of every previewable member, with
+    // arrow buttons and arrow keys to step through them.
+    //
+    // Files are decrypted ONLY as they are stepped onto, never the whole set up
+    // front: a /raw fetch is exactly what a batch's download limit counts, and
+    // opening a gallery must not spend the allowance on files nobody looked at.
+    // Anything already fetched comes back from plainCache for free, so a file
+    // previewed here and then downloaded still costs one.
+    //
+    // It is a <dialog> opened with showModal() rather than a hand-rolled
+    // overlay: that gives the focus trap, Escape, the backdrop and the top
+    // layer for nothing, and this is the one place on the page where focus
+    // must not wander off behind the modal.
+
+    const previewableMembers = () => members.filter((m) => m.previewKind);
+    const KIND_LABEL = {
+      image: 'IMG', video: 'VID', audio: 'AUD', pdf: 'PDF', text: 'TXT',
+    };
+
+    const previewAllBtn = document.getElementById('batch-preview-all');
+    let gallery = null;          // built on first open, then reused
+    let galleryItems = [];
+    let galleryIndex = 0;
+    let gallerySeq = 0;          // guards a decrypt the user has stepped past
+    const galleryNodes = new Map(); // member id -> rendered preview element
+    const galleryTiles = new Map(); // member id -> its strip tile
+
+    const CHEVRON = {
+      prev: 'M15 5l-7 7 7 7',
+      next: 'M9 5l7 7-7 7',
+    };
+
+    function buildGallery() {
+      const el = document.createElement('dialog');
+      el.className = 'gallery';
+      el.setAttribute('aria-label', t('preview_all'));
+
+      // Everything lives in an inner box so the dialog element itself is only
+      // ever the backdrop — which is what makes the click-outside check below
+      // a simple target comparison.
+      const box = document.createElement('div');
+      box.className = 'gallery-box';
+
+      const head = document.createElement('div');
+      head.className = 'gallery-head';
+      const title = document.createElement('h2');
+      title.className = 'gallery-title';
+      title.textContent = t('preview_all');
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'btn btn-ghost btn-sm gallery-close';
+      close.setAttribute('aria-label', t('gallery_close'));
+      close.innerHTML =
+        '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+      close.addEventListener('click', () => el.close());
+      head.appendChild(title);
+      head.appendChild(close);
+
+      const navButton = (kind, delta) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'gallery-nav';
+        b.setAttribute('aria-label', t(kind === 'prev' ? 'gallery_prev' : 'gallery_next'));
+        b.innerHTML =
+          '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" ' +
+          'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="' +
+          CHEVRON[kind] + '"/></svg>';
+        b.addEventListener('click', () => step(delta));
+        return b;
+      };
+
+      const stage = document.createElement('div');
+      stage.className = 'gallery-stage';
+      const view = document.createElement('div');
+      view.className = 'gallery-view';
+      stage.appendChild(navButton('prev', -1));
+      stage.appendChild(view);
+      stage.appendChild(navButton('next', 1));
+
+      const caption = document.createElement('div');
+      caption.className = 'gallery-caption';
+      const name = document.createElement('span');
+      name.className = 'gallery-name';
+      const warn = document.createElement('span');
+      warn.className = 'batch-row-warn gallery-warn';
+      warn.textContent = t('batch_row_unverified');
+      warn.title = t('batch_row_unverified_hint');
+      warn.hidden = true;
+      const counter = document.createElement('span');
+      counter.className = 'gallery-counter';
+      caption.appendChild(name);
+      caption.appendChild(warn);
+      caption.appendChild(counter);
+
+      const progress = document.createElement('div');
+      progress.className = 'queue-item gallery-progress';
+      progress.hidden = true;
+      progress.innerHTML =
+        '<div class="queue-info"><span class="queue-name"></span>' +
+        '<span class="queue-status"></span></div>' +
+        '<div class="queue-bar"><div class="queue-fill"></div></div>';
+
+      const err = document.createElement('p');
+      err.className = 'alert gallery-error';
+      err.hidden = true;
+
+      const strip = document.createElement('ul');
+      strip.className = 'gallery-strip';
+
+      const note = document.createElement('p');
+      note.className = 'gallery-note muted';
+      note.textContent = batchRoot.getAttribute('data-limited') === '1'
+        ? t('gallery_limit_note')
+        : t('gallery_hint');
+
+      box.appendChild(head);
+      box.appendChild(stage);
+      box.appendChild(caption);
+      box.appendChild(progress);
+      box.appendChild(err);
+      box.appendChild(strip);
+      box.appendChild(note);
+      el.appendChild(box);
+
+      el.addEventListener('keydown', onGalleryKey);
+      // Leaving a video or audio file playing behind a closed dialog is the
+      // one thing a gallery must never do.
+      el.addEventListener('close', () => pauseMedia(gallery.view));
+      // detail > 0 keeps a keyboard-activated button, which reports a click at
+      // (0,0) on the dialog, from reading as a click on the backdrop.
+      el.addEventListener('click', (e) => {
+        if (e.target === el && e.detail > 0) el.close();
+      });
+
+      document.body.appendChild(el);
+      gallery = {
+        el: el, view: view, name: name, warn: warn, counter: counter,
+        strip: strip, err: err, progress: progress,
+        pStatus: progress.querySelector('.queue-name'),
+        pPct: progress.querySelector('.queue-status'),
+        pFill: progress.querySelector('.queue-fill'),
+      };
+    }
+
+    function onGalleryKey(e) {
+      const tag = e.target && e.target.tagName;
+      // A focused player keeps its own arrow-key seeking, and a text field its
+      // caret; stealing those would be worse than not having the shortcut.
+      if (tag === 'VIDEO' || tag === 'AUDIO' || tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
+      else if (e.key === 'Home') { e.preventDefault(); showGalleryItem(0); }
+      else if (e.key === 'End') { e.preventDefault(); showGalleryItem(galleryItems.length - 1); }
+    }
+
+    function step(delta) {
+      if (galleryItems.length > 0) showGalleryItem(galleryIndex + delta);
+    }
+
+    function pauseMedia(root) {
+      if (root) root.querySelectorAll('video, audio').forEach((el) => el.pause());
+    }
+
+    function setGalleryProgress(label, frac) {
+      gallery.progress.hidden = false;
+      gallery.pStatus.textContent = label;
+      const pct = Math.round(Math.max(0, Math.min(1, frac)) * 100);
+      gallery.pFill.style.width = pct + '%';
+      gallery.pPct.textContent = pct + '%';
+    }
+
+    function renderStrip() {
+      gallery.strip.textContent = '';
+      galleryTiles.clear();
+      galleryItems.forEach((m, i) => {
+        const li = document.createElement('li');
+        const tile = document.createElement('button');
+        tile.type = 'button';
+        tile.className = 'gallery-tile';
+        tile.setAttribute('aria-label', t('gallery_show', m.name));
+
+        const thumb = document.createElement('span');
+        thumb.className = 'gallery-thumb';
+        thumb.textContent = KIND_LABEL[m.previewKind] || '';
+        const cap = document.createElement('span');
+        cap.className = 'gallery-tile-name';
+        cap.textContent = m.name;
+        cap.title = m.name;
+
+        tile.appendChild(thumb);
+        tile.appendChild(cap);
+        tile.addEventListener('click', () => showGalleryItem(i));
+        li.appendChild(tile);
+        gallery.strip.appendChild(li);
+        galleryTiles.set(m.id, { tile: tile, thumb: thumb });
+
+        // A tile whose file was already decrypted earlier in this session —
+        // through a row preview or download — can show its picture right away.
+        const cached = plainCache.get(m.id);
+        if (cached) cached.then((blob) => setTileThumb(m, blob)).catch(() => {});
+      });
+    }
+
+    function markStrip() {
+      for (const [id, ui] of galleryTiles) {
+        const current = galleryItems[galleryIndex] && galleryItems[galleryIndex].id === id;
+        if (current) {
+          ui.tile.setAttribute('aria-current', 'true');
+          ui.tile.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        } else {
+          ui.tile.removeAttribute('aria-current');
+        }
+      }
+    }
+
+    // Only images: a still from a video would mean decoding the video, which
+    // is work nobody asked for.
+    function setTileThumb(m, blob) {
+      const ui = galleryTiles.get(m.id);
+      if (!ui || m.previewKind !== 'image' || ui.thumb.firstElementChild) return;
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(blob);
+      img.alt = '';
+      ui.thumb.textContent = '';
+      ui.thumb.appendChild(img);
+    }
+
+    async function showGalleryItem(i) {
+      const n = galleryItems.length;
+      if (n === 0) return;
+      // Wraps in both directions, so → off the end lands on the first file
+      // rather than on a dead button.
+      galleryIndex = ((i % n) + n) % n;
+      const m = galleryItems[galleryIndex];
+      const seq = ++gallerySeq;
+
+      pauseMedia(gallery.view);
+      gallery.view.textContent = '';
+      gallery.name.textContent = m.name;
+      gallery.counter.textContent = (galleryIndex + 1) + ' / ' + n;
+      gallery.warn.hidden = !m.unverified;
+      gallery.err.hidden = true;
+      markStrip();
+
+      const cached = galleryNodes.get(m.id);
+      if (cached) {
+        gallery.view.appendChild(cached);
+        return;
+      }
+
+      setGalleryProgress(t('e2e_downloading'), 0);
+      try {
+        const blob = await decryptMember(m, (label, f) => {
+          if (seq === gallerySeq) setGalleryProgress(label, f);
+          setRowProgress(m, label, f);
+        });
+        if (seq !== gallerySeq) return; // the user stepped on while this ran
+        const box = document.createElement('div');
+        box.className = 'dl-preview gallery-preview';
+        if (!(await renderPreviewInto(box, m.previewKind, blob, m.name))) {
+          // A blob that failed its content check (a "PDF" that isn't one).
+          throw new Error(t('batch_preview_failed', m.name));
+        }
+        if (seq !== gallerySeq) return;
+        galleryNodes.set(m.id, box);
+        setTileThumb(m, blob);
+        gallery.view.textContent = '';
+        gallery.view.appendChild(box);
+      } catch (err) {
+        if (seq !== gallerySeq) return;
+        gallery.err.textContent = t('e2e_failed') + ' (' + err.message + ')';
+        gallery.err.hidden = false;
+      } finally {
+        if (seq === gallerySeq) gallery.progress.hidden = true;
+        endRowProgress(m, false);
+      }
+    }
+
+    if (previewAllBtn) {
+      previewAllBtn.addEventListener('click', () => {
+        galleryItems = previewableMembers();
+        if (galleryItems.length === 0) {
+          fail(t('gallery_nothing'));
+          return;
+        }
+        if (!gallery) buildGallery();
+        renderStrip();
+        gallery.el.showModal();
+        showGalleryItem(0);
+      });
     }
 
     zipBtn.addEventListener('click', async () => {

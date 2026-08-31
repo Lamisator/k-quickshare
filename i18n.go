@@ -102,6 +102,20 @@ var translations = map[string]map[string]string{
 	"js.confirm_delete_many": {"en": "Delete %s selected files? Their links stop working immediately.",
 		"de": "%s ausgewählte Dateien löschen? Ihre Links funktionieren danach sofort nicht mehr."},
 
+	// --- "Preview all" gallery ---
+	"js.preview_all":    {"en": "Preview all", "de": "Alle ansehen"},
+	"js.gallery_prev":   {"en": "Previous file", "de": "Vorherige Datei"},
+	"js.gallery_next":   {"en": "Next file", "de": "Nächste Datei"},
+	"js.gallery_close":  {"en": "Close", "de": "Schließen"},
+	"js.gallery_show":   {"en": "Show %s", "de": "%s anzeigen"},
+	"js.gallery_hint":   {"en": "Use ← and → to move through the files.", "de": "Mit ← und → zwischen den Dateien wechseln."},
+	"js.gallery_nothing": {"en": "Nothing in this share can be previewed.",
+		"de": "In dieser Freigabe lässt sich nichts in der Vorschau anzeigen."},
+	// Stepping onto a file fetches it, and a fetch is what the limit counts, so
+	// say so before someone arrows through a share they only meant to skim.
+	"js.gallery_limit_note": {"en": "Each file is fetched the first time you open it, and counts against this link's download limit.",
+		"de": "Jede Datei wird beim ersten Öffnen geladen und zählt auf das Download-Limit dieses Links."},
+
 	// --- integrity of the decrypted result ---
 	"js.e2e_legacy": {"en": "This link uses an older format: the contents are authenticated, but the file's length and name are not. It was shared before the current format existed.",
 		"de": "Dieser Link nutzt ein älteres Format: Der Inhalt ist authentifiziert, Länge und Name der Datei jedoch nicht. Er wurde vor dem aktuellen Format erstellt."},
@@ -175,6 +189,7 @@ var translations = map[string]map[string]string{
 	// spends 5, whether one at a time or via the zip.
 	"batch.downloads_left": {"en": "%d of %d file downloads left", "de": "Noch %d von %d Dateidownloads"},
 	"batch.download_all":   {"en": "Download all as ZIP", "de": "Alle als ZIP herunterladen"},
+	"batch.preview_all":    {"en": "Preview all", "de": "Alle ansehen"},
 	"files.batch":          {"en": "In a batch", "de": "Im Stapel"},
 	"files.batch_tip": {"en": "Shared together with other files under one link",
 		"de": "Zusammen mit anderen Dateien unter einem Link geteilt"},
@@ -537,6 +552,8 @@ func jsStrings(lang string) map[string]string {
 		"js.batch_failed",
 		"js.batch_legacy", "js.batch_no_roster", "js.batch_unverified", "js.batch_missing",
 		"js.batch_row_unverified", "js.batch_row_unverified_hint", "js.batch_reordered",
+		"js.preview_all", "js.gallery_prev", "js.gallery_next", "js.gallery_close",
+		"js.gallery_show", "js.gallery_hint", "js.gallery_nothing", "js.gallery_limit_note",
 		"batch.n_files", "batch.one_file",
 	}
 	out := make(map[string]string, len(keys))
