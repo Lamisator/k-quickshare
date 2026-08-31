@@ -123,17 +123,44 @@ and is not:
 
 Those bytes are passed to AES-GCM as **additional authenticated data for every
 chunk**. Truncation now fails (the count is authenticated), an empty blob fails
-(version 2 always emits at least one chunk, whose only content is the tag over
-the manifest), substitution fails, renaming fails, and moving a file into a
+(there is always at least one chunk, whose only content is the tag over the
+manifest), substitution fails, renaming fails, and moving a file into a
 different batch fails. The landing page shows the server's copy of the name
 until decryption succeeds, then replaces it with the manifest's and says so if
 the two disagree.
+
+**Version 3** puts that manifest *inside* the stored object:
+
+```
+"PYX3" || uint16be manifestLength || manifest || chunk 0 || chunk 1 …
+```
+
+Version 2 got the integrity right but left the blob mute: the manifest lived
+only in a database column beside it, so the bytes on disk carried no magic, no
+version and no self-description. Anything reading them without the database — a
+backup, a copy, a future format migration, a person working out what a file is —
+had no way to tell what it was holding. That is not a break; it is a format that
+cannot explain itself.
+
+The header needs no MAC of its own. Alter the length and a different slice is
+read as the manifest, so the AAD changes and every chunk fails; alter the
+manifest and the same happens; alter the magic and it is refused outright. The
+database column survives as a convenience for listings that must not fetch whole
+blobs, and the reader checks it against the embedded copy — a server that sends
+a different one is caught, not obeyed. On upload the server checks the same
+thing in reverse, so the row and the file can never describe different things.
+
+Version confusion fails closed in both directions and needs no separate check:
+the chunks of a version 2 or 3 file are sealed against their manifest, so
+reading one as version 1 fails, and reading a version 1 file as either of the
+others fails too.
 
 The manifest is authenticated **as bytes**. The server stores exactly what the
 browser produced and returns it verbatim; re-serialising it — even into
 equivalent JSON — would make the file permanently undecryptable. The server
 still parses it, but only to *reject* one that contradicts the upload it
-arrived with (wrong size, wrong chunk count, a batch it does not belong to).
+arrived with (wrong size, wrong chunk count, a batch it does not belong to, or a
+version that disagrees with the request).
 
 ### The batch roster
 
@@ -155,7 +182,12 @@ The download page checks the listing it was served against the roster and
 - a member the roster does not vouch for is badged *unverified* and left out of
   "Download all" — it stays individually downloadable, because its own bytes are
   still authenticated;
-- a member the roster names and the server did not offer is listed as missing.
+- a member the roster names and the server did not offer is listed as missing;
+- a listing whose **order** differs from the sealed one is reported and put back
+  into the sender's order. Order is part of what was sealed: it decides the
+  sequence of entries in a "Download all" archive and the order a recipient
+  reads them in, and matching only the *set* of members would leave the server
+  free to rearrange them.
 
 Both have innocent explanations (the owner deleted a file; a member was uploaded
 seconds ago and its roster update has not landed) and neither can be told apart
@@ -381,9 +413,12 @@ database is on a different one than the binary expects — a half-finished upgra
 should take an instance out of the load balancer, not serve from it.
 
 There is no API for uploading plaintext. A client must encrypt in the browser
-container format and POST the ciphertext with `e2e=1`, `e2e_version=2` and a
-`manifest`; anything else is rejected. `web/static/e2e.js` is the reference
-implementation, and `chunkformat_test.go` mirrors it in Go.
+container format and POST the ciphertext with `e2e=1`, an `e2e_version` of 2 or
+3, and a `manifest`; anything else is rejected. Version 2 is still accepted
+because its integrity guarantee is identical to version 3's — only its
+self-description is weaker — and refusing it would break a browser holding a
+cached copy of the previous `e2e.js` mid-session. `web/static/e2e.js` is the
+reference implementation, and `chunkformat_test.go` mirrors it in Go.
 
 ---
 
@@ -446,11 +481,14 @@ advisories land without anyone pushing.
   password hashing (Argon2id, and that existing bcrypt hashes still verify),
   session-token hashing, the step-up window and the HSTS gate.
 - `e2e_interop_test.go` — **byte-exact vectors** proving Go and browser
-  WebCrypto produce identical ciphertext, for version 1 and version 2, plus the
-  negative cases version 2 exists for: truncation, an emptied blob, a renamed
-  or retyped or resized manifest, and a file moved to another batch.
-  Regenerate these if the chunk size, nonce layout, AAD handling or any HKDF
-  info string ever changes.
+  WebCrypto produce identical ciphertext, for version 1 and version 3, plus the
+  negative cases the manifest exists for: truncation, an emptied blob, a renamed
+  or retyped or resized manifest, a file moved to another batch, a corrupted
+  header magic or length, and a stored metadata column that disagrees with the
+  embedded copy. Also pins the container geometry of all three versions.
+  Regenerate these if the chunk size, nonce layout, header, AAD handling or any
+  HKDF info string ever changes — load `web/static/e2e.js` in Node
+  (`globalThis.window = globalThis`) and re-run the fixtures.
 - `migrations_db_test.go` — needs `TEST_DATABASE_URL`. Migrations are recorded
   and idempotent, sessions are stored hashed, usernames are case-unique *in the
   database*, OIDC identities are scoped to their issuer (including the one-time
@@ -615,6 +653,11 @@ download rather than bounding idleness.
 - **Version 1 shares keep the version 1 guarantee.** They cannot be upgraded in
   place — that would need the key — so until they expire their length and name
   stay unauthenticated. The landing page says so rather than implying otherwise.
+- **Version 2 objects are not self-describing.** Their integrity is identical to
+  version 3's, but the manifest lives only in the database, so the blob alone
+  cannot be interpreted. Version 2 was current for one day and no share was ever
+  created with it in production; the reader stays for the sake of anyone who
+  did.
 - **The roster can be rolled back to an earlier version of itself** by a server
   that keeps an old sealed copy. `seq` only stops replays through the API. The
   effect is bounded: an older roster is a shorter list, so it can make a genuine

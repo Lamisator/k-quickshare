@@ -172,7 +172,7 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	var buf strings.Builder
 	mw2 := multipart.NewWriter(&buf)
 	mw2.WriteField("e2e", "1")
-	mw2.WriteField("e2e_version", "2")
+	mw2.WriteField("e2e_version", "3")
 	mw2.WriteField("plain_size", "999999999")
 	part, _ := mw2.CreateFormFile("file", "small.bin")
 	part.Write([]byte("not really ciphertext"))
@@ -205,7 +205,7 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	var noMan strings.Builder
 	mwNM := multipart.NewWriter(&noMan)
 	mwNM.WriteField("e2e", "1")
-	mwNM.WriteField("e2e_version", "2")
+	mwNM.WriteField("e2e_version", "3")
 	mwNM.WriteField("plain_size", "5")
 	p2, _ := mwNM.CreateFormFile("file", "nomanifest.bin")
 	p2.Write(make([]byte, 21))

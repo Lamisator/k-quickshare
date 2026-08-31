@@ -39,14 +39,27 @@
 // chunk, whose only content is the tag over the manifest), substitution fails,
 // and a renamed file fails.
 //
-// The manifest is authenticated as BYTES. Whatever the sender produced is what
-// must come back — the server stores it verbatim and this file compares the
-// document it parses against the bytes it received, never a re-serialisation.
+// Version 3 embeds that manifest IN the stored object:
 //
-// Version 1 files are still read. They cannot be upgraded in place (that would
-// need the key), so they keep decrypting through decryptLegacy until they
-// expire, and the reduced guarantee is stated on the page rather than papered
-// over.
+//     "PYX3" || uint16be manifestLength || manifest || chunk 0 || chunk 1 ...
+//
+// Version 2 got the integrity right but left the blob mute: the manifest lived
+// only in a database column beside it, so the bytes on disk carried no magic,
+// no version and no self-description. Anything that read them without the
+// database — a backup, a copy, a future format migration, a person trying to
+// work out what a file is — had no way to tell what it was holding or how to
+// interpret it. That is not a break, it is a format that cannot explain itself.
+//
+// The header needs no separate MAC. Alter the length and a different slice is
+// read as the manifest, so the AAD changes and every chunk fails; alter the
+// manifest and the same happens; alter the magic and it is refused outright.
+// The database column survives as a convenience for listings that must not
+// fetch whole blobs, and the reader checks it against the embedded copy.
+//
+// Versions 1 and 2 are still read. They cannot be upgraded in place — that
+// would need the key — so they keep decrypting through the routine that wrote
+// them, and version 1's reduced guarantee is stated on the page rather than
+// papered over.
 (function () {
   'use strict';
 
@@ -57,7 +70,14 @@
   const ROSTER_NONCE = 12;
 
   // Container version this build writes. Everything at or below it can be read.
-  const VERSION = 2;
+  const VERSION = 3;
+
+  // Version 3 header: 4-byte magic then a big-endian uint16 manifest length.
+  // uint16 is deliberate — a manifest is a short JSON object and the server
+  // caps it at 4 KiB, so a 64 KiB ceiling is already far more than the format
+  // can legitimately carry.
+  const MAGIC = [0x50, 0x59, 0x58, 0x33]; // "PYX3"
+  const HEADER_FIXED = 6;
 
   // KDF labels, indexed by container version.
   //
@@ -76,9 +96,10 @@
       roster: 'pyxis-e2e-roster-v1',
     },
   };
-  // Version 2 changed the framing, not the key schedule: the same secret must
-  // still derive the same keys, or v1 shares would stop opening.
+  // Versions 2 and 3 changed the framing, not the key schedule: the same secret
+  // must still derive the same keys, or older shares would stop opening.
   LABELS[2] = LABELS[1];
+  LABELS[3] = LABELS[1];
 
   const ROSTER_AAD_PREFIX = 'pyxis-roster-v2|';
 
@@ -226,13 +247,43 @@
     }));
   }
 
+  // Accepts a manifest from any version that has one (2 and 3). The manifest's
+  // own `v` is the container version it was written for.
   function parseManifest(bytes) {
     const m = JSON.parse(td.decode(bytes));
-    if (m.v !== VERSION) throw new Error('unsupported manifest version ' + m.v);
+    if (m.v !== 2 && m.v !== 3) throw new Error('unsupported manifest version ' + m.v);
     if (typeof m.size !== 'number' || m.size < 0) throw new Error('manifest size is invalid');
     if (m.chunk !== CHUNK) throw new Error('unsupported chunk size ' + m.chunk);
     if (m.chunks !== chunkCount(m.size)) throw new Error('manifest chunk count is inconsistent');
     return m;
+  }
+
+  function bytesEqual(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+  }
+
+  // readHeader pulls the embedded manifest out of a version 3 object.
+  function readHeader(ct) {
+    if (ct.length < HEADER_FIXED) throw new Error('object is too short to be a container');
+    for (let i = 0; i < MAGIC.length; i++) {
+      if (ct[i] !== MAGIC[i]) throw new Error('not a Pyxis v3 container');
+    }
+    const len = (ct[4] << 8) | ct[5];
+    if (len === 0 || ct.length < HEADER_FIXED + len) throw new Error('container header is truncated');
+    return { manifest: ct.subarray(HEADER_FIXED, HEADER_FIXED + len), body: HEADER_FIXED + len };
+  }
+
+  function writeHeader(manifest) {
+    if (manifest.length > 0xffff) throw new Error('manifest is too large for the header');
+    const head = new Uint8Array(HEADER_FIXED + manifest.length);
+    head.set(MAGIC, 0);
+    head[4] = (manifest.length >> 8) & 0xff;
+    head[5] = manifest.length & 0xff;
+    head.set(manifest, HEADER_FIXED);
+    return head;
   }
 
   // aborted reports whether a cancellation token has been tripped. The token is
@@ -259,7 +310,10 @@
     if (!manifest || !manifest.length) throw new Error('a manifest is required');
     const total = file.size;
     const chunks = chunkCount(total);
-    const parts = [];
+    // The header goes in front, so the stored object says what it is. It is
+    // covered by the chunks' AAD rather than a MAC of its own: change the
+    // length or the manifest and every chunk stops verifying.
+    const parts = [writeHeader(manifest)];
     for (let i = 0; i < chunks; i++) {
       if (aborted(signal)) throw abortError();
       const slice = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, total));
@@ -272,18 +326,14 @@
     return new Blob(parts, { type: 'application/octet-stream' });
   }
 
-  // decryptFile reverses encryptFile and returns { blob, manifest }.
-  //
-  // Every property the caller might display — name, type, size — comes from the
-  // manifest, which the decryption itself authenticated. Nothing here trusts the
-  // server's copy of any of it.
-  async function decryptFile(cipherBuf, aesKey, manifestBytes, onProgress) {
+  // decryptChunks is the shared body of versions 2 and 3: the manifest is
+  // already known, `offset` is where the chunk stream starts.
+  async function decryptChunks(ct, offset, aesKey, manifestBytes, onProgress) {
     const m = parseManifest(manifestBytes);
-    const ct = new Uint8Array(cipherBuf);
 
     // The length is fixed by the authenticated chunk count, so a truncated or
     // padded body is rejected before a single tag is checked.
-    const want = m.size + m.chunks * TAG;
+    const want = offset + m.size + m.chunks * TAG;
     if (ct.length !== want) {
       throw new Error('ciphertext is ' + ct.length + ' bytes, the manifest requires ' + want);
     }
@@ -291,7 +341,7 @@
     const parts = [];
     let plain = 0;
     for (let i = 0; i < m.chunks; i++) {
-      const start = i * (CHUNK + TAG);
+      const start = offset + i * (CHUNK + TAG);
       const end = Math.min(start + CHUNK + TAG, ct.length);
       const out = await subtle.decrypt(
         { name: 'AES-GCM', iv: chunkNonce(i), additionalData: manifestBytes },
@@ -306,6 +356,29 @@
       throw new Error('decrypted ' + plain + ' bytes, the manifest declares ' + m.size);
     }
     return { blob: new Blob(parts, { type: m.type || 'application/octet-stream' }), manifest: m };
+  }
+
+  // decryptFile reverses encryptFile and returns { blob, manifest }.
+  //
+  // The manifest comes out of the object itself. `expected`, when given, is the
+  // server's separate copy — the one that drove the listing the caller has
+  // already rendered — and it must match the embedded bytes exactly. Only the
+  // embedded copy is ever used as AAD, so a server that sends a different one
+  // is caught rather than obeyed.
+  async function decryptFile(cipherBuf, aesKey, expected, onProgress) {
+    const ct = new Uint8Array(cipherBuf);
+    const head = readHeader(ct);
+    if (expected && expected.length && !bytesEqual(expected, head.manifest)) {
+      throw new Error('the stored metadata does not match the file');
+    }
+    return decryptChunks(ct, head.body, aesKey, head.manifest, onProgress);
+  }
+
+  // decryptV2 reads a version 2 object: the same chunk stream, but with the
+  // manifest supplied out of band because the object carries no header.
+  async function decryptV2(cipherBuf, aesKey, manifestBytes, onProgress) {
+    if (!manifestBytes || !manifestBytes.length) throw new Error('a manifest is required');
+    return decryptChunks(new Uint8Array(cipherBuf), 0, aesKey, manifestBytes, onProgress);
   }
 
   // decryptLegacy reads a version 1 container: no manifest, no AAD, and no
@@ -326,6 +399,21 @@
       if (onProgress) onProgress((i + 1) / chunks);
     }
     return new Blob(parts, { type: type || 'application/octet-stream' });
+  }
+
+  // openFile is the one entry point callers should use: it picks the reader for
+  // the version the object was written with and always returns
+  // { blob, manifest }, with manifest null for version 1, which has none.
+  //
+  // Version confusion fails closed in both directions and does not need a
+  // separate check: the chunks of a version 2 or 3 file are sealed against
+  // their manifest, so reading one as version 1 (no AAD) fails, and reading a
+  // version 1 file as either of the others fails too.
+  async function openFile(version, cipherBuf, aesKey, manifestBytes, type, onProgress) {
+    const v = Number(version) || 1;
+    if (v >= 3) return decryptFile(cipherBuf, aesKey, manifestBytes, onProgress);
+    if (v === 2) return decryptV2(cipherBuf, aesKey, manifestBytes, onProgress);
+    return { blob: await decryptLegacy(cipherBuf, aesKey, type, onProgress), manifest: null };
   }
 
   // --- batch roster --------------------------------------------------------
@@ -359,7 +447,11 @@
       { name: 'AES-GCM', iv: sealed.subarray(0, ROSTER_NONCE), additionalData: rosterAAD(batchId) },
       rosterKey, sealed.subarray(ROSTER_NONCE));
     const r = JSON.parse(td.decode(new Uint8Array(body)));
-    if (r.v !== VERSION) throw new Error('unsupported roster version ' + r.v);
+    // Accept every roster version that has ever been sealed. The roster format
+    // did not change between 2 and 3 — only the file container did — and
+    // refusing an older one would make a batch uploaded before the change
+    // report its own member list as unverifiable.
+    if (r.v !== 2 && r.v !== 3) throw new Error('unsupported roster version ' + r.v);
     if (r.batch !== batchId) throw new Error('roster names a different batch');
     if (!Array.isArray(r.files)) throw new Error('roster has no file list');
     return r;
@@ -382,8 +474,12 @@
     buildManifest: buildManifest,
     parseManifest: parseManifest,
     encryptFile: encryptFile,
+    openFile: openFile,
     decryptFile: decryptFile,
+    decryptV2: decryptV2,
     decryptLegacy: decryptLegacy,
+    readHeader: readHeader,
+    HEADER_FIXED: HEADER_FIXED,
     sealRoster: sealRoster,
     openRoster: openRoster,
     SALT_LEN: 16,

@@ -151,6 +151,8 @@ var translations = map[string]map[string]string{
 		"de": "%s Datei(en) stehen nicht auf der signierten Liste des Absenders und sind von „Alle herunterladen“ ausgenommen."},
 	"js.batch_missing": {"en": "%s file(s) the sender listed are not being offered: %s.",
 		"de": "%s vom Absender gelistete Datei(en) werden nicht angeboten: %s."},
+	"js.batch_reordered": {"en": "The files were not offered in the order the sender sealed them; the original order has been restored.",
+		"de": "Die Dateien wurden nicht in der vom Absender signierten Reihenfolge angeboten; die ursprüngliche Reihenfolge wurde wiederhergestellt."},
 	"js.batch_row_unverified": {"en": "unverified", "de": "nicht verifiziert"},
 	"js.batch_row_unverified_hint": {"en": "This file is not on the sender's signed list. Its contents are still authenticated, but it may not have been part of this share.",
 		"de": "Diese Datei steht nicht auf der signierten Liste des Absenders. Ihr Inhalt ist weiterhin authentifiziert, sie war aber möglicherweise nicht Teil dieser Freigabe."},
@@ -522,7 +524,7 @@ func jsStrings(lang string) map[string]string {
 		"js.batch_zip_too_large", "js.batch_zip_name", "js.batch_options_locked",
 		"js.batch_failed",
 		"js.batch_legacy", "js.batch_no_roster", "js.batch_unverified", "js.batch_missing",
-		"js.batch_row_unverified", "js.batch_row_unverified_hint",
+		"js.batch_row_unverified", "js.batch_row_unverified_hint", "js.batch_reordered",
 		"batch.n_files", "batch.one_file",
 	}
 	out := make(map[string]string, len(keys))

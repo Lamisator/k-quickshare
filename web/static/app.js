@@ -254,19 +254,17 @@
         }
         setProgress(t('e2e_decrypting'), 0);
         const onProgress = (f) => setProgress(t('e2e_decrypting'), f);
-        if (e2eVersion >= 2) {
-          // A version 2 share without its manifest cannot be authenticated at
-          // all, so it is refused rather than quietly decrypted the old way —
-          // "the metadata went missing" is exactly what a tampering server
-          // would look like.
-          if (!manifestBytes) throw new Error('missing manifest');
-          const out = await E2E.decryptFile(buf, fileKey, manifestBytes, onProgress);
-          plainBlob = out.blob;
-          adoptManifest(out.manifest);
-        } else {
-          plainBlob = await E2E.decryptLegacy(buf, fileKey, fileType, onProgress);
-          warn(t('e2e_legacy'));
-        }
+        // A version 2 share without its manifest cannot be authenticated at
+        // all, so it is refused rather than quietly decrypted the old way —
+        // "the metadata went missing" is exactly what a tampering server would
+        // look like. Version 3 carries its own, so the server's copy is only
+        // cross-checked against it.
+        if (e2eVersion === 2 && !manifestBytes) throw new Error('missing manifest');
+        const out = await E2E.openFile(
+          e2eVersion, buf, fileKey, manifestBytes, fileType, onProgress);
+        plainBlob = out.blob;
+        if (out.manifest) adoptManifest(out.manifest);
+        else warn(t('e2e_legacy'));
         progress.hidden = true;
         return plainBlob;
       })();
@@ -501,6 +499,21 @@
         notes.push(t('batch_missing', byID.size,
           Array.from(byID.values()).map((f) => f.name).join(', ')));
       }
+
+      // Order is part of what the sender sealed. Matching the set of members
+      // leaves the server free to rearrange them, which changes the order of a
+      // "Download all" archive and the order they are read in — the roster
+      // fixes the sequence, so check it rather than only the membership.
+      if (notes.length === 0) {
+        const servedOrder = members.map((m) => m.id).join(' ');
+        const sealedOrder = (roster.files || []).map((f) => f.id).join(' ');
+        if (servedOrder !== sealedOrder) {
+          notes.push(t('batch_reordered'));
+          // Restore the sealed order rather than only complaining about it.
+          const pos = new Map((roster.files || []).map((f, i) => [f.id, i]));
+          members.sort((a, b) => pos.get(a.id) - pos.get(b.id));
+        }
+      }
       warn(notes);
     }
 
@@ -516,15 +529,14 @@
         const res = await fetch('/b/' + batchId + '/f/' + m.id + '/raw');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const buf = await res.arrayBuffer();
-        if (Number(m.e2eVersion) >= 2) {
-          if (!m.manifest) throw new Error('missing manifest');
-          const out = await E2E.decryptFile(buf, fileKey, E2E.b64uDecode(m.manifest), onProgress);
-          // The manifest is the authenticated name, so it wins over the row the
-          // server sent — including for the file the browser then saves.
-          m.name = out.manifest.name || m.name;
-          return out.blob;
-        }
-        return E2E.decryptLegacy(buf, fileKey, m.contentType, onProgress);
+        if (Number(m.e2eVersion) === 2 && !m.manifest) throw new Error('missing manifest');
+        const out = await E2E.openFile(
+          Number(m.e2eVersion), buf, fileKey,
+          m.manifest ? E2E.b64uDecode(m.manifest) : null, m.contentType, onProgress);
+        // The manifest is the authenticated name, so it wins over the row the
+        // server sent — including for the file the browser then saves.
+        if (out.manifest) m.name = out.manifest.name || m.name;
+        return out.blob;
       })();
       // A failed attempt must stay retryable, so only a success is kept.
       plainCache.set(m.id, p);

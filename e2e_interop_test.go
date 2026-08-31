@@ -40,17 +40,19 @@ const (
 	jsLegacyCipherLen    = 197906
 	jsLegacyCipherSHA256 = "1515d2b8e2d8ed0c3e0aedcbc9ac3c23aeeeae5b07a6ebfe04ea96285dc10fe6"
 
-	// Version 2: the same plaintext under the same key, with the manifest bound
-	// into every chunk. Same length, different bytes — which is the whole point.
-	jsManifestJSON  = `{"v":2,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"11111111-2222-3333-4444-555555555555","size":197842,"chunks":4,"chunk":65536,"name":"report.bin","type":"application/octet-stream"}`
-	jsV2CipherLen   = 197906
-	jsV2CipherSHA25 = "e5a755c178ab33b232ccdb5e00f0dbdf3d5d1e22c92efaa350675b0c2abf46d4"
+	// Version 3: the same plaintext under the same key, with the manifest bound
+	// into every chunk AND embedded in front of them, so the stored object says
+	// what it is without any database beside it.
+	jsManifestJSON  = `{"v":3,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"11111111-2222-3333-4444-555555555555","size":197842,"chunks":4,"chunk":65536,"name":"report.bin","type":"application/octet-stream"}`
+	jsV3HeaderLen   = 204 // 4-byte magic + uint16 length + 198-byte manifest
+	jsV3CipherLen   = 198110
+	jsV3CipherSHA25 = "d46c14e5701151f91f5c7750964e6dd4cb7fbab47d01e5e27a8894db574545f7"
 
-	// An empty file is one chunk with no plaintext: 16 bytes of tag over the
-	// manifest and nothing else. Without it, "the blob is gone" would decrypt
-	// to a valid empty file.
-	jsEmptyManifestJSON = `{"v":2,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"name":"empty.txt","type":"text/plain"}`
-	jsEmptyCipherHex    = "e0d1152c612878d73ccaa568d43ec6fd"
+	// An empty file is a header plus one chunk with no plaintext: 16 bytes of
+	// tag over the manifest and nothing else. Without that chunk, "the blob is
+	// gone" would decrypt to a valid empty file.
+	jsEmptyManifestJSON = `{"v":3,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"name":"empty.txt","type":"text/plain"}`
+	jsEmptyCipherHex    = "50595833008e7b2276223a332c226964223a2241414543417751464267634943516f4c4441304f4478415245684d554652595847426b6147787764486838222c226261746368223a22222c2273697a65223a302c226368756e6b73223a312c226368756e6b223a36353533362c226e616d65223a22656d7074792e747874222c2274797065223a22746578742f706c61696e227d5df0ca218c7443e0e3266bef5a81d2ac"
 
 	jsPassword = "correct horse battery staple"
 )
@@ -163,7 +165,7 @@ func TestE2ELegacyCiphertextMatchesBrowser(t *testing.T) {
 	if buf.Len() != jsLegacyCipherLen {
 		t.Fatalf("ciphertext size: got %d, want %d", buf.Len(), jsLegacyCipherLen)
 	}
-	if got := e2eCipherLen(int64(len(plain)), e2eVersionLegacy); got != jsLegacyCipherLen {
+	if got := e2eCipherLen(int64(len(plain)), 0, e2eVersionLegacy); got != jsLegacyCipherLen {
 		t.Fatalf("e2eCipherLen(v1): got %d, want %d", got, jsLegacyCipherLen)
 	}
 	sum := sha256.Sum256(buf.Bytes())
@@ -175,9 +177,9 @@ func TestE2ELegacyCiphertextMatchesBrowser(t *testing.T) {
 	}
 }
 
-// TestE2EV2CiphertextMatchesBrowser pins the version 2 container: same key,
-// same plaintext, manifest bound in as AAD.
-func TestE2EV2CiphertextMatchesBrowser(t *testing.T) {
+// TestE2EV3CiphertextMatchesBrowser pins the version 3 container: same key,
+// same plaintext, manifest embedded in the object and bound in as AAD.
+func TestE2EV3CiphertextMatchesBrowser(t *testing.T) {
 	key := mustHex(t, jsURLKeyHex)
 	plain := vectorPlaintext()
 	manifest := []byte(jsManifestJSON)
@@ -186,23 +188,35 @@ func TestE2EV2CiphertextMatchesBrowser(t *testing.T) {
 	if _, err := encryptStream(&buf, bytes.NewReader(plain), key, manifest); err != nil {
 		t.Fatal(err)
 	}
-	if buf.Len() != jsV2CipherLen {
-		t.Fatalf("ciphertext size: got %d, want %d", buf.Len(), jsV2CipherLen)
+	if buf.Len() != jsV3CipherLen {
+		t.Fatalf("ciphertext size: got %d, want %d", buf.Len(), jsV3CipherLen)
 	}
-	if got := e2eCipherLen(int64(len(plain)), e2eVersionV2); got != jsV2CipherLen {
-		t.Fatalf("e2eCipherLen(v2): got %d, want %d", got, jsV2CipherLen)
+	if got := e2eCipherLen(int64(len(plain)), len(manifest), e2eVersionV3); got != jsV3CipherLen {
+		t.Fatalf("e2eCipherLen(v3): got %d, want %d", got, jsV3CipherLen)
 	}
 	sum := sha256.Sum256(buf.Bytes())
-	if got := hex.EncodeToString(sum[:]); got != jsV2CipherSHA25 {
-		t.Fatalf("ciphertext differs from browser output:\n got %s\nwant %s", got, jsV2CipherSHA25)
+	if got := hex.EncodeToString(sum[:]); got != jsV3CipherSHA25 {
+		t.Fatalf("ciphertext differs from browser output:\n got %s\nwant %s", got, jsV3CipherSHA25)
 	}
 	if got := readAll(t, buf.Bytes(), key, manifest, int64(len(plain))); !bytes.Equal(got, plain) {
 		t.Fatal("decrypted browser-format ciphertext does not match the plaintext")
 	}
 
+	// The header must be exactly where the format says it is, and must describe
+	// this file — that is what makes the stored object self-explanatory.
+	if got := int64(jsV3HeaderLen); e2eHeaderLen(len(manifest), e2eVersionV3) != got {
+		t.Errorf("e2eHeaderLen: got %d, want %d", e2eHeaderLen(len(manifest), e2eVersionV3), got)
+	}
+	if !bytes.Equal(buf.Bytes()[:jsV3HeaderLen], buildContainerHeader(manifest)) {
+		t.Error("the object does not begin with its own manifest")
+	}
+	if !bytes.HasPrefix(buf.Bytes(), []byte("PYX3")) {
+		t.Error("the object carries no version magic")
+	}
+
 	// The same bytes under version 1 rules must NOT verify: that is the AAD
-	// doing its job, and it is what makes a v1/v2 mix-up fail loudly instead of
-	// producing plausible garbage.
+	// doing its job, and it is what makes a version mix-up fail loudly instead
+	// of producing plausible garbage.
 	if _, err := tryReadAll(buf.Bytes(), key, nil, int64(len(plain))); err == nil {
 		t.Error("version 2 ciphertext verified without its manifest as AAD")
 	}
@@ -283,11 +297,11 @@ func TestE2ETruncationIsDetected(t *testing.T) {
 
 	// And an empty body is not a valid empty file: version 2 declares one
 	// chunk even for zero bytes.
-	if e2eCipherLen(0, e2eVersionV2) != gcmOverhead {
+	if e2eCipherLen(0, 0, e2eVersionV2) != gcmOverhead {
 		t.Errorf("an empty version 2 file must still be %d bytes, got %d",
-			gcmOverhead, e2eCipherLen(0, e2eVersionV2))
+			gcmOverhead, e2eCipherLen(0, 0, e2eVersionV2))
 	}
-	if e2eCipherLen(0, e2eVersionLegacy) != 0 {
+	if e2eCipherLen(0, 0, e2eVersionLegacy) != 0 {
 		t.Error("version 1 geometry changed; legacy shares would stop opening")
 	}
 }
@@ -322,7 +336,7 @@ func TestParseManifestRejectsInconsistentUploads(t *testing.T) {
 	const batch = "11111111-2222-3333-4444-555555555555"
 	good := []byte(jsManifestJSON)
 
-	if _, err := parseManifest(good, jsPlainLen, batch); err != nil {
+	if _, err := parseManifest(good, jsPlainLen, batch, e2eVersionV3); err != nil {
 		t.Fatalf("the browser's own manifest was rejected: %v", err)
 	}
 
@@ -334,22 +348,90 @@ func TestParseManifestRejectsInconsistentUploads(t *testing.T) {
 	}{
 		{"empty", "", jsPlainLen, batch},
 		{"not JSON", "nonsense", jsPlainLen, batch},
-		{"wrong version", `{"v":1,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"name":"a","type":"t"}`, 0, ""},
+		{"wrong version", `{"v":2,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"name":"a","type":"t"}`, 0, ""},
 		{"size disagrees with plain_size", jsManifestJSON, 12, batch},
 		{"batch disagrees", jsManifestJSON, jsPlainLen, "99999999-2222-3333-4444-555555555555"},
 		{"claims a batch when there is none", jsManifestJSON, jsPlainLen, ""},
-		{"short id", `{"v":2,"id":"abc","batch":"","size":0,"chunks":1,"chunk":65536,"name":"a","type":"t"}`, 0, ""},
-		{"no name", `{"v":2,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"name":"","type":"t"}`, 0, ""},
-		{"wrong chunk count", `{"v":2,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":9,"chunk":65536,"name":"a","type":"t"}`, 0, ""},
-		{"wrong chunk size", `{"v":2,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":1024,"name":"a","type":"t"}`, 0, ""},
-		{"oversized", `{"v":2,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"name":"` +
+		{"short id", `{"v":3,"id":"abc","batch":"","size":0,"chunks":1,"chunk":65536,"name":"a","type":"t"}`, 0, ""},
+		{"no name", `{"v":3,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"name":"","type":"t"}`, 0, ""},
+		{"wrong chunk count", `{"v":3,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":9,"chunk":65536,"name":"a","type":"t"}`, 0, ""},
+		{"wrong chunk size", `{"v":3,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":1024,"name":"a","type":"t"}`, 0, ""},
+		{"oversized", `{"v":3,"id":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","batch":"","size":0,"chunks":1,"chunk":65536,"name":"` +
 			string(bytes.Repeat([]byte("a"), maxManifestLen)) + `","type":"t"}`, 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parseManifest([]byte(tc.raw), tc.size, tc.batch); err == nil {
+			if _, err := parseManifest([]byte(tc.raw), tc.size, tc.batch, e2eVersionV3); err == nil {
 				t.Error("accepted an inconsistent manifest")
 			}
 		})
+	}
+}
+
+// TestVerifyContainerHeader covers the one structural claim the server can make
+// about an object it cannot read: that the manifest inside it is the manifest
+// sent with it. Without this the database row and the file could describe
+// different things, and only the downloader would ever find out.
+func TestVerifyContainerHeader(t *testing.T) {
+	manifest := []byte(jsManifestJSON)
+	good := buildContainerHeader(manifest)
+
+	if got, err := verifyContainerHeader(bytes.NewReader(append(good, 'x')), manifest); err != nil {
+		t.Fatalf("a well-formed header was rejected: %v", err)
+	} else if !bytes.Equal(got, good) {
+		t.Error("the header returned for storage is not the one that was read")
+	}
+
+	other := []byte(jsEmptyManifestJSON)
+	for _, tc := range []struct {
+		name string
+		body []byte
+		want []byte
+	}{
+		{"empty object", nil, manifest},
+		{"truncated header", good[:4], manifest},
+		{"bad magic", append([]byte("XXXX"), good[4:]...), manifest},
+		{"length disagrees with the manifest", buildContainerHeader(manifest[:len(manifest)-1]), manifest},
+		{"embedded manifest is a different file", buildContainerHeader(other), manifest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := verifyContainerHeader(bytes.NewReader(tc.body), tc.want); err == nil {
+				t.Error("accepted a header that does not match the declared manifest")
+			}
+		})
+	}
+}
+
+// TestContainerGeometryPerVersion pins the stored size of each version, which
+// is what the upload handler measures a body against.
+func TestContainerGeometryPerVersion(t *testing.T) {
+	const manifestLen = 198
+	cases := []struct {
+		version int
+		plain   int64
+		want    int64
+	}{
+		// Version 1 has no header and no chunk for an empty file.
+		{e2eVersionLegacy, 0, 0},
+		{e2eVersionLegacy, 1, 1 + gcmOverhead},
+		// Version 2 gained the empty-file chunk, still no header.
+		{e2eVersionV2, 0, gcmOverhead},
+		{e2eVersionV2, chunkPlainSize, chunkPlainSize + gcmOverhead},
+		// Version 3 adds the header on top of exactly that.
+		{e2eVersionV3, 0, containerHeaderFixed + manifestLen + gcmOverhead},
+		{e2eVersionV3, chunkPlainSize + 1,
+			containerHeaderFixed + manifestLen + chunkPlainSize + 1 + 2*gcmOverhead},
+	}
+	for _, c := range cases {
+		if got := e2eCipherLen(c.plain, manifestLen, c.version); got != c.want {
+			t.Errorf("e2eCipherLen(%d, v%d) = %d, want %d", c.plain, c.version, got, c.want)
+		}
+	}
+	// Only version 3 has a header, and its size follows the manifest.
+	if e2eHeaderLen(manifestLen, e2eVersionV2) != 0 {
+		t.Error("version 2 must have no header")
+	}
+	if e2eHeaderLen(manifestLen, e2eVersionV3) != containerHeaderFixed+manifestLen {
+		t.Error("version 3 header length does not follow the manifest")
 	}
 }
 

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -52,13 +55,33 @@ const (
 	//     batch, the plaintext size, the chunk count and geometry, the file
 	//     name and the MIME type. Truncation, substitution, reordering,
 	//     renaming and cross-batch moves all fail authentication.
+	// 3 — version 2 with that manifest embedded in the stored object:
+	//         "PYX3" || uint16be manifestLen || manifest || chunks…
+	//     Version 2 authenticated the metadata but kept it in a database column
+	//     beside the blob, so the bytes on disk carried no magic, no version and
+	//     no way to say what they were. Version 3 makes the object
+	//     self-describing. The header needs no MAC of its own: it IS the AAD, so
+	//     altering the length or the manifest breaks every chunk, and altering
+	//     the magic is refused outright.
 	e2eVersionLegacy = 1
 	e2eVersionV2     = 2
+	e2eVersionV3     = 3
+
+	// What new uploads may declare. Version 2 is still accepted because its
+	// integrity guarantee is identical to version 3's — only its
+	// self-description is weaker — and refusing it would break a browser
+	// holding a cached copy of the previous e2e.js mid-session.
+	e2eMinUploadVersion = e2eVersionV2
+	e2eCurrentVersion   = e2eVersionV3
 
 	// A manifest is a short JSON object. The ceiling exists so a client cannot
 	// make the server store, and every downloader fetch, an arbitrary blob
-	// under the name "metadata".
+	// under the name "metadata". It is also well under the uint16 the version 3
+	// header length field can express.
 	maxManifestLen = 4096
+
+	// Version 3 header: 4-byte magic, then a big-endian uint16 manifest length.
+	containerHeaderFixed = 6
 
 	// Length of the client-generated file id: 32 random bytes, base64url.
 	manifestIDLen = 43
@@ -99,15 +122,64 @@ func e2eChunkCount(plain int64, version int) int64 {
 	return n
 }
 
-// e2eCipherLen returns the exact ciphertext size the chunk format produces for
-// a given plaintext size. The upload handler uses it to reject a blob whose
-// length cannot be a well-formed container, which is the only statement the
-// server can make about a payload it cannot read.
-func e2eCipherLen(plain int64, version int) int64 {
+// containerMagic marks a version 3 object. Bytes rather than a string constant
+// so a stray edit cannot change its length.
+var containerMagic = []byte{'P', 'Y', 'X', '3'}
+
+// e2eHeaderLen is how many bytes precede the chunk stream. Only version 3 has
+// a header; earlier versions start at zero.
+func e2eHeaderLen(manifestLen, version int) int64 {
+	if version < e2eVersionV3 {
+		return 0
+	}
+	return int64(containerHeaderFixed + manifestLen)
+}
+
+// e2eCipherLen returns the exact stored size the container produces for a given
+// plaintext size. The upload handler uses it to reject a blob whose length
+// cannot be a well-formed container, which is the only statement the server can
+// make about a payload it cannot read.
+func e2eCipherLen(plain int64, manifestLen, version int) int64 {
 	if plain < 0 {
 		return 0
 	}
-	return plain + e2eChunkCount(plain, version)*gcmOverhead
+	return e2eHeaderLen(manifestLen, version) +
+		plain + e2eChunkCount(plain, version)*gcmOverhead
+}
+
+// buildContainerHeader returns the bytes a version 3 object must begin with.
+// The server does not create containers; it builds the header to compare
+// against what a client uploaded, which is how it refuses an object whose
+// embedded metadata disagrees with the manifest sent alongside it.
+func buildContainerHeader(manifest []byte) []byte {
+	head := make([]byte, containerHeaderFixed+len(manifest))
+	copy(head, containerMagic)
+	binary.BigEndian.PutUint16(head[4:6], uint16(len(manifest)))
+	copy(head[containerHeaderFixed:], manifest)
+	return head
+}
+
+// verifyContainerHeader reads the version 3 header off the front of an upload
+// and checks it against the manifest the request declared, returning the header
+// bytes so the caller can write them through to storage.
+//
+// This is the one structural claim the server can check about a payload it
+// cannot read, and it matters: if the embedded manifest and the stored column
+// were allowed to diverge, the column would be describing a file that says
+// something else about itself, and only the downloader would ever find out.
+func verifyContainerHeader(r io.Reader, manifest []byte) ([]byte, error) {
+	want := buildContainerHeader(manifest)
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(r, got); err != nil {
+		return nil, fmt.Errorf("container header is truncated: %w", err)
+	}
+	if !bytes.Equal(got[:len(containerMagic)], containerMagic) {
+		return nil, errors.New("not a Pyxis v3 container: bad magic")
+	}
+	if !bytes.Equal(got, want) {
+		return nil, errors.New("the manifest embedded in the file does not match the one sent with it")
+	}
+	return got, nil
 }
 
 // parseManifest validates an uploaded manifest against everything the server
@@ -119,9 +191,9 @@ func e2eCipherLen(plain int64, version int) int64 {
 // but it can refuse one that contradicts the request around it, which stops a
 // buggy or hostile client from storing metadata that no downloader could ever
 // authenticate.
-func parseManifest(raw []byte, plainSize int64, batchID string) (*fileManifest, error) {
+func parseManifest(raw []byte, plainSize int64, batchID string, version int) (*fileManifest, error) {
 	if len(raw) == 0 {
-		return nil, errors.New("manifest is required for an e2e_version 2 upload")
+		return nil, fmt.Errorf("manifest is required for an e2e_version %d upload", version)
 	}
 	if len(raw) > maxManifestLen {
 		return nil, fmt.Errorf("manifest is %d bytes, the maximum is %d", len(raw), maxManifestLen)
@@ -131,17 +203,20 @@ func parseManifest(raw []byte, plainSize int64, batchID string) (*fileManifest, 
 		return nil, fmt.Errorf("manifest is not valid JSON: %w", err)
 	}
 	switch {
-	case m.V != e2eVersionV2:
-		return nil, fmt.Errorf("manifest declares version %d, want %d", m.V, e2eVersionV2)
+	case m.V != version:
+		// The manifest states the container version it was written for, and it
+		// is authenticated; the form field is not. They have to agree, or the
+		// server would be storing a row that contradicts the file.
+		return nil, fmt.Errorf("manifest declares version %d, but the upload declares %d", m.V, version)
 	case len(m.ID) != manifestIDLen:
 		return nil, errors.New("manifest id must be 32 random bytes, base64url")
 	case m.Size != plainSize:
 		return nil, fmt.Errorf("manifest size %d disagrees with plain_size %d", m.Size, plainSize)
 	case m.Chunk != chunkPlainSize:
 		return nil, fmt.Errorf("manifest chunk size %d, want %d", m.Chunk, chunkPlainSize)
-	case m.Chunks != e2eChunkCount(plainSize, e2eVersionV2):
+	case m.Chunks != e2eChunkCount(plainSize, version):
 		return nil, fmt.Errorf("manifest chunk count %d, want %d",
-			m.Chunks, e2eChunkCount(plainSize, e2eVersionV2))
+			m.Chunks, e2eChunkCount(plainSize, version))
 	case m.Name == "":
 		return nil, errors.New("manifest carries no file name")
 	case m.Batch != batchID:

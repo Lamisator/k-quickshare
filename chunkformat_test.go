@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/cipher"
 	"encoding/binary"
 	"errors"
@@ -35,11 +36,16 @@ func chunkNonce(idx int64) []byte {
 
 // encryptStream encrypts src to dst in chunks and returns the plaintext size.
 // A nil aad reproduces the version 1 container; passing the manifest bytes
-// reproduces version 2.
+// reproduces version 3, header included.
 func encryptStream(dst io.Writer, src io.Reader, key, aad []byte) (int64, error) {
 	aead, err := newAEAD(key)
 	if err != nil {
 		return 0, err
+	}
+	if len(aad) > 0 {
+		if _, err := dst.Write(buildContainerHeader(aad)); err != nil {
+			return 0, err
+		}
 	}
 	var (
 		total int64
@@ -78,6 +84,7 @@ type encReader struct {
 	f         *os.File
 	aead      cipher.AEAD
 	aad       []byte
+	base      int64 // where the chunk stream starts (past the v3 header)
 	plainSize int64
 	off       int64
 	chunkIdx  int64 // index of the chunk in buf, -1 if none
@@ -89,24 +96,35 @@ func newEncReader(f *os.File, key, aad []byte, plainSize int64) (*encReader, err
 	if err != nil {
 		return nil, err
 	}
-	// Version 2 fixes the ciphertext length: the manifest declares the chunk
-	// count, so a body that is not exactly that long is rejected before a
-	// single tag is checked. This mirrors decryptFile in e2e.js, and it is what
+	// Version 3 fixes the stored length: the manifest declares the chunk count,
+	// so an object that is not exactly that long is rejected before a single
+	// tag is checked. This mirrors decryptChunks in e2e.js, and it is what
 	// catches the two cases per-chunk tags never could — a file truncated at a
 	// chunk boundary, and a blob replaced with nothing at all, which otherwise
 	// reads as a perfectly valid empty file.
+	var base int64
 	if len(aad) > 0 {
 		st, err := f.Stat()
 		if err != nil {
 			return nil, err
 		}
-		if want := e2eCipherLen(plainSize, e2eVersionV2); st.Size() != want {
+		if want := e2eCipherLen(plainSize, len(aad), e2eVersionV3); st.Size() != want {
 			return nil, fmt.Errorf("ciphertext is %d bytes, the manifest requires %d",
 				st.Size(), want)
 		}
+		// The object leads with its own manifest; it must be the one we were
+		// handed, or the file is describing something else.
+		head := make([]byte, e2eHeaderLen(len(aad), e2eVersionV3))
+		if _, err := f.ReadAt(head, 0); err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(head, buildContainerHeader(aad)) {
+			return nil, errors.New("the embedded manifest does not match the one supplied")
+		}
+		base = int64(len(head))
 	}
-	r := &encReader{f: f, aead: aead, aad: aad, plainSize: plainSize, chunkIdx: -1}
-	// An empty version 2 file has a chunk but no bytes to read, so Read would
+	r := &encReader{f: f, aead: aead, aad: aad, base: base, plainSize: plainSize, chunkIdx: -1}
+	// An empty version 3 file has a chunk but no bytes to read, so Read would
 	// return EOF without ever checking a tag. Verify it here, otherwise the one
 	// case the empty chunk exists for would go unverified.
 	if plainSize == 0 && len(aad) > 0 {
@@ -135,7 +153,7 @@ func (r *encReader) Read(p []byte) (int, error) {
 
 func (r *encReader) loadChunk(idx int64) error {
 	raw := make([]byte, chunkCipherLen)
-	n, err := r.f.ReadAt(raw, idx*chunkCipherLen)
+	n, err := r.f.ReadAt(raw, r.base+idx*chunkCipherLen)
 	if err != nil && err != io.EOF {
 		return err
 	}

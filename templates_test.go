@@ -91,7 +91,7 @@ func TestTemplatesRender(t *testing.T) {
 			"ContentType": "image/jpeg", "UploadedAt": now, "ExpiresAt": exp.UTC(),
 			"HasLimit": true, "MaxDL": 3, "DownloadsLeft": 2,
 			"PreviewKind": "", "IconKind": "image", "User": (*User)(nil),
-			"E2EVersion": e2eVersionV2, "Manifest": "eyJ2IjoyfQ"},
+			"E2EVersion": e2eVersionV3, "Manifest": "eyJ2IjoyfQ"},
 		{"State": "e2e", "E2EMode": "url", "ID": "id1", "Name": "blob.bin", "Size": int64(5),
 			"ContentType": "application/octet-stream", "UploadedAt": now,
 			"HasLimit": false, "PreviewKind": "", "IconKind": "generic", "User": (*User)(nil),
@@ -100,7 +100,7 @@ func TestTemplatesRender(t *testing.T) {
 		{"State": "e2e", "E2EMode": "password", "ID": "id1", "Name": "secret.txt", "Size": int64(5),
 			"ContentType": "text/plain", "UploadedAt": now, "AuthSalt": "c2FsdHNhbHRzYWx0c2E",
 			"HasLimit": false, "PreviewKind": "text", "IconKind": "text", "User": (*User)(nil),
-			"E2EVersion": e2eVersionV2, "Manifest": "eyJ2IjoyfQ"},
+			"E2EVersion": e2eVersionV3, "Manifest": "eyJ2IjoyfQ"},
 	}
 	// Shapes of the shell quota bar that the case above never reaches: a file
 	// limit with no byte limit (the bar then tracks files), an entirely

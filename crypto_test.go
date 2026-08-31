@@ -22,7 +22,7 @@ import (
 // vectors from a real WebCrypto.
 func TestChunkFormatRoundTrip(t *testing.T) {
 	dek := randomBytes(32)
-	manifest := []byte(`{"v":2,"id":"x","batch":"","size":209273,"chunks":4,"chunk":65536,"name":"a","type":"t"}`)
+	manifest := []byte(`{"v":3,"id":"x","batch":"","size":209273,"chunks":4,"chunk":65536,"name":"a","type":"t"}`)
 
 	// Odd size crossing several chunk boundaries.
 	plain := randomBytes(3*chunkPlainSize + 12345)

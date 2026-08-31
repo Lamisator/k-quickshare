@@ -458,18 +458,18 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only the current container version is accepted for new uploads. Version 1
-	// is still read — old shares must keep opening — but writing it again would
-	// mean storing a file whose length, chunk count and name nothing
-	// authenticates, which is the whole reason version 2 exists.
+	// Version 1 is still read — old shares must keep opening — but writing it
+	// again would mean storing a file whose length, chunk count and name
+	// nothing authenticates, which is the whole reason the manifest exists.
 	//
 	// Checked after the size limit so an over-large file still gets told its
 	// size and the limit, which is the answer the person uploading can act on.
-	if v := r.FormValue("e2e_version"); v != strconv.Itoa(e2eVersionV2) {
+	e2eVersion, verr := strconv.Atoi(r.FormValue("e2e_version"))
+	if verr != nil || e2eVersion < e2eMinUploadVersion || e2eVersion > e2eCurrentVersion {
 		dst.Close()
 		_ = os.Remove(dstPath)
-		http.Error(w, fmt.Sprintf("uploads must use e2e_version %d", e2eVersionV2),
-			http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("uploads must use e2e_version %d..%d",
+			e2eMinUploadVersion, e2eCurrentVersion), http.StatusBadRequest)
 		return
 	}
 
@@ -488,7 +488,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if batch != nil {
 		batchIDForManifest = batch.ID
 	}
-	manifest, merr := parseManifest(manifestRaw, plainSize, batchIDForManifest)
+	manifest, merr := parseManifest(manifestRaw, plainSize, batchIDForManifest, e2eVersion)
 	if merr != nil {
 		dst.Close()
 		_ = os.Remove(dstPath)
@@ -496,8 +496,32 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A version 3 object begins with its own manifest. Check that it is the one
+	// the request declared before storing either, so the row and the file can
+	// never describe different things — and write the header through unchanged,
+	// because it is covered by the chunks' AAD.
+	var headerWritten int64
+	if e2eVersion >= e2eVersionV3 {
+		head, herr := verifyContainerHeader(file, manifestRaw)
+		if herr != nil {
+			dst.Close()
+			_ = os.Remove(dstPath)
+			http.Error(w, herr.Error(), http.StatusBadRequest)
+			return
+		}
+		n, werr := dst.Write(head)
+		if werr != nil {
+			dst.Close()
+			_ = os.Remove(dstPath)
+			httpError(w, werr, http.StatusInternalServerError)
+			return
+		}
+		headerWritten = int64(n)
+	}
+
 	ctWritten, copyErr := io.Copy(dst, file)
-	if copyErr == nil && ctWritten != e2eCipherLen(plainSize, e2eVersionV2) {
+	ctWritten += headerWritten
+	if copyErr == nil && ctWritten != e2eCipherLen(plainSize, len(manifestRaw), e2eVersion) {
 		copyErr = fmt.Errorf("ciphertext length %d does not match plain_size %d", ctWritten, plainSize)
 	}
 	written = plainSize
@@ -551,7 +575,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			id.String(), origName, storedName, written, contentType,
 			user.ID.String(), expiresAt, maxDownloads,
 			keyMode, salt, authVerifier, batchID, wrappedKey,
-			e2eVersionV2, manifestRaw)
+			e2eVersion, manifestRaw)
 		return err
 	})
 	if err != nil {
