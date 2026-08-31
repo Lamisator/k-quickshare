@@ -112,7 +112,7 @@ func (a *App) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		                      key_mode, auth_salt, auth_verifier, e2e_version)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		id.String(), user.ID.String(), expiresAt, maxDownloads,
-		keyMode, authSalt, authVerifier, e2eVersionV2)
+		keyMode, authSalt, authVerifier, e2eCurrentVersion)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
@@ -121,7 +121,7 @@ func (a *App) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		"id":         id.String(),
 		"url":        "/b/" + id.String(),
 		"expiresAt":  expiresAt,
-		"e2eVersion": e2eVersionV2,
+		"e2eVersion": e2eCurrentVersion,
 	})
 }
 
