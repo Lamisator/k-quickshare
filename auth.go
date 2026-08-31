@@ -18,7 +18,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/argon2"
-	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -70,9 +69,14 @@ func userFromContext(ctx context.Context) *User {
 
 // --- password hashing -------------------------------------------------------
 //
-// Local passwords are hashed with Argon2id. Bcrypt hashes written by earlier
-// versions still verify, and are transparently upgraded on the next successful
-// sign-in (see rehashIfLegacy), so nobody has to reset anything.
+// Local passwords are hashed with Argon2id, and nothing else. Earlier versions
+// wrote bcrypt and kept a verifier for it so existing accounts could be
+// upgraded on their next sign-in; every stored hash has since been migrated, so
+// that verifier and the upgrade path it fed are gone.
+//
+// Consequence worth knowing before restoring an old backup: a dump taken before
+// the migration still holds bcrypt hashes, and those accounts can no longer log
+// in at all. Their passwords have to be reset by an admin.
 //
 // Parameters are OWASP's first recommended Argon2id configuration: 19 MiB of
 // memory, two passes, one lane. The heavier m=64MiB/p=4 variant is also
@@ -97,24 +101,17 @@ func hashPassword(pw string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(sum)), nil
 }
 
-// checkPassword verifies pw against a stored hash in either format. The
-// algorithm is taken from the stored string, never from configuration, so
-// changing the parameters above cannot invalidate existing hashes.
+// checkPassword verifies pw against a stored Argon2id hash. Anything that is
+// not one — empty, bcrypt, or a corrupted row — fails closed rather than
+// falling back to another algorithm.
+//
+// The cost parameters are read from the stored string, never from the constants
+// above, so raising them later cannot invalidate hashes already written.
 func checkPassword(hash, pw string) bool {
-	switch {
-	case hash == "":
+	if !strings.HasPrefix(hash, "$argon2id$") {
 		return false
-	case strings.HasPrefix(hash, "$argon2id$"):
-		return checkArgon2id(hash, pw)
-	default:
-		return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
 	}
-}
-
-// isLegacyHash reports whether a stored hash should be rewritten with the
-// current algorithm the next time the password is verified.
-func isLegacyHash(hash string) bool {
-	return hash != "" && !strings.HasPrefix(hash, "$argon2id$")
+	return checkArgon2id(hash, pw)
 }
 
 func checkArgon2id(hash, pw string) bool {
@@ -150,20 +147,6 @@ func checkArgon2id(hash, pw string) bool {
 	}
 	got := argon2.IDKey([]byte(pw), salt, timeArg, memory, threads, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1
-}
-
-// rehashIfLegacy upgrades a bcrypt hash to Argon2id after a successful login.
-// Failure is logged and ignored: the user is already authenticated and must not
-// be turned away because a background upgrade did not stick.
-func (a *App) rehashIfLegacy(ctx context.Context, userID uuid.UUID, storedHash, password string) {
-	if !isLegacyHash(storedHash) {
-		return
-	}
-	if err := a.updatePassword(ctx, userID, password); err != nil {
-		log.Printf("rehash password for %s: %v", userID, err)
-		return
-	}
-	log.Printf("password hash upgraded to argon2id for user id=%s", userID)
 }
 
 func randomToken(n int) string {

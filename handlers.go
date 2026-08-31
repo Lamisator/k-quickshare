@@ -226,9 +226,6 @@ func (a *App) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 	a.loginLimiter.reset(r.Context(), limitKey)
 	a.loginSourceLimiter.reset(r.Context(), sourceKey)
-	// The stored hash may predate Argon2id. This is the only moment the plain
-	// password is available to rewrite it with, so take it.
-	a.rehashIfLegacy(r.Context(), user.ID, hash, password)
 	sid, expires, err := a.createSession(r.Context(), user.ID, nil)
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)

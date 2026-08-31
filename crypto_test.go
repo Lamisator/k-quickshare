@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 // TestChunkFormatRoundTrip exercises the Go reference implementation of the
@@ -174,9 +172,11 @@ func TestFailLimiter(t *testing.T) {
 	}
 }
 
-// TestPasswordHashing covers the Argon2id migration. Bcrypt hashes written by
-// earlier versions must keep verifying — otherwise an upgrade locks every local
-// account out — while new ones are Argon2id and are flagged for rehash.
+// TestPasswordHashing covers password storage now that Argon2id is the only
+// scheme. Bcrypt was removed once every stored hash had been migrated, so the
+// interesting case is no longer "the old format still verifies" but the
+// opposite: a bcrypt hash must be rejected outright rather than silently
+// falling back to another algorithm.
 func TestPasswordHashing(t *testing.T) {
 	const pw = "correct horse battery staple"
 
@@ -193,10 +193,6 @@ func TestPasswordHashing(t *testing.T) {
 	if checkPassword(hash, pw+"!") {
 		t.Error("argon2id hash verified the wrong password")
 	}
-	if isLegacyHash(hash) {
-		t.Error("a fresh argon2id hash was flagged for rehash")
-	}
-
 	// Two hashes of the same password must differ: the salt is random.
 	other, err := hashPassword(pw)
 	if err != nil {
@@ -206,19 +202,23 @@ func TestPasswordHashing(t *testing.T) {
 		t.Error("two hashes of the same password are identical — the salt is not random")
 	}
 
-	// A bcrypt hash of the same password, as written before this change.
-	legacy, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.MinCost)
-	if err != nil {
-		t.Fatal(err)
+	// Real bcrypt hashes of pw, in the format the database held before the
+	// migration. They are literals rather than freshly generated ones because
+	// the library that would generate them is exactly what this change removes
+	// — depending on it here would leave bcrypt in the build. Both were
+	// produced by golang.org/x/crypto/bcrypt and verified against pw at the
+	// time; the $2b$/$2y$ variants differ from $2a$ only in that tag.
+	legacy := []string{
+		"$2a$04$CqCrIhSL/AO5IWgwWNw.qufNuLyW3QDDLUs39F/02z1.MblrRK/1S",
+		"$2a$10$aAYlyy5w1SJhrvvx6jLLQ.v1XbizKMcPBfObK8IgJHDFLrXjjjAKW",
 	}
-	if !checkPassword(string(legacy), pw) {
-		t.Error("an existing bcrypt hash stopped verifying")
-	}
-	if checkPassword(string(legacy), "wrong") {
-		t.Error("bcrypt hash verified the wrong password")
-	}
-	if !isLegacyHash(string(legacy)) {
-		t.Error("a bcrypt hash was not flagged for rehash")
+	for _, h := range legacy {
+		for _, prefix := range []string{"$2a$", "$2b$", "$2y$"} {
+			stored := prefix + h[4:]
+			if checkPassword(stored, pw) {
+				t.Errorf("bcrypt hash %s verified a password — bcrypt was supposed to be gone", stored)
+			}
+		}
 	}
 
 	// Malformed and hostile stored values must fail closed, not panic and not

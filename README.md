@@ -45,7 +45,7 @@ dependencies beyond the two containers.
 - QR code for any link, generated client-side.
 
 **Access**
-- Local accounts (bcrypt, database-backed sessions) and OIDC single sign-on,
+- Local accounts (Argon2id, database-backed sessions) and OIDC single sign-on,
   which coexist — enabling SSO does not disable password login.
 - Admin and super-admin roles; user management and OIDC settings in the UI.
 
@@ -479,7 +479,7 @@ advisories land without anyone pushing.
   format, both versions. Nothing in the shipped binary encrypts or decrypts a
   file, so this lives in test scope purely as an oracle.
 - `crypto_test.go` — the container round-trip including seekable reads, plus
-  password hashing (Argon2id, and that existing bcrypt hashes still verify),
+  password hashing (Argon2id, and that a bcrypt hash is now rejected outright),
   session-token hashing, the step-up window and the HSTS gate.
 - `e2e_interop_test.go` — **byte-exact vectors** proving Go and browser
   WebCrypto produce identical ciphertext, for version 1 and version 3, plus the
@@ -597,9 +597,12 @@ expire after 15 minutes.
 
 - Local passwords are hashed with **Argon2id** (19 MiB, t=2, p=1 — OWASP's
   first recommended configuration; the heavier m=64MiB/p=4 variant would let
-  the public login form allocate that much per attempt). Bcrypt hashes from
-  earlier versions still verify and are rewritten as Argon2id on the next
-  successful sign-in. Minimum length is 12.
+  the public login form allocate that much per attempt). Minimum length is 12.
+  Argon2id is the only scheme: earlier versions wrote bcrypt and kept a
+  verifier so accounts could be upgraded on their next sign-in, and once every
+  stored hash had been migrated that verifier was removed. Restoring a dump
+  taken before the migration therefore leaves those accounts unable to log in —
+  an admin has to reset their passwords.
 - The session cookie is a bearer token, and only its **SHA-256** is stored. A
   leaked `sessions` row proves a session exists; it cannot be replayed as one.
   A plain hash is right here — the token is 32 bytes of CSPRNG output, so there
