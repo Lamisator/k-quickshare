@@ -62,7 +62,7 @@
       el.src = URL.createObjectURL(blob);
       if (kind === 'image') {
         el.alt = name;
-        makeZoomable(box, el);
+        makeZoomable(el, name);
       }
       box.appendChild(el);
     }
@@ -92,46 +92,78 @@
     return new Blob(parts).arrayBuffer();
   }
 
-  // makeZoomable turns a preview image into a click-to-enlarge one: fitted to
-  // the box by default, shown at full size — scrollable, so a large photo can
-  // be panned — once clicked. The zoom state lives on the box rather than the
-  // image because the box is the element that has to start scrolling.
+  // ---- click-to-enlarge ----------------------------------------------------
   //
-  // It is not a <button> because a button cannot contain the image it wraps
-  // without the browser shrinking it to content width, so the role, the tab
-  // stop and the Enter/Space handling are supplied here instead.
-  function makeZoomable(box, img) {
+  // The enlarged picture goes in FRONT of everything rather than growing
+  // inside its own preview box. In the gallery that box is hemmed in by the
+  // caption, the thumbnail strip and the arrow buttons, so enlarging in place
+  // only ever meant "bigger, inside a small frame".
+  //
+  // The overlay is a <dialog> opened with showModal() because the gallery is
+  // one too: a modal dialog lives in the browser's top layer, and nothing
+  // painted in the ordinary page can be drawn above it — no z-index would
+  // help. A second modal dialog stacks on top of the first, which is exactly
+  // the foreground this needs.
+  let zoomOverlay = null;
+
+  function buildZoomOverlay() {
+    const el = document.createElement('dialog');
+    el.className = 'zoom';
+
+    const img = document.createElement('img');
+    img.className = 'zoom-img';
+    // Clicking the picture puts it away again, the way clicking opened it.
+    img.addEventListener('click', () => el.close());
+
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'zoom-close';
+    close.innerHTML =
+      '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+    close.addEventListener('click', () => el.close());
+
+    // The backdrop is the dialog itself; the image and button sit on top of it.
+    // detail > 0 keeps a keyboard-activated button, which reports a click at
+    // (0,0), from reading as a click on the backdrop.
+    el.addEventListener('click', (e) => {
+      if (e.target === el && e.detail > 0) el.close();
+    });
+
+    el.appendChild(img);
+    el.appendChild(close);
+    document.body.appendChild(el);
+    zoomOverlay = { el: el, img: img, close: close };
+  }
+
+  function openZoom(src, name) {
+    if (!zoomOverlay) buildZoomOverlay();
+    zoomOverlay.img.src = src;
+    zoomOverlay.img.alt = name || '';
+    zoomOverlay.img.title = t('zoom_out');
+    zoomOverlay.el.setAttribute('aria-label', name || t('zoom_in'));
+    zoomOverlay.close.setAttribute('aria-label', t('gallery_close'));
+    // A previous viewing may have been left panned into a corner.
+    zoomOverlay.el.scrollTop = 0;
+    zoomOverlay.el.scrollLeft = 0;
+    zoomOverlay.el.showModal();
+  }
+
+  // makeZoomable marks a preview image as the thing that opens that overlay.
+  //
+  // It is not a <button> because a button cannot wrap an image without the
+  // browser shrinking it to content width, so the role, the tab stop and the
+  // Enter/Space handling are supplied here instead.
+  function makeZoomable(img, name) {
     img.className = 'preview-zoom';
     img.tabIndex = 0;
     img.setAttribute('role', 'button');
-    img.setAttribute('aria-pressed', 'false');
+    img.setAttribute('aria-haspopup', 'dialog');
     img.title = t('zoom_in');
-    const toggle = () => {
-      const on = box.classList.toggle('is-zoomed');
-      img.setAttribute('aria-pressed', on ? 'true' : 'false');
-      img.title = on ? t('zoom_out') : t('zoom_in');
-      // Coming back to the fitted view from a corner of a panned image would
-      // otherwise leave the box scrolled to nowhere.
-      if (!on) { box.scrollTop = 0; box.scrollLeft = 0; }
-    };
-    img.addEventListener('click', toggle);
+    const open = () => openZoom(img.src, name);
+    img.addEventListener('click', open);
     img.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
     });
-  }
-
-  // resetZoom puts a cached preview back to its fitted state, so stepping onto
-  // an image in the gallery always starts by showing the whole picture.
-  function resetZoom(box) {
-    if (!box || !box.classList.contains('is-zoomed')) return;
-    box.classList.remove('is-zoomed');
-    box.scrollTop = 0;
-    box.scrollLeft = 0;
-    const img = box.querySelector('.preview-zoom');
-    if (img) {
-      img.setAttribute('aria-pressed', 'false');
-      img.title = t('zoom_in');
-    }
   }
 
   // saveBlob hands a blob to the browser as a download. Batch members and the
@@ -1089,7 +1121,6 @@
 
       const cached = galleryNodes.get(m.id);
       if (cached) {
-        resetZoom(cached);
         gallery.view.appendChild(cached);
         return;
       }
