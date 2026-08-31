@@ -713,16 +713,20 @@ code {
    sticky sidebar or the toast. The dialog element is only the frame: all
    padding lives on .gallery-box, which is what lets a click on the dialog
    itself mean "the backdrop was clicked". */
+/* Full-bleed: the whole viewport, so the stage gets every pixel there is. */
 .gallery {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
   padding: 0;
   border: none;
-  margin: auto;
   background: transparent;
   color: var(--text);
-  width: min(960px, 94vw);
-  max-width: 94vw;
-  max-height: 94vh;
-  overflow: visible;
+  overflow: hidden;
 }
 .gallery::backdrop { background: rgba(8, 11, 15, 0.78); }
 
@@ -730,12 +734,11 @@ code {
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
-  max-height: 94vh;
+  height: 100%;
   padding: 0.9rem 1.1rem 1.1rem;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-lg);
+  border: none;
+  border-radius: 0;
 }
 
 .gallery-head {
@@ -754,12 +757,15 @@ code {
   display: flex;
   align-items: center;
   gap: 0.6rem;
+  /* Takes every row the head, caption and strip do not claim. */
+  flex: 1 1 auto;
   min-height: 0;
 }
 .gallery-view {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -790,12 +796,15 @@ code {
 .gallery-preview {
   margin: 0;
   width: 100%;
+  height: 100%;
   min-height: 0;
 }
+/* Percentages, not viewport units: the stage is what is left after the strip
+   and the caption, and the media has to fit THAT, not the screen. */
 .gallery-preview img,
-.gallery-preview video { max-height: 56vh; }
-.gallery-preview iframe { height: 56vh; }
-.gallery-preview .e2e-text { max-height: 56vh; }
+.gallery-preview video { max-height: 100%; max-width: 100%; }
+.gallery-preview iframe { height: 100%; }
+.gallery-preview .e2e-text { max-height: 100%; }
 
 .gallery-caption {
   display: flex;
@@ -878,6 +887,15 @@ code {
 @media (prefers-reduced-motion: reduce) {
   .gallery-tile.is-loading .gallery-thumb { animation: none; opacity: 0.6; }
 }
+/* The tile keeps the icon's per-kind colour but not its 40px chip: the thumb
+   itself is already the box. */
+.gallery-thumb .ficon {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  background: transparent;
+}
+.gallery-thumb .ficon-svg { width: 26px; height: 26px; }
 .gallery-thumb img {
   width: 100%;
   height: 100%;
@@ -1024,6 +1042,9 @@ code {
   color: var(--text-muted);
   flex-shrink: 0;
 }
+/* The <symbol> definitions the .ficon <use> elements point at. Never painted
+   itself; symbols still resolve out of a display:none container. */
+.icon-sprite { display: none; }
 .ficon-image   { color: var(--success); background: rgba(110, 201, 154, 0.12); }
 .ficon-video   { color: var(--accent-bright); background: var(--accent-soft); }
 .ficon-audio   { color: var(--purple); background: rgba(180, 142, 230, 0.12); }
@@ -1336,6 +1357,25 @@ body.bare {
   max-height: 420px;
   display: block;
   object-fit: contain;
+}
+/* Click-to-enlarge. Fitted by default; at full size the box scrolls, so a
+   photo larger than the screen can be panned rather than squeezed. min-width
+   makes the click do something visible for an image smaller than the box too,
+   instead of leaving it looking broken. */
+.dl-preview img.preview-zoom { cursor: zoom-in; }
+.dl-preview img.preview-zoom:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dl-preview.is-zoomed {
+  overflow: auto;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+.dl-preview.is-zoomed img.preview-zoom {
+  cursor: zoom-out;
+  max-width: none;
+  max-height: none;
+  min-width: 100%;
+  width: auto;
+  height: auto;
 }
 .dl-preview video { width: 100%; max-height: 420px; display: block; background: #000; }
 .dl-preview audio { width: 100%; padding: 1.25rem 1rem; }
@@ -1802,21 +1842,13 @@ body.bare {
   .queue-item { padding: 0.75rem 0.85rem 0.85rem; }
   .batch-share { padding: 0.85rem 0.9rem 0.9rem; }
 
-  /* The gallery gets the whole screen; the nav buttons and tiles shrink so the
-     stage keeps as much of it as possible. */
-  .gallery { width: 100vw; max-width: 100vw; max-height: 100dvh; }
-  .gallery-box {
-    max-height: 100dvh;
-    min-height: 100dvh;
-    border-radius: 0;
-    border: none;
-    padding: 0.8rem 0.85rem 0.9rem;
-  }
+  /* The gallery is full-bleed at every size; here the chrome around the stage
+     shrinks so more of the screen is left for the file itself. */
+  .gallery-box { padding: 0.8rem 0.85rem 0.9rem; gap: 0.5rem; }
   .gallery-nav { width: 34px; height: 34px; }
   .gallery-stage { gap: 0.35rem; }
-  .gallery-strip { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); gap: 0.4rem; }
-  .gallery-preview img, .gallery-preview video { max-height: 46vh; }
-  .gallery-preview iframe, .gallery-preview .e2e-text { height: 46vh; max-height: 46vh; }
+  .gallery-strip { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); gap: 0.4rem; max-height: 18vh; }
+  .gallery-thumb .ficon-svg { width: 20px; height: 20px; }
   .file-item { padding: 0.8rem 0.85rem; gap: 0.7rem; }
   .batch-row { padding: 0.7rem 0.75rem; gap: 0.65rem; }
 }

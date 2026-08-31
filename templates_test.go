@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -332,6 +333,67 @@ func TestTranslationsComplete(t *testing.T) {
 			if strings.TrimSpace(entry[lang]) == "" {
 				t.Errorf("key %q missing %s translation", key, lang)
 			}
+		}
+	}
+}
+
+// TestFileIconsResolve pins the sprite wiring. The icons moved from repeated
+// inline SVG to one <symbol> set referenced by <use href="#fi-...">, which puts
+// an action inside a URL attribute — exactly the context html/template rewrites
+// — so "it executed without error" is not evidence that the reference survived.
+// A mangled href renders a blank chip, which no other test would notice.
+func TestFileIconsResolve(t *testing.T) {
+	tmpl, err := loadTemplates()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	// Every bucket iconKind() can return must have a symbol to point at.
+	kinds := []string{"image", "video", "audio", "pdf", "text", "doc", "archive", "generic"}
+	for _, ct := range []string{"image/png", "video/mp4", "audio/ogg", "application/pdf",
+		"text/plain", "application/json", "application/octet-stream"} {
+		got := iconKind(ct, "f.bin")
+		if !slices.Contains(kinds, got) {
+			t.Errorf("iconKind(%q) = %q, which has no sprite symbol", ct, got)
+		}
+	}
+	for _, name := range []string{"a.zip", "a.7z", "a.docx", "a.xlsx", "a.odp", "a.unknown"} {
+		got := iconKind("application/octet-stream", name)
+		if !slices.Contains(kinds, got) {
+			t.Errorf("iconKind(name=%q) = %q, which has no sprite symbol", name, got)
+		}
+	}
+
+	var sprite strings.Builder
+	if err := tmpl.ExecuteTemplate(&sprite, "filesprite", nil); err != nil {
+		t.Fatalf("filesprite: %v", err)
+	}
+	for _, k := range kinds {
+		if !strings.Contains(sprite.String(), `id="fi-`+k+`"`) {
+			t.Errorf("sprite has no symbol for kind %q", k)
+		}
+	}
+
+	for _, k := range kinds {
+		var out strings.Builder
+		if err := tmpl.ExecuteTemplate(&out, "fileicon", k); err != nil {
+			t.Fatalf("fileicon %q: %v", k, err)
+		}
+		want := `<use href="#fi-` + k + `"/>`
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("fileicon %q rendered %q, want it to contain %q", k, out.String(), want)
+		}
+	}
+
+	// A page that draws icons but forgets the sprite shows empty chips, so the
+	// two have to travel together.
+	for _, page := range []string{"history.html", "download.html", "batch.html"} {
+		src, err := templatesFS.ReadFile("web/templates/" + page)
+		if err != nil {
+			t.Fatalf("read %s: %v", page, err)
+		}
+		if !strings.Contains(string(src), `{{template "filesprite" .}}`) {
+			t.Errorf("%s renders file icons but does not include the sprite", page)
 		}
 	}
 }

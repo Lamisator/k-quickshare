@@ -17,6 +17,24 @@
     return s;
   };
 
+  // ---- file-type icons -----------------------------------------------------
+  //
+  // Drawn from the sprite the page already carries (see "filesprite" in
+  // _layout.html), so a list built here and one rendered by Go cannot drift
+  // apart. Kinds must match iconKind() in handlers.go; anything unexpected
+  // falls back to the generic page rather than rendering an empty box.
+  const ICON_KINDS = ['image', 'video', 'audio', 'pdf', 'text', 'doc', 'archive', 'generic'];
+
+  function fileIcon(kind) {
+    const k = ICON_KINDS.indexOf(kind) >= 0 ? kind : 'generic';
+    const span = document.createElement('span');
+    span.className = 'ficon ficon-' + k;
+    span.setAttribute('aria-hidden', 'true');
+    span.innerHTML = '<svg class="ficon-svg" viewBox="0 0 24 24" width="20" height="20">' +
+      '<use href="#fi-' + k + '"/></svg>';
+    return span;
+  }
+
   // renderPreviewInto builds the preview node for a decrypted blob and appends
   // it to box. Shared by the single-file landing page and the batch list so the
   // content-sniffing rules below cannot drift apart between the two.
@@ -42,7 +60,10 @@
         kind === 'image' ? 'img' : kind === 'video' ? 'video' : 'audio');
       if (kind !== 'image') { el.controls = true; el.preload = 'metadata'; }
       el.src = URL.createObjectURL(blob);
-      if (kind === 'image') el.alt = name;
+      if (kind === 'image') {
+        el.alt = name;
+        makeZoomable(box, el);
+      }
       box.appendChild(el);
     }
     box.hidden = false;
@@ -69,6 +90,48 @@
       if (total && onProgress) onProgress(got / total);
     }
     return new Blob(parts).arrayBuffer();
+  }
+
+  // makeZoomable turns a preview image into a click-to-enlarge one: fitted to
+  // the box by default, shown at full size — scrollable, so a large photo can
+  // be panned — once clicked. The zoom state lives on the box rather than the
+  // image because the box is the element that has to start scrolling.
+  //
+  // It is not a <button> because a button cannot contain the image it wraps
+  // without the browser shrinking it to content width, so the role, the tab
+  // stop and the Enter/Space handling are supplied here instead.
+  function makeZoomable(box, img) {
+    img.className = 'preview-zoom';
+    img.tabIndex = 0;
+    img.setAttribute('role', 'button');
+    img.setAttribute('aria-pressed', 'false');
+    img.title = t('zoom_in');
+    const toggle = () => {
+      const on = box.classList.toggle('is-zoomed');
+      img.setAttribute('aria-pressed', on ? 'true' : 'false');
+      img.title = on ? t('zoom_out') : t('zoom_in');
+      // Coming back to the fitted view from a corner of a panned image would
+      // otherwise leave the box scrolled to nowhere.
+      if (!on) { box.scrollTop = 0; box.scrollLeft = 0; }
+    };
+    img.addEventListener('click', toggle);
+    img.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+  }
+
+  // resetZoom puts a cached preview back to its fitted state, so stepping onto
+  // an image in the gallery always starts by showing the whole picture.
+  function resetZoom(box) {
+    if (!box || !box.classList.contains('is-zoomed')) return;
+    box.classList.remove('is-zoomed');
+    box.scrollTop = 0;
+    box.scrollLeft = 0;
+    const img = box.querySelector('.preview-zoom');
+    if (img) {
+      img.setAttribute('aria-pressed', 'false');
+      img.title = t('zoom_in');
+    }
   }
 
   // saveBlob hands a blob to the browser as a download. Batch members and the
@@ -625,9 +688,7 @@
         const li = document.createElement('li');
         li.className = 'batch-row';
 
-        const icon = document.createElement('span');
-        icon.className = 'ficon ficon-' + (m.iconKind || 'generic');
-        icon.setAttribute('aria-hidden', 'true');
+        const icon = fileIcon(m.iconKind);
 
         const meta = document.createElement('div');
         meta.className = 'batch-row-meta';
@@ -743,9 +804,6 @@
     // must not wander off behind the modal.
 
     const previewableMembers = () => members.filter((m) => m.previewKind);
-    const KIND_LABEL = {
-      image: 'IMG', video: 'VID', audio: 'AUD', pdf: 'PDF', text: 'TXT',
-    };
 
     // Files at or below this are fetched and decrypted as soon as the gallery
     // opens, so stepping through a set of ordinary photos does not stall on
@@ -926,7 +984,7 @@
 
         const thumb = document.createElement('span');
         thumb.className = 'gallery-thumb';
-        thumb.textContent = KIND_LABEL[m.previewKind] || '';
+        thumb.appendChild(fileIcon(m.iconKind));
         const cap = document.createElement('span');
         cap.className = 'gallery-tile-name';
         cap.textContent = m.name;
@@ -1002,7 +1060,9 @@
     // is work nobody asked for.
     function setTileThumb(m, blob) {
       const ui = galleryTiles.get(m.id);
-      if (!ui || m.previewKind !== 'image' || ui.thumb.firstElementChild) return;
+      // The guard looks for an existing <img>, not for any child: the tile
+      // always starts with a file-type icon in it.
+      if (!ui || m.previewKind !== 'image' || ui.thumb.querySelector('img')) return;
       const img = document.createElement('img');
       img.src = URL.createObjectURL(blob);
       img.alt = '';
@@ -1029,6 +1089,7 @@
 
       const cached = galleryNodes.get(m.id);
       if (cached) {
+        resetZoom(cached);
         gallery.view.appendChild(cached);
         return;
       }
