@@ -52,6 +52,10 @@ var translations = map[string]map[string]string{
 	"upload.drop":    {"en": "Drop files here or", "de": "Dateien hier ablegen oder"},
 	"upload.browse":  {"en": "browse", "de": "durchsuchen"},
 	"upload.hint":    {"en": "Multiple files supported · up to %s each", "de": "Mehrere Dateien möglich · bis zu %s pro Datei"},
+	"upload.paste":   {"en": "Paste from clipboard", "de": "Aus Zwischenablage einfügen"},
+	"upload.paste_hint": {
+		"en": "A screenshot or a copied file works too — press Ctrl+V (⌘V on a Mac) anywhere on this page.",
+		"de": "Ein Screenshot oder eine kopierte Datei geht auch — irgendwo auf dieser Seite Strg+V (⌘V am Mac) drücken."},
 	"upload.options": {"en": "Options for this batch", "de": "Optionen für diese Übertragung"},
 
 	// --- the two upload steps ---
@@ -101,6 +105,10 @@ var translations = map[string]map[string]string{
 	"js.protected":       {"en": "password-protected", "de": "passwortgeschützt"},
 	"js.no_results":      {"en": "No files match your search.", "de": "Keine Dateien entsprechen deiner Suche."},
 	"js.quota":           {"en": "Storage limit reached", "de": "Speicherlimit erreicht"},
+	"js.pasted":          {"en": "Added %s from the clipboard", "de": "%s aus der Zwischenablage hinzugefügt"},
+	"js.paste_empty":     {"en": "Nothing to paste — the clipboard holds no image or file", "de": "Nichts einzufügen — die Zwischenablage enthält kein Bild und keine Datei"},
+	"js.paste_denied":    {"en": "Clipboard access denied — press Ctrl+V instead", "de": "Zugriff auf die Zwischenablage verweigert — stattdessen Strg+V drücken"},
+	"js.paste_unsupported": {"en": "This browser only pastes with Ctrl+V", "de": "Dieser Browser fügt nur mit Strg+V ein"},
 	"js.rate_limited":    {"en": "Too many attempts", "de": "Zu viele Versuche"},
 	"js.qr_title":        {"en": "Scan to open the share link", "de": "Scannen, um den Freigabe-Link zu öffnen"},
 	"js.e2e_encrypting":  {"en": "Encrypting…", "de": "Verschlüsseln…"},
@@ -581,6 +589,7 @@ func jsStrings(lang string) map[string]string {
 		"js.confirm_delete", "js.confirm_delete_many", "js.selected",
 		"js.protected", "js.no_results",
 		"js.quota", "js.rate_limited", "js.qr_title",
+		"js.pasted", "js.paste_empty", "js.paste_denied", "js.paste_unsupported",
 		"js.e2e_encrypting", "js.e2e_decrypting", "js.e2e_downloading",
 		"js.e2e_deriving", "js.e2e_failed", "js.e2e_wrong_pw", "js.e2e_unsupported",
 		"js.e2e_unavailable", "js.e2e_insecure",

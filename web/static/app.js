@@ -1735,6 +1735,7 @@
   const stepFiles = document.getElementById('step-files');
   const stepConfirm = document.getElementById('opt-confirm');
   const stepEdit = document.getElementById('step-edit');
+  const pasteBtn = document.getElementById('paste-btn');
   const step1Chip = document.getElementById('step1-chip');
   const step2Sub = document.getElementById('step2-sub');
 
@@ -1776,6 +1777,7 @@
       stepFiles.setAttribute('aria-disabled', paramsConfirmed ? 'false' : 'true');
     }
     if (fileInput) fileInput.disabled = !paramsConfirmed;
+    if (pasteBtn) pasteBtn.disabled = !paramsConfirmed;
     if (stepParams) stepParams.classList.toggle('step-done', paramsConfirmed);
     if (step1Chip) step1Chip.hidden = !paramsConfirmed;
     if (stepConfirm) stepConfirm.hidden = paramsConfirmed;
@@ -1901,6 +1903,109 @@
     fileInput.value = '';
   });
 
+  // ---- clipboard ----------------------------------------------------------
+  //
+  // Two ways in, because they see different clipboards. The paste event carries
+  // whatever the OS actually put there — a screenshot, but also files copied in
+  // a file manager, which arrive with their real names. The async Clipboard API
+  // is the only path a button can take, and it exposes images alone. So Ctrl+V
+  // is the capable route and the button is the discoverable one.
+
+  const PASTE_EXT = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+    'image/webp': 'webp', 'image/avif': 'avif', 'image/bmp': 'bmp',
+    'image/tiff': 'tif', 'image/svg+xml': 'svg',
+    'application/pdf': 'pdf', 'text/plain': 'txt', 'text/html': 'html',
+  };
+
+  // Every browser hands a pasted screenshot over as "image.png", so a second
+  // paste would queue a second file under the first one's name — and the name
+  // is what the recipient sees, sealed but still the only label there is. A
+  // timestamp makes it distinct and says where it came from; a file copied out
+  // of a file manager already has a real name and keeps it.
+  function pastedName(name, type, seq) {
+    if (name && !/^(image|grafik|bild)\.\w+$/i.test(name)) return name;
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+      '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+    const dot = name ? name.lastIndexOf('.') : -1;
+    const ext = PASTE_EXT[type] || (dot > 0 ? name.slice(dot + 1) : 'bin');
+    return 'pasted-' + stamp + (seq > 0 ? '-' + (seq + 1) : '') + '.' + ext;
+  }
+
+  // clipboardData.files is empty in some browsers that still list the same
+  // entries under .items, so both are read and de-duplicated by identity.
+  function filesFromClipboard(dt) {
+    const out = [];
+    for (const f of dt.files || []) out.push(f);
+    for (const item of dt.items || []) {
+      if (item.kind !== 'file') continue;
+      const f = item.getAsFile();
+      if (f && !out.includes(f)) out.push(f);
+    }
+    return out.map((f, i) => renamed(f, pastedName(f.name, f.type, i)));
+  }
+
+  // A File's name is read-only, so a rename means a new File over the same
+  // bytes. type is carried across deliberately: it is sealed with the name and
+  // decides the recipient's preview.
+  function renamed(file, name) {
+    if (name === file.name) return file;
+    return new File([file], name, { type: file.type, lastModified: file.lastModified });
+  }
+
+  document.addEventListener('paste', (e) => {
+    const dt = e.clipboardData;
+    if (!dt) return;
+    // Pasting text into a field stays a text paste, even when the clipboard
+    // also carries an image — copying out of a rich editor usually gives both.
+    const target = e.target;
+    const editing = target && (target.isContentEditable ||
+      /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ''));
+    if (editing && (dt.getData('text/plain') || '') !== '') return;
+    const files = filesFromClipboard(dt);
+    if (!files.length) return;
+    e.preventDefault();
+    if (handleFiles(files)) toast(t('pasted', fileCountLabel(files.length)));
+  });
+
+  if (pasteBtn) {
+    pasteBtn.addEventListener('click', async () => {
+      // navigator.clipboard is absent on an insecure origin, which is also
+      // where the upload itself cannot run — see the E2E guard.
+      if (!navigator.clipboard || !navigator.clipboard.read) {
+        toast(t('paste_unsupported'));
+        return;
+      }
+      let items;
+      try {
+        items = await navigator.clipboard.read();
+      } catch (err) {
+        // A denied permission and a dismissed paste prompt both land here;
+        // Ctrl+V needs neither, so that is what the message points at.
+        toast(t(err && err.name === 'NotAllowedError' ? 'paste_denied' : 'paste_empty'));
+        return;
+      }
+      const files = [];
+      for (const item of items) {
+        // Plain text and HTML are the flavours of a text copy, not a file.
+        const type = (item.types || []).find(
+          (ty) => ty !== 'text/plain' && ty !== 'text/html');
+        if (!type) continue;
+        try {
+          const blob = await item.getType(type);
+          files.push(new File([blob], pastedName('', type, files.length), { type }));
+        } catch (err) { /* skip the entry, keep the rest of the clipboard */ }
+      }
+      if (!files.length) {
+        toast(t('paste_empty'));
+        return;
+      }
+      if (handleFiles(files)) toast(t('pasted', fileCountLabel(files.length)));
+    });
+  }
+
   // Uploads run ONE AT A TIME.
   //
   // Firing them in parallel shares the same upstream bandwidth between every
@@ -1916,14 +2021,16 @@
     return uploadChain;
   }
 
+  // Returns whether the files were accepted: a paste confirms itself with a
+  // toast, and must not claim to have added anything the gate turned away.
   function handleFiles(files) {
-    if (!files || files.length === 0) return;
+    if (!files || files.length === 0) return false;
     // A drop lands on the dropzone whether or not its input is disabled, so
     // the gate is enforced here too rather than by the styling alone.
     if (!paramsConfirmed) {
       toast(t('upload.step2_locked'));
       if (stepParams) stepParams.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      return;
+      return false;
     }
     if (sessionSection) sessionSection.hidden = false;
     // One snapshot for the whole drop: a retry must repeat the share settings
@@ -1946,6 +2053,7 @@
       }));
       enqueue(() => uploadOne(file, opts, row, ctl));
     }
+    return true;
   }
 
   // Shared by the waiting-row cancel button and uploadOne's own handler.

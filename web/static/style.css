@@ -423,6 +423,17 @@ code {
   clip: rect(0, 0, 0, 0); border: 0;
 }
 
+/* The second way into the dropzone: paste. Sits under it rather than inside,
+   because inside a <label for=file-input> every click also opens the picker. */
+.dropzone-aux {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-top: 0.7rem;
+}
+.dropzone-aux-hint { font-size: 0.82rem; color: var(--text-dim); }
+
 /* ---- the two upload steps ---- */
 
 .step {
@@ -477,6 +488,7 @@ code {
 .step-locked .dropzone:hover { border-color: var(--border); color: var(--text-muted); }
 .step-locked .dropzone-icon { color: var(--text-dim); }
 .step-locked .dropzone-text { color: var(--text-muted); }
+.step-locked .dropzone-aux { opacity: 0.75; }
 /* Settled step 1: the fields stay readable, but nothing invites a change. */
 .step-done { opacity: 0.75; }
 .step-done .step-num { background: var(--success-soft, var(--surface-2)); color: var(--success); }

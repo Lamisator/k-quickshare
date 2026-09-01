@@ -57,6 +57,10 @@ The whole scheme is in one file — [`web/static/e2e.js`](web/static/e2e.js), so
 - Two-step upload: the link's terms are settled first, and only then does the
   dropzone open — nothing can be shared under settings nobody chose.
 - Drag-and-drop upload with per-file progress, transfer rate, cancel and retry.
+- **Paste from the clipboard** — Ctrl+V anywhere on the upload page, or the
+  button under the dropzone. A screenshot arrives as `pasted-<timestamp>.png`
+  rather than the `image.png` every browser hands over, so two pastes stay
+  apart; a file copied in a file manager keeps its own name.
 - Every file uploaded in one visit is collected under **one share link**.
 - **File names and types are encrypted too**, sealed apart from the file so a
   recipient sees a listing without downloading anything and the server sees
