@@ -17,12 +17,29 @@ included.
 Go + PostgreSQL + vanilla JavaScript. No build step, no framework, no runtime
 dependencies beyond the two containers.
 
+### Cryptography at a glance
+
+| | |
+|---|---|
+| **Payload** | AES-256-GCM over 64 KiB chunks, each sealed against the file's manifest as AAD |
+| **Key derivation** | HKDF-SHA256 from a 256-bit link secret, or PBKDF2-SHA256 (600 000 iterations) from a password |
+| **Where keys exist** | The uploader's tab, and any tab holding the link. Never the server, in any form, at any moment |
+| **File names and types** | Sealed in a blob of their own, padded to a fixed size, under their own key branch |
+| **Batch integrity** | Each member's key wrapped under the batch key; the member list itself sealed as a roster |
+| **What the server stores** | Ciphertext, a sealed name blob, an opaque wrapped key, and a manifest that describes only geometry |
+| **What the server can decrypt** | Nothing. There is no code path, no key, and no fallback |
+
+The whole scheme is in one file — [`web/static/e2e.js`](web/static/e2e.js), some
+640 lines of WebCrypto with no dependencies — and Go mirrors its format decisions in
+[`crypto.go`](crypto.go) so both ends can be tested against byte-exact vectors.
+[**Cryptography**](#cryptography) has the diagrams.
+
 ---
 
 ## Contents
 
 - [Features](#features)
-- [How the encryption works](#how-the-encryption-works)
+- [Cryptography](#cryptography)
 - [Batch shares](#batch-shares)
 - [Running it](#running-it)
 - [Configuration](#configuration)
@@ -74,78 +91,293 @@ dependencies beyond the two containers.
 
 ---
 
-## How the encryption works
+## Cryptography
 
-**The server holds no key for any file, in any mode.** There is exactly one
-encryption scheme, and it runs entirely in the browser.
+**The server holds no key for any file, in any mode, at any moment.** There is
+exactly one encryption scheme, it runs entirely in the browser, and everything
+below follows from that single constraint.
 
-Files are encrypted with WebCrypto before anything is sent. Payload format is
-**chunked AES-256-GCM**: 64 KiB plaintext chunks, each sealed under a 12-byte
-nonce of `4 zero bytes || big-endian uint64 chunk index`. Chunking keeps memory
-bounded and makes the ciphertext seekable.
+### The trust boundary
+
+Everything that identifies a file — its bytes, its name, its type — is sealed on
+the left of this line. Only the right-hand side is ever written to disk.
+
+```
+             BROWSER  (holds every key)         │         SERVER  (holds none)
+                                                │
+   ┌────────────────────────────────────┐       │   ┌──────────────────────────────┐
+   │ the file's plaintext bytes         │       │   │ files                        │
+   │ its name          "invoice.pdf"    │       │   │   size_bytes    197 842      │
+   │ its type          application/pdf  │       │   │   uploaded_at   2026-08-31   │
+   │                                    │       │   │   uploaded_by   marius       │
+   │ share secret — 32 bytes, generated │       │   │   original_name NULL         │
+   │ here, living only in the link's    │       │   │   content_type  NULL         │
+   │ #fragment                          │       │   │   enc_name      540 bytes    │
+   │   ├── file key                     │       │   │   wrapped_key    60 bytes    │
+   │   ├── roster key                   │       │   │   manifest      {v,id,size…} │
+   │   └── name key                     │       │   │                              │
+   └──────────────────┬─────────────────┘       │   │ on disk                      │
+                      │                         │   │   PYX5 ‖ manifest ‖ chunks…  │
+                      │   ciphertext only       │   └──────────────────────────────┘
+                      └─────────────────────────┼──▶
+                                                │
+   The #fragment is never sent. Browsers do not │   Everything here is either
+   put it in the request line, so the secret    │   ciphertext, opaque, or a fact
+   cannot reach the server even by accident.    │   about the transaction itself.
+```
+
+The right-hand column is not an aspiration. Dump the database and grep it for a
+file name, a MIME type, or any plaintext byte of a file: there is nothing to
+find. What remains — size, time, account, which files share a link — is listed
+under [what the server can still see](#what-the-server-can-still-see).
+
+### The key schedule
+
+Every key in the system descends from one of two roots, and each purpose gets
+its own HKDF branch. Separate branches mean a key that seals a name can never
+open a file, and the one value the server is given cannot be walked backwards
+into any of the others.
+
+```
+  URL-key share  (key_mode 3)                  Password share  (key_mode 4)
+  ───────────────────────────                  ────────────────────────────
+  32 random bytes, generated in the tab        the password, never transmitted
+  and written into the link's #fragment                     │
+              │                                 PBKDF2-SHA256, 600 000 iters,
+              │                                 16-byte random salt (stored)
+              │                                             ▼
+              │                                  master secret, 256 bits
+              ▼                                             ▼
+   HKDF-SHA256, salt = ""                        HKDF-SHA256, salt = that salt
+              │                                             │
+   info ──────┤                                  info ──────┤
+              │                                             │
+   ├─ pyxis-e2e-url-v1     → file key            ├─ pyxis-e2e-enc-v1    → file / batch key
+   ├─ pyxis-e2e-batch-v1   → batch key           ├─ pyxis-e2e-auth-v1   → auth token  ──┐
+   ├─ pyxis-e2e-roster-v1  → roster key          ├─ pyxis-e2e-roster-v1 → roster key    │
+   └─ pyxis-e2e-name-v1    → name key            └─ pyxis-e2e-name-v1   → name key      │
+                                                                                        │
+   nothing here ever leaves the tab               one branch leaves the tab, once ──────┘
+                                                  the server keeps SHA-256(token)
+                                                  and compares; it cannot invert it
+                                                  and it cannot derive `enc` from it
+```
+
+The info strings are part of the protocol, not decoration: they are versioned in
+a table in `e2e.js` because changing one changes every key derived from it. The
+last time they moved — the `k-fileshare` → `pyxis` rename — every live share
+became undecryptable, and the failure was indistinguishable from a wrong
+password. That table exists so it cannot happen twice.
 
 | `key_mode` | Name | Where the key comes from |
 |---|---|---|
 | `3` | E2E URL | `HKDF(fragment secret, "", "pyxis-e2e-url-v1")` |
 | `4` | E2E password | `PBKDF2-SHA256(password, salt, 600k)` → HKDF split |
 
-For a **password** share the password itself is never transmitted. PBKDF2
-produces a master secret, which HKDF splits down three branches:
+### The file container
 
-- `enc` — the file (or batch) key. Stays in the browser.
-- `auth` — a token sent once. The server stores only `SHA-256(auth)` in
-  `auth_verifier` and uses it to gate access to the ciphertext.
-- `roster` — seals the batch's member list (below). Stays in the browser.
-- `name` — seals each file's name (below). Stays in the browser.
-
-Knowing the auth branch cannot yield the encryption branch, so the stored
-verifier is useless for decryption even to someone holding the database.
-
-### File names and types
-
-A name is sealed on its own, in a blob of its own, under its own HKDF branch —
-`pyxis-e2e-name-v1` — of the same secret. It is *not* part of the file's
-ciphertext, and that is the point: a recipient's listing shows every name in a
-batch after one cheap request, without fetching a byte of any file and without
-spending a download slot. The **MIME type** travels in the same blob, so the
-icon and the preview decision are made in the browser rather than by a server
-that would have to be told what the file is.
+Files are encrypted with WebCrypto before anything is sent: **chunked
+AES-256-GCM**, 64 KiB of plaintext per chunk. Chunking keeps memory bounded on a
+phone and makes the ciphertext seekable, so a preview does not have to hold a
+gigabyte in RAM to show the first page.
 
 ```
-enc_name = 12-byte nonce || AES-GCM(name key, padded {"v":2,"name":…,"type":…})
-AAD      = "pyxis-name-v1|" || the manifest's file id
-padding  = uint16be jsonLength || json || zeros, to a multiple of 512 bytes
+  container version 5, as stored on disk and as served
+  ┌────────┬──────────┬────────────────┬────────────────┬────────────────┬─────
+  │ "PYX5" │ uint16be │   manifest     │ chunk 0        │ chunk 1        │  …
+  │ 4 B    │ length   │   JSON, plain  │ ≤64 KiB + 16 B │ ≤64 KiB + 16 B │
+  └────────┴──────────┴───────┬────────┴───────▲────────┴───────▲────────┴─────
+                              │                │                │
+                              └─── AAD ────────┴────────────────┘
+                              every chunk is sealed against these exact bytes
+
+  chunk nonce, 12 bytes — a counter, never a random value
+  ┌─────────────┬──────────────────────────────────┐
+  │ 00 00 00 00 │ big-endian uint64 chunk index    │
+  └─────────────┴──────────────────────────────────┘
+  The key is single-use and random, so a counter cannot repeat under it —
+  which is the one thing GCM must never do.
 ```
 
-The padding matters as much as the encryption: AES-GCM ciphertext is exactly as
-long as its input, so an unpadded blob would tell anyone holding the database
-how long each file's name is. Padded, every ordinary name produces exactly 540
-stored bytes, and the server rejects a blob of any other shape.
+The manifest is the load-bearing part. It is plaintext, deliberately: it is the
+AAD, and AAD is not encrypted. So the rule that governs the whole format is
+**nothing that describes the content may go in it** — and what is in it, the
+server could work out from the ciphertext's length anyway.
 
-The AAD is the client-generated manifest id, so a sealed name belongs to exactly
-one file: the server cannot move a name onto another object, cannot swap two
-names inside a batch, and cannot pick the id itself.
+```json
+{"v":5,"id":"<32 random bytes, base64url>","batch":"<uuid or empty>",
+ "size":197842,"chunks":4,"chunk":65536}
+```
 
-This is why the container had to reach **version 4**, and then **version 5**.
-Until then the name and the type lived in the manifest — and a manifest cannot
-be encrypted, because it is the AAD of every chunk. It is stored in a column,
-embedded in the object's own header, and served verbatim to anyone who asks.
-Version 4 took the name out; version 5 took the type out too, because "eleven
-JPEGs of 7 MB each, uploaded at 17:11 under one link" is a description of
-someone's afternoon. `files.original_name` and `files.content_type` are both
-NULL for a version 5 row, and the sealed blob is the only copy anyone holds. A
-manifest that carries either is refused at upload rather than stored, and
-uploads below version 5 are refused outright — a cached `e2e.js` is told to
-reload rather than allowed to write one more legible row.
+Binding those bytes into every chunk is what turns "each chunk is authenticated"
+into "the file is authenticated":
 
-**What the server can still see, and why it is not fixable here:** the exact
-size, the time of upload, which account uploaded, which files share a link, and
-the expiry and download limit it is being asked to enforce. Those are facts
-about the transaction rather than the content — a server that could not see them
-could not do its job — and no amount of encryption at rest removes them.
+| Attack on stored data | What stops it |
+|---|---|
+| Drop trailing chunks | `chunks` is authenticated; the count no longer matches |
+| Replace the blob with zero bytes | An empty file still has one chunk, whose only content is a tag over the manifest |
+| Swap one file's blob for another's | `id` is authenticated and unique per file |
+| Move a file into another share | `batch` is authenticated |
+| Edit the header's length field | A different slice is read as AAD, so every chunk fails |
+| Serve a different manifest than the embedded one | The reader compares them and refuses |
+| Rename the file | The name is not here at all — see below |
 
-What this costs: the owner's **My files** cannot read its own names or types
-either — it has no link and so no key. The uploading browser remembers both
+### Sealed names and types
+
+A name is sealed on its own, in a blob of its own, under its own HKDF branch. It
+is deliberately *not* folded into the file's ciphertext: a recipient's listing
+shows every name in a batch after one short decryption each, without fetching a
+byte of any file and without spending a download slot. The MIME type travels
+with it, so the icon and the preview decision are made by the browser rather
+than by a server that would have to be told what the file is.
+
+```
+  files.enc_name — 540 bytes for every ordinary name, by construction
+  ┌────────────┬──────────────────────────────────────────────┬──────────┐
+  │ nonce 12 B │ AES-GCM(name key, padded body)               │ tag 16 B │
+  └────────────┴───────────────────────┬──────────────────────┴──────────┘
+                                       │  what is inside it:
+                                       ▼
+  padded body — 512 B, or the next multiple for a very long name
+  ┌────────────┬─────────────────────────────────┬────────────────────────┐
+  │ uint16be   │ {"v":2,"name":"…","type":"…"}   │ 00 00 00 … zero padding│
+  │ jsonLength │                                 │                        │
+  └────────────┴─────────────────────────────────┴────────────────────────┘
+
+  AAD = "pyxis-name-v1|" ‖ the manifest's file id
+```
+
+Two properties, both necessary:
+
+- **The AAD binds the blob to one file.** The id is generated in the browser, so
+  the server cannot choose it, cannot move a name onto another object, and
+  cannot swap two names inside a batch.
+- **The padding hides the name's length.** AES-GCM output is exactly as long as
+  its input. Unpadded, a 540-byte blob and a 560-byte blob would tell anyone
+  holding the database how long each file's name is — a small leak, but a real
+  one, and the sort that composes with others. Padded to a 512-byte multiple,
+  every ordinary name is indistinguishable from every other. The server rejects
+  a blob whose length is not one the padding can produce.
+
+### How a batch is keyed
+
+One link, one secret, many files — but not one key. Each member is encrypted
+under its **own** random key, which is then wrapped under the batch key and
+stored as an opaque blob.
+
+```
+                    batch secret  (the link's #fragment)
+                                 │
+        ┌────────────────────────┼────────────────────────┐
+        ▼                        ▼                        ▼
+    batch key               roster key                name key
+        │                        │                        │
+        │                        │                        ├─▶ enc_name of file A
+        │                        │                        └─▶ enc_name of file B
+        │                        │
+        │                        └─▶ batches.roster — the sealed member list:
+        │                            id, name, size, type and manifest digest
+        │                            of every file, plus a sequence number
+        │
+        ├─▶ wraps file A's random key ─▶ files.wrapped_key   (12 B nonce + 32 B + 16 B tag)
+        └─▶ wraps file B's random key ─▶ files.wrapped_key
+                     │
+                     └─▶ each file's own key seals only its own chunks
+```
+
+Wrapping rather than deriving per-file keys buys two things: the browser
+encrypts before the server has assigned any id, so there is nothing stable to
+derive from; and a member can be added or removed without renumbering anything.
+
+### Upload, end to end
+
+```
+  browser                                                      server
+     │                                                          │
+     │  POST /batches   expiry, download limit, auth_salt?      │
+     │ ────────────────────────────────────────────────────────▶│  batch row created
+     │ ◀────────────────────────────────────────────────────────│  batch id
+     │                                                          │
+     │  ① derive batch, roster and name keys from the secret    │
+     │  ② random 256-bit file key, wrapped under the batch key  │
+     │  ③ build the manifest — no name, no type                 │
+     │  ④ seal name + type into the padded blob                 │
+     │  ⑤ encrypt chunk by chunk, manifest as AAD               │
+     │                                                          │
+     │  POST /upload   ciphertext ‖ wrapped_key                 │
+     │                 ‖ manifest ‖ enc_name                    │
+     │ ────────────────────────────────────────────────────────▶│  the embedded header must
+     │                                                          │  match the manifest sent
+     │                                                          │  with it; bytes stored
+     │                                                          │  verbatim, never re-encoded
+     │                                                          │
+     │  ⑥ re-seal the roster, POST /batches/{id}/roster         │
+     │ ────────────────────────────────────────────────────────▶│  seq must not go backwards
+     │                                                          │
+     ▼                                                          ▼
+  holds the only copy of the link,                             holds ciphertext, and
+  #fragment included                                           metadata it cannot read
+```
+
+### Download, end to end
+
+```
+  recipient                                                    server
+     │  GET /b/{id}      the #fragment stays in the browser     │
+     │ ────────────────────────────────────────────────────────▶│
+     │ ◀────────────────────────────────────────────────────────│  page ‖ sealed roster ‖ rows
+     │                                                          │
+     │  ① derive the same three keys from the fragment          │
+     │  ② open every enc_name → names, types, icons             │  ← no ciphertext
+     │  ③ open the roster, check the listing against it         │     fetched, and no
+     │                                                          │     download counted
+     │  ④ GET /b/{id}/f/{fid}/raw    (per file, on demand)      │
+     │ ────────────────────────────────────────────────────────▶│  one download counted
+     │ ◀────────────────────────────────────────────────────────│  ciphertext
+     │  ⑤ unwrap the file key under the batch key               │
+     │  ⑥ check the embedded header against the manifest        │
+     │  ⑦ decrypt chunks, manifest as AAD                       │
+     ▼                                                          │
+  plaintext, in the tab, never anywhere else                    │
+```
+
+Steps ② and ③ are the reason names are sealed separately from the files they
+belong to: a recipient sees the complete, verified listing before deciding to
+spend a single download.
+
+### Password shares: what the server is told
+
+For a password share the password itself is never transmitted. The `auth` branch
+produces a token; the server stores `SHA-256(token)` and compares. Knowing that
+verifier yields neither the token nor — because the branches are independent —
+the `enc` key, so a stolen database is useless for decryption.
+
+Unlocking is rate-limited per IP and share, and the counters live in Postgres
+rather than process memory, so they survive a restart and are shared across
+replicas.
+
+### What the server can still see
+
+Everything about the *content* is sealed. What is left is what being the server
+shows you anyway, and no amount of encryption at rest removes it:
+
+| The server never learns | The server always knows |
+|---|---|
+| The file's bytes | Its exact size in bytes |
+| Its name | When it was uploaded |
+| Its MIME type | Which account uploaded it |
+| Even the *length* of its name | Which files share one link |
+| Whether two uploads are the same file — each gets its own random key, so no two ciphertexts match | The expiry and download limit it is enforcing, and how many downloads are spent |
+
+Those right-hand facts are properties of the transaction rather than of the
+file: a server that could not see them could not enforce an expiry, count a
+download, or bill a quota. A 7.8 MB object with no name and no type is still
+visibly a photograph-sized thing, and this design does not pretend otherwise.
+Hiding size would mean padding the ciphertext — storing and transferring bytes
+nobody wants — and that trade is not made here.
+
+What sealing costs the owner: **My files** cannot read its own names or types
+either, having no link and so no key. The uploading browser remembers both
 locally for its own lists; every other page shows a generic icon, the size, the
 date and a placeholder. See [Known limits](#known-limits).
 
@@ -160,6 +392,35 @@ was written with. This exists so a future change to the framing or to a KDF
 label cannot silently strand live shares again: old rows keep their version and
 keep decrypting through the routine that produced them. `web/static/e2e.js`
 holds the labels in a table indexed by version for exactly that reason.
+
+Five versions exist, and each one took something away from the server:
+
+| | Framing on disk | Manifest carries | The server can read |
+|---|---|---|---|
+| **1** | bare chunks | *(no manifest)* | name, type |
+| **2** | bare chunks | size, geometry, **name**, **type** | name, type |
+| **3** | `PYX3 ‖ len ‖ manifest ‖ chunks…` | size, geometry, **name**, **type** | name, type |
+| **4** | `PYX4 ‖ len ‖ manifest ‖ chunks…` | size, geometry, **type** | type |
+| **5** | `PYX5 ‖ len ‖ manifest ‖ chunks…` | size, geometry | **nothing about the content** |
+
+```
+   what the manifest carried, version by version
+   ┌───────────────────────────────────────────────────────────┐
+ 2 │ size · chunks · chunk · id · batch │ name │ type          │  ← both in the clear
+   ├───────────────────────────────────────────────────────────┤
+ 3 │ size · chunks · chunk · id · batch │ name │ type          │  ← now inside the object too
+   ├───────────────────────────────────────────────────────────┤
+ 4 │ size · chunks · chunk · id · batch │      │ type          │  name ──▶ sealed blob
+   ├───────────────────────────────────────────────────────────┤
+ 5 │ size · chunks · chunk · id · batch │      │               │  type ──▶ sealed blob
+   └───────────────────────────────────────────────────────────┘
+     everything left is derivable from the ciphertext's own length
+```
+
+Only version 5 may be **written**. Everything earlier is still **read**, for as
+long as those shares live — but accepting one more version 4 upload would mean
+one more file the server can describe, so a browser holding a cached `e2e.js`
+is told to reload rather than indulged.
 
 **Version 1** sealed the chunks and nothing else. Each chunk authenticated
 itself and said nothing about the file it belonged to — no plaintext length, no
@@ -223,7 +484,8 @@ The manifest is stored and served in the clear; it has to be, since it is the
 AAD. So every name in one was a name the server could read — in the `manifest`
 column, and in the object's own header — whatever the `original_name` column
 said. From version 4 the name is sealed separately (see
-[File names](#file-names)), `original_name` stays NULL, and what still binds the
+[Sealed names and types](#sealed-names-and-types)), `original_name` stays NULL,
+and what still binds the
 name to this exact file is the manifest id, which is the sealed blob's AAD.
 
 **Version 5** does the same to the type, leaving a manifest that describes only
@@ -264,6 +526,31 @@ batch. It is re-sealed after every file, carrying a sequence number the server
 will not let go backwards, so the link is verifiable while an upload session is
 still running.
 
+```
+  batches.roster
+  ┌────────────┬──────────────────────────────────────────────┬──────────┐
+  │ nonce 12 B │ AES-GCM(roster key, the member list as JSON)  │ tag 16 B │
+  └────────────┴──────────────────────┬───────────────────────┴──────────┘
+                                      │
+        ┌─────────────────────────────┘
+        ▼
+  {"v":5,"batch":"<uuid>","seq":3,"files":[
+     {"id":…, "name":"invoice.pdf", "size":197842,
+      "type":"application/pdf", "manifest":"<sha256 of its manifest>"},
+     …                                        ▲
+  ]}                                          │
+                                    ties each entry to one exact file
+  AAD = "pyxis-roster-v2|" ‖ the batch id  →  and the list to one exact batch
+
+           what the server is asked                what the roster says
+           ┌──────────────────────┐                ┌──────────────────────┐
+           │ A  B  C              │  ── compare ─▶ │ A  B  C              │  ✓ agrees
+           │ A  B                 │                │ A  B  C              │  ✗ C is missing
+           │ A  B  C  X           │                │ A  B  C              │  ✗ X unvouched
+           │ C  A  B              │                │ A  B  C              │  ✗ reordered
+           └──────────────────────┘                └──────────────────────┘
+```
+
 The download page checks the listing it was served against the roster and
 **reports** what it finds rather than repairing it:
 
@@ -295,25 +582,39 @@ origin — the upload is **refused**. It does not fall back to sending the
 plaintext file and password to the server. The download side fails closed the
 same way.
 
-### What this does and does not protect against
+### The threat model, stated plainly
 
-It defends against **passive** compromise: a stolen disk, leaked backups, an
-operator reading the filesystem, a subpoena of stored data. The bytes on disk
-are unreadable without a key that only ever existed in a browser.
+```
+   ┌────────────────────────────────────────────────────────────────────┐
+   │ DEFENDED                                                           │
+   │                                                                    │
+   │  stolen disk · leaked backup · a copied database · an operator     │
+   │  reading the filesystem · a subpoena of stored data                │
+   │      → ciphertext, sealed names, opaque wrapped keys. Nothing to    │
+   │        read, and no key on the machine that could change that.     │
+   │                                                                    │
+   │  a server that edits what it stores — rewriting a blob, dropping   │
+   │  a member, swapping a name, reordering a listing                   │
+   │      → the manifest and the roster make it fail, or say so.        │
+   ├────────────────────────────────────────────────────────────────────┤
+   │ NOT DEFENDED                                                       │
+   │                                                                    │
+   │  an actively hostile server, because it ships the JavaScript       │
+   │  that does the crypto: a modified e2e.js could exfiltrate keys     │
+   │  or skip the checks entirely.                                      │
+   │      → inherent to browser-delivered E2E. More client-side crypto  │
+   │        cannot fix it; only reproducible delivery could.            │
+   │                                                                    │
+   │  anyone who obtains the link. For a URL-key share the link IS      │
+   │  the key.                                                          │
+   │      → treat it as the secret it is.                               │
+   └────────────────────────────────────────────────────────────────────┘
+```
 
-Against a server that tampers with **stored data** — rewriting a blob, editing a
-row, dropping a file from a share — version 2 is the defence: the manifest and
-the roster make those changes fail or announce themselves rather than pass
-unnoticed.
-
-It does **not** defend against an actively hostile server, because the server
-ships the JavaScript that performs the crypto. A compromised deployment could
-serve a modified `e2e.js` that exfiltrates keys, or one that simply does not
-check the manifest it was given. That is inherent to browser-delivered
-end-to-end encryption and cannot be fixed with more client-side crypto.
-
-One practical consequence: for a URL-key share, **the link is the key**. Anyone
-who obtains it has the file.
+The first block is the ordinary case — a self-hosted box, its backups, and
+whoever can reach them — and it is where this design does real work. The second
+is the honest boundary of browser-delivered end-to-end encryption, and no scheme
+shipped this way can move it.
 
 ## Batch shares
 
@@ -326,18 +627,14 @@ have been sent to someone. **Start a new link** begins a fresh batch.
 
 ### Keys
 
-The batch link carries one secret. Each member file is encrypted under its **own
-random key**, sealed under the batch key and stored as an opaque `wrapped_key`:
+The batch link carries one secret, and every member has a random key of its own
+wrapped under it — drawn out in [How a batch is keyed](#how-a-batch-is-keyed).
 
 ```
 batch key   = HKDF(fragment secret, "", "pyxis-e2e-batch-v1")
               (or the PBKDF2/HKDF enc branch, for a password batch)
 wrapped_key = 12-byte nonce || AES-GCM(batch key, file key)   — 60 bytes
 ```
-
-Wrapping rather than deriving per-file keys buys two things: the browser encrypts
-before the server has assigned a file id, so there is nothing stable to derive
-from; and members can be added or removed without renumbering anything.
 
 ### The ZIP is built in the browser
 
