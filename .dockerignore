@@ -9,3 +9,5 @@ deploy
 *.md
 Dockerfile
 docker-compose.yml
+# The installer runs on the host; it is not part of the image.
+install.py

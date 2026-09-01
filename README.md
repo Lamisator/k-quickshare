@@ -673,6 +673,39 @@ Two consequences worth knowing:
 
 ## Running it
 
+### Guided installer
+
+`install.py` is a console wizard (curses, Python 3.8+, standard library only)
+that takes a bare host to a running instance. It checks for a usable Docker and
+helps install one, asks whether the site sits behind Traefik, another reverse
+proxy or nothing at all, collects the domain, an optional custom port and the
+first administrator, generates the secrets, writes a `.env` and a
+`docker-compose.yml` matched to those answers, and then builds, starts and
+health-checks the stack.
+
+```bash
+sudo ./install.py
+```
+
+Root matters: the install directory, the blob directory's ownership (uid 10001)
+and the Docker socket all need it. Nothing is written or executed before the
+review screen — every earlier step only collects answers.
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | ask everything, then print the files instead of writing them |
+| `--install-dir DIR` | somewhere other than `/srv/docker/pyxis` |
+| `--answers FILE` | pre-fill the wizard from a previous run |
+| `--non-interactive --answers FILE` | replay a saved answer file without the wizard |
+
+It writes `.env` (0600), `docker-compose.yml`, `INSTALL-NOTES.md`,
+`installer-answers.json` (0600) and `data/{files,postgres}` into the install
+directory, keeping a timestamped backup of anything it replaces. For the
+reverse-proxy layout it also writes a ready nginx, Caddy or Apache site file —
+with the body-size limit and the streaming settings large uploads need — but it
+never edits your proxy's configuration itself. Optionally it installs Traefik,
+and a nightly `pg_dump` cron entry.
+
 ### Docker Compose (recommended)
 
 ```bash
