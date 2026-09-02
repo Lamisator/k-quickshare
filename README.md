@@ -323,6 +323,37 @@ derive from; and a member can be added or removed without renumbering anything.
   #fragment included                                           metadata it cannot read
 ```
 
+### When the browser loses the file, or the connection
+
+Two failures dominate uploads from an iPhone or iPad, and neither is a
+cryptographic one.
+
+**The file goes away mid-encryption.** A `File` from the picker is a reference,
+not a copy. On iOS the bytes may still be in iCloud and are fetched on demand,
+and that fetch can fail — the read then rejects with `NotFoundError` ("The
+object cannot be found here") or `NotReadableError`. It shows up on the fourth
+or fifth file of a large selection, minutes after picking, because uploads run
+one at a time and each file is read only when its turn comes. `readSlice` in
+`e2e.js` re-reads the chunk four times, through both `Blob.arrayBuffer()` and
+`FileReader` on each pass, re-slicing from the `File` every time and pausing in
+between; a read that resolves *short* counts as a failure too, so a truncated
+chunk can never be sealed as if it were whole. Only then does the row give up,
+and it says what actually happened — that the browser lost access to the file,
+and that opening it once in the Files app downloads it to the device — rather
+than reporting the browser's words under "Encryption failed".
+
+**The connection drops.** Backgrounding the tab, a Wi-Fi handover, or a proxy
+that gives up on a body it is still reading (502/503/504) all end the same way.
+The upload retries itself twice, spaced out, and does **not** encrypt again: the
+ciphertext is already in hand, and re-reading the `File` is precisely the step
+that fails. Only after that does the row show the failure and a Retry button.
+
+Encryption also hands its ciphertext to the blob store every 4 MiB instead of
+holding the whole file in the JS heap and copying it at the end. That copy
+needed twice the file in memory at one moment, which is where a tablet quietly
+kills the tab — and a killed tab looks, from the outside, exactly like the
+connection being cut.
+
 ### Download, end to end
 
 ```
@@ -835,6 +866,7 @@ in force.
 | `POST /batches` | Open a batch, returns its id |
 | `POST /batches/{id}/roster` | Store the sealed member list (owner only, monotonic `seq`) |
 | `POST /upload` | Upload one file, optionally into a batch |
+| `GET /usage` | The storage bars, re-rendered as an HTML fragment (see below) |
 | `GET /history` | Your own uploads — an admin's own, too |
 | `GET /admin/files` | Every account's uploads. Admin only |
 | `POST /delete/{id}` | Delete a file |
@@ -845,6 +877,15 @@ in force.
 `GET /healthz` also reports the schema version, and fails with 503 when the
 database is on a different one than the binary expects — a half-finished upgrade
 should take an instance out of the load balancer, not serve from it.
+
+`GET /usage` is the one route that answers with markup rather than a page or
+JSON: it renders the shell's `storagebars` template on its own. The upload page
+swaps it into the shell after a file lands, so "Your storage" and "Disk usage"
+move as files arrive instead of waiting for a navigation that, on the upload
+page, never comes. Answering with the same template the page uses is the point —
+the quota arithmetic, `humanSize`, the warning thresholds and the admin-only
+rule stay where they already are, and the refreshed bars are byte for byte what
+a reload would have drawn.
 
 There is no API for uploading plaintext. A client must encrypt in the browser
 container format and POST the ciphertext with `e2e=1`, `e2e_version=5`, a
@@ -1086,6 +1127,10 @@ download rather than bounding idleness.
 - **No plaintext upload path at all.** Scripted clients must implement the
   browser container format; there is no server-side encryption to fall back on.
   This is deliberate, but it makes `curl` uploads considerably more work.
+- **A file that never comes down from iCloud cannot be uploaded.** The retries
+  above cover a slow or flaky fetch, not a device that will not produce the
+  bytes at all. The only fix is on the device: open the file once so it is
+  stored locally, then add it again.
 - **A browser without WebCrypto cannot use this app**, for upload or download.
   In practice that means it requires HTTPS.
 - **Version 1 shares keep the version 1 guarantee.** They cannot be upgraded in

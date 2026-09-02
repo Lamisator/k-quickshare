@@ -210,6 +210,7 @@ func main() {
 	mux.Handle("/", app.requireUserHandler(app.handleUploadPage))
 	mux.Handle("/history", app.requireUserHandler(app.handleHistory))
 	mux.Handle("/upload", app.requireUserHandler(app.handleUpload))
+	mux.Handle("/usage", app.requireUserHandler(app.handleStorageBars))
 	mux.Handle("/batches", app.requireUserHandler(app.handleCreateBatch))
 	mux.Handle("/delete/", app.requireUserHandler(app.handleDelete))
 	// Bulk delete from the file list. Registered as its own exact pattern so it

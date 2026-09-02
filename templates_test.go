@@ -289,6 +289,54 @@ func TestStorageBarVisibility(t *testing.T) {
 	}
 }
 
+// TestStorageBarsRefreshable pins the two halves of the live refresh: the
+// shell must carry the slot app.js replaces, and "storagebars" must render on
+// its own, because that is what /usage answers with. Rendering the bars only
+// as part of the page would leave the figures frozen until the next
+// navigation — which on the upload page is precisely when nobody navigates.
+func TestStorageBarsRefreshable(t *testing.T) {
+	tmpl, err := loadTemplates()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	admin := &User{ID: uuid.New(), Username: "root", IsAdmin: true}
+	data := map[string]any{
+		"Lang": "en", "I18N": jsStrings("en"), "ReqPath": "/", "Title": "t",
+		"Theme": "dark", "User": admin, "Active": "upload", "MaxUpload": int64(1 << 30),
+		"Disk": DiskStats{Total: 500 << 30, Used: 142 << 30, Free: 358 << 30,
+			Percent: 28.4, OK: true},
+		"Usage": UsageSummary{UsedBytes: 3 << 30, UsedFiles: 12,
+			Quota: UserQuota{Bytes: 20 << 30, Files: 1000}},
+	}
+
+	var page strings.Builder
+	if err := tmpl.ExecuteTemplate(&page, "index.html", data); err != nil {
+		t.Fatalf("render page: %v", err)
+	}
+	if !strings.Contains(page.String(), `id="storage-bars"`) {
+		t.Error(`the shell has no id="storage-bars" slot — app.js has nothing to ` +
+			`replace after an upload, so both bars stay at their page-load figures`)
+	}
+
+	// What /usage returns, standing alone.
+	var frag strings.Builder
+	if err := tmpl.ExecuteTemplate(&frag, "storagebars", data); err != nil {
+		t.Fatalf("render fragment: %v", err)
+	}
+	for _, want := range []string{`aria-label="Disk usage"`, `aria-label="Your storage"`,
+		`class="disk-fill" data-pct=`} {
+		if !strings.Contains(frag.String(), want) {
+			t.Errorf("the /usage fragment is missing %s", want)
+		}
+	}
+	// The fragment is spliced into a live page, so it must be the bars and
+	// nothing else — a stray <body> or a second copy of the sidebar would be
+	// grafted into the middle of the document.
+	if strings.Contains(frag.String(), "<body") || strings.Contains(frag.String(), "<aside") {
+		t.Error("the /usage fragment carries page chrome; it must be the bars alone")
+	}
+}
+
 // TestE2EScriptIncluded guards the wiring between e2e.js and app.js. app.js
 // reads window.PYXIS_E2E and fails every upload closed with "Encryption
 // unavailable" when it is missing, so a layout that forgets the script tag

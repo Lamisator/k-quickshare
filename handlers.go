@@ -110,6 +110,28 @@ func (a *App) handleUploadPage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleStorageBars re-renders just the storage bars in the shell. Uploading a
+// file changes what both of them say, and re-reading the page to learn that was
+// the only way to find out: the figures sat at their page-load values until the
+// next navigation, which on the upload page is exactly when nobody navigates.
+//
+// It answers with the same "storagebars" template the shell renders, not with
+// JSON the browser would have to format, so the refreshed bars are byte for
+// byte what a reload would have produced — quota arithmetic, humanSize, the
+// warning thresholds and the admin-only rule all stay in the one place that
+// already decides them. render() fills in Disk and Usage for the signed-in
+// user, so this handler carries no logic of its own.
+func (a *App) handleStorageBars(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// A quota reading is per-user and stale the moment the next file lands.
+	w.Header().Set("Cache-Control", "no-store")
+	a.render(w, r, "storagebars", nil)
+}
+
 // handleHistory lists the signed-in user's own uploads — an admin's included.
 // Seeing every account's shares is a separate page and a deliberate act, not
 // the view an administrator lands in by default.

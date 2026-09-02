@@ -97,6 +97,8 @@ var translations = map[string]map[string]string{
 	"js.too_large":       {"en": "File too large", "de": "Datei zu groß"},
 	"js.login":           {"en": "Sign-in required", "de": "Anmeldung erforderlich"},
 	"js.network":         {"en": "Network error", "de": "Netzwerkfehler"},
+	"js.retrying":        {"en": "Retrying…", "de": "Neuer Versuch…"},
+	"js.file_gone":       {"en": "File unreadable", "de": "Datei nicht lesbar"},
 	"js.copy":            {"en": "Copy link", "de": "Link kopieren"},
 	"js.copied":          {"en": "Copied!", "de": "Kopiert!"},
 	"js.toast_copied":    {"en": "Link copied to clipboard", "de": "Link in die Zwischenablage kopiert"},
@@ -169,6 +171,14 @@ var translations = map[string]map[string]string{
 		"de": "Diese Datei ist %s groß. Das Maximum sind %s. Es wurde nichts hochgeladen."},
 	"js.reason_encrypt": {"en": "Encryption failed in this browser: %s",
 		"de": "Die Verschlüsselung ist in diesem Browser fehlgeschlagen: %s"},
+	"js.reason_retrying": {"en": "The connection was interrupted. Retrying automatically (attempt %s of %s) — nothing was stored yet and there is nothing you need to do.",
+		"de": "Die Verbindung wurde unterbrochen. Es wird automatisch erneut versucht (Versuch %s von %s) — es wurde noch nichts gespeichert und du musst nichts tun."},
+	// The browser's own words for this are "The object cannot be found here",
+	// which names neither the file nor anything to do about it. On iPhone and
+	// iPad it almost always means one thing: the file is still in iCloud and
+	// was not fetched to the device in time.
+	"js.reason_file_gone": {"en": "The browser lost access to this file before it could be encrypted. On iPhone and iPad this happens when the file is only stored in iCloud: open it once in the Files app so it is downloaded to the device, then add it here again.",
+		"de": "Der Browser hat den Zugriff auf diese Datei verloren, bevor sie verschlüsselt werden konnte. Auf iPhone und iPad passiert das, wenn die Datei nur in iCloud liegt: Öffne sie einmal in der Dateien-App, damit sie auf das Gerät geladen wird, und füge sie dann erneut hinzu."},
 	"js.reason_roster": {"en": "Uploaded, but the signed file list could not be updated — recipients will see this file flagged as unverified.",
 		"de": "Hochgeladen, aber die signierte Dateiliste konnte nicht aktualisiert werden — Empfänger sehen diese Datei als nicht verifiziert markiert."},
 
@@ -597,6 +607,7 @@ func jsStrings(lang string) map[string]string {
 		"js.cancel", "js.retry", "js.cancelled", "js.queued",
 		"js.reason_cancelled", "js.reason_network", "js.reason_login",
 		"js.reason_http", "js.reason_encrypt", "js.reason_too_large", "js.reason_roster",
+		"js.retrying", "js.file_gone", "js.reason_retrying", "js.reason_file_gone",
 		"js.batch_link", "js.batch_count", "js.batch_new", "js.batch_download",
 		"js.batch_preview", "js.batch_hide_preview", "js.batch_preview_failed",
 		"js.batch_empty", "js.batch_zipping", "js.batch_fetching",

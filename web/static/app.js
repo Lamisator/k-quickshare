@@ -283,13 +283,80 @@
     });
   }
 
-  // ---- disk usage bar ----------------------------------------------------------
+  // ---- storage bars --------------------------------------------------------
+  //
   // Width is applied here rather than as an inline style attribute, which the
   // Content-Security-Policy (style-src 'self') deliberately forbids.
-  document.querySelectorAll('.disk-fill[data-pct]').forEach((el) => {
-    const pct = parseFloat(el.getAttribute('data-pct'));
-    if (!isNaN(pct)) el.style.width = Math.max(0, Math.min(100, pct)) + '%';
-  });
+  function applyBarWidths(root) {
+    root.querySelectorAll('.disk-fill[data-pct]').forEach((el) => {
+      const pct = parseFloat(el.getAttribute('data-pct'));
+      if (!isNaN(pct)) el.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    });
+  }
+  applyBarWidths(document);
+
+  // An upload changes what both bars say, so they are refetched when one
+  // lands. /usage answers with the very markup the shell rendered, so this
+  // does not reimplement the quota arithmetic or the warning thresholds —
+  // there is nothing here that could disagree with a reload.
+  //
+  // Requests are coalesced rather than fired per file: a drop of forty files
+  // finishes forty times, and the bar only has to be right after the last one.
+  // A refresh asked for while one is in flight is remembered and run once it
+  // returns, so the final state is never the one we skipped.
+  const storageBars = document.getElementById('storage-bars');
+  let barsTimer = null;
+  let barsInFlight = false;
+  let barsAgain = false;
+
+  // swapBars carries the old positions across the replacement so each bar
+  // animates from where it was to where it now is. Without this the fills are
+  // rebuilt already at their new width and nothing appears to happen, which is
+  // the opposite of the point. Matched on the section's aria-label, so a bar
+  // that was not there a moment ago starts from empty, as it should.
+  function swapBars(html) {
+    const before = new Map();
+    storageBars.querySelectorAll('.disk-bar').forEach((sec) => {
+      const fill = sec.querySelector('.disk-fill');
+      if (fill) before.set(sec.getAttribute('aria-label'), fill.style.width);
+    });
+    storageBars.innerHTML = html;
+    storageBars.querySelectorAll('.disk-bar').forEach((sec) => {
+      const fill = sec.querySelector('.disk-fill');
+      const was = before.get(sec.getAttribute('aria-label'));
+      if (fill && was) fill.style.width = was;
+    });
+    void storageBars.offsetWidth; // settle the old widths before setting the new
+    applyBarWidths(storageBars);
+  }
+
+  async function fetchStorageBars() {
+    if (barsInFlight) { barsAgain = true; return; }
+    barsInFlight = true;
+    try {
+      const res = await fetch('/usage', {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        // The figures are per-user and change on every upload.
+        cache: 'no-store',
+      });
+      // A 401 here means the session went while files were going up. The
+      // upload itself reports that; silently swapping the bars for whatever
+      // the login page returned would be worse than leaving them stale.
+      if (res.ok) swapBars(await res.text());
+    } catch (err) {
+      // Offline, or the request was cut off. The bars keep their last known
+      // figures; the next upload asks again.
+    } finally {
+      barsInFlight = false;
+      if (barsAgain) { barsAgain = false; fetchStorageBars(); }
+    }
+  }
+
+  function refreshStorageBars() {
+    if (!storageBars) return;
+    clearTimeout(barsTimer);
+    barsTimer = setTimeout(fetchStorageBars, 400);
+  }
 
   // ---- localized timestamps --------------------------------------------------
 
@@ -2092,6 +2159,9 @@
   const RETRYABLE = {
     network: true, failed: true, quota: true, rate_limited: true,
     e2e_failed: true, cancelled: true,
+    // Worth offering: by the time someone reads the message and taps it, the
+    // file may well have finished coming down from iCloud.
+    file_gone: true,
   };
 
   function queueButton(labelKey, cls, onClick) {
@@ -2261,86 +2331,143 @@
       fd.append('plain_size', String(file.size));
     } catch (err) {
       if (err && err.name === 'AbortError') return; // cancel handler already rendered
+      // A file the browser will no longer read is not a broken cipher, and
+      // saying "Encryption failed: The object cannot be found here" sent
+      // people looking in the wrong place. readSlice in e2e.js has already
+      // retried it several times, so this is the settled answer.
+      if (err && err.code === 'file-unreadable') {
+        fail('file_gone', t('reason_file_gone'));
+        return;
+      }
       fail('e2e_failed', t('reason_encrypt', (err && err.message) || String(err)));
       return;
     }
     if (ctl.aborted) return;
 
-    const xhr = new XMLHttpRequest();
-    ctl.xhr = xhr;
-    xhr.open('POST', '/upload');
-    xhr.setRequestHeader('Accept', 'application/json');
-    xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+    // The ciphertext is finished by this point, so a lost connection costs
+    // only the transfer — and losing one is routine on a phone or tablet:
+    // iOS suspends a backgrounded tab, a Wi-Fi handover drops the socket, and
+    // a long body can outlive the proxy's patience. Each of those surfaced as
+    // "the connection was interrupted" and a Retry button, in the middle of a
+    // queue the user had walked away from.
+    //
+    // So the send is retried a couple of times on its own. The upload is NOT
+    // encrypted again: the ciphertext blob is already in hand, and re-reading
+    // the File is the very step that fails on an iCloud-backed file (see
+    // readSlice in e2e.js).
+    const NET_ATTEMPTS = 3;
+    const RETRY_WAIT = [2000, 6000];
+    // A proxy that gave up on a body it was still reading answers 502/503/504,
+    // which from here is the same event as a dead socket. Every other status
+    // is the server's considered answer and is reported as it stands.
+    const RETRY_STATUS = { 502: true, 503: true, 504: true };
+    let attempt = 0;
 
-    let lastTime = performance.now();
-    let lastLoaded = 0;
-    let emaRate = 0; // exponential moving average, bytes/sec
-
-    xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable) return;
-      const now = performance.now();
-      const dt = (now - lastTime) / 1000;
-      if (dt > 0.15) {
-        const inst = (e.loaded - lastLoaded) / dt;
-        emaRate = emaRate ? emaRate * 0.7 + inst * 0.3 : inst;
-        lastTime = now;
-        lastLoaded = e.loaded;
-      }
-      const pct = (e.loaded / e.total) * 100;
-      fill.style.width = pct + '%';
-      status.textContent =
-        Math.min(99, Math.round(pct)) + '%' + (emaRate > 0 ? ' · ' + fmtRate(emaRate) : '');
-    };
-    // serverReason prefers the server's own message: httpError() sends only
-    // http.StatusText, and the deliberate ones ("storage quota exceeded:
-    // personal storage limit reached") say more than any generic string here.
-    const serverReason = () => {
-      const body = (xhr.responseText || '').trim();
-      if (body && body.length <= 300 && body.charAt(0) !== '<') return body;
-      return t('reason_http', xhr.status);
-    };
-    xhr.onload = () => {
+    // retryOrFail schedules the next attempt, or gives up and leaves the row
+    // with its explanation and a manual Retry button.
+    function retryOrFail(kind, detail) {
       if (ctl.aborted) return;
-      if (xhr.status >= 200 && xhr.status < 400) {
-        fill.style.width = '100%';
-        row.classList.add('queue-done');
-        status.textContent = t('done');
-        actions.textContent = '';
-        // No per-file link: the batch link covers every file in this visit.
-        batchState.count++;
-        renderBatchPanel();
-        let created = null;
-        try { created = JSON.parse(xhr.responseText); } catch (e) { /* handled below */ }
-        if (created && created.id) {
-          // This browser sealed the name a moment ago, so it is the one place
-          // that can still read it without the link.
-          rememberName(created.id, file.name, file.type || 'application/octet-stream');
-          recordMember(created.id, file, manifestBytes);
-        } else {
-          // Without the server's row id the member cannot be entered into the
-          // roster, so the link would list a file nothing vouches for. Say so
-          // here rather than letting the recipient discover it as a warning.
-          reason.textContent = t('reason_roster');
-          reason.hidden = false;
+      if (attempt >= NET_ATTEMPTS) {
+        fail(kind, detail);
+        return;
+      }
+      status.textContent = t('retrying');
+      fill.style.width = '0%';
+      reason.textContent = t('reason_retrying', attempt + 1, NET_ATTEMPTS);
+      reason.hidden = false;
+      setTimeout(() => {
+        if (!ctl.aborted) sendAttempt();
+      }, RETRY_WAIT[Math.min(attempt - 1, RETRY_WAIT.length - 1)]);
+    }
+
+    function sendAttempt() {
+      attempt++;
+      const xhr = new XMLHttpRequest();
+      ctl.xhr = xhr;
+      xhr.open('POST', '/upload');
+      xhr.setRequestHeader('Accept', 'application/json');
+      xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+      let lastTime = performance.now();
+      let lastLoaded = 0;
+      let emaRate = 0; // exponential moving average, bytes/sec
+
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const now = performance.now();
+        const dt = (now - lastTime) / 1000;
+        if (dt > 0.15) {
+          const inst = (e.loaded - lastLoaded) / dt;
+          emaRate = emaRate ? emaRate * 0.7 + inst * 0.3 : inst;
+          lastTime = now;
+          lastLoaded = e.loaded;
         }
-      } else if (xhr.status === 401) {
-        fail('login', t('reason_login'));
-        setTimeout(() => (location.href = '/login?next=/'), 800);
-      } else if (xhr.status === 413) {
-        fail('too_large', serverReason());
-      } else if (xhr.status === 507) {
-        fail('quota', serverReason());
-      } else if (xhr.status === 429) {
-        fail('rate_limited', serverReason());
-      } else {
-        fail('failed', serverReason());
-      }
-    };
-    xhr.onerror = () => {
-      if (ctl.aborted) return;
-      fail('network', t('reason_network'));
-    };
-    xhr.send(fd);
+        const pct = (e.loaded / e.total) * 100;
+        fill.style.width = pct + '%';
+        status.textContent =
+          Math.min(99, Math.round(pct)) + '%' + (emaRate > 0 ? ' · ' + fmtRate(emaRate) : '');
+      };
+      // serverReason prefers the server's own message: httpError() sends only
+      // http.StatusText, and the deliberate ones ("storage quota exceeded:
+      // personal storage limit reached") say more than any generic string here.
+      const serverReason = () => {
+        const body = (xhr.responseText || '').trim();
+        if (body && body.length <= 300 && body.charAt(0) !== '<') return body;
+        return t('reason_http', xhr.status);
+      };
+      xhr.onload = () => {
+        if (ctl.aborted) return;
+        if (xhr.status >= 200 && xhr.status < 400) {
+          fill.style.width = '100%';
+          row.classList.add('queue-done');
+          status.textContent = t('done');
+          actions.textContent = '';
+          // A retry notice from an earlier attempt has been overtaken.
+          reason.textContent = '';
+          reason.hidden = true;
+          // The stored bytes have just changed, so the shell's storage bars
+          // are now out of date. Coalesced: a whole drop costs one request.
+          refreshStorageBars();
+          // No per-file link: the batch link covers every file in this visit.
+          batchState.count++;
+          renderBatchPanel();
+          let created = null;
+          try { created = JSON.parse(xhr.responseText); } catch (e) { /* handled below */ }
+          if (created && created.id) {
+            // This browser sealed the name a moment ago, so it is the one place
+            // that can still read it without the link.
+            rememberName(created.id, file.name, file.type || 'application/octet-stream');
+            recordMember(created.id, file, manifestBytes);
+          } else {
+            // Without the server's row id the member cannot be entered into the
+            // roster, so the link would list a file nothing vouches for. Say so
+            // here rather than letting the recipient discover it as a warning.
+            reason.textContent = t('reason_roster');
+            reason.hidden = false;
+          }
+        } else if (xhr.status === 401) {
+          fail('login', t('reason_login'));
+          setTimeout(() => (location.href = '/login?next=/'), 800);
+        } else if (xhr.status === 413) {
+          fail('too_large', serverReason());
+        } else if (xhr.status === 507) {
+          fail('quota', serverReason());
+        } else if (xhr.status === 429) {
+          fail('rate_limited', serverReason());
+        } else if (RETRY_STATUS[xhr.status]) {
+          retryOrFail('network', serverReason());
+        } else {
+          fail('failed', serverReason());
+        }
+      };
+      xhr.onerror = () => {
+        if (ctl.aborted) return;
+        retryOrFail('network', t('reason_network'));
+      };
+      xhr.send(fd);
+    }
+
+    sendAttempt();
   }
 
   // ---- batch link panel ----------------------------------------------------

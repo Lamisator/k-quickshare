@@ -362,6 +362,90 @@
     return err;
   }
 
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+  // readBlobViaReader is the FileReader spelling of blob.arrayBuffer(). It
+  // exists because the two take different paths through WebKit, and a read
+  // that fails one way sometimes succeeds the other.
+  function readBlobViaReader(blob) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => reject(fr.error || new Error('the file could not be read'));
+      fr.readAsArrayBuffer(blob);
+    });
+  }
+
+  // fileGoneError marks a read the browser will not serve, as opposed to
+  // anything about the cryptography. The caller shows its own message for it —
+  // the browser's ("The object cannot be found here") names no file and
+  // suggests nothing to do about it.
+  function fileGoneError(cause) {
+    const err = new Error((cause && cause.message) || 'the file could not be read');
+    err.name = 'FileUnreadableError';
+    err.code = 'file-unreadable';
+    return err;
+  }
+
+  // readSlice reads one chunk of the file, and works around what iPhones and
+  // iPads do to a file that lives in iCloud.
+  //
+  // A File handed over by the picker is a reference, not a copy. On iOS the
+  // bytes behind it may still be in iCloud and are materialised on demand, and
+  // that materialisation can fail or time out — the read then rejects with
+  // NotFoundError ("The object cannot be found here") or NotReadableError,
+  // typically for the fourth or fifth file of a large selection, minutes after
+  // it was picked, because uploads run one at a time and the queue waits.
+  //
+  // Both are worth another go, so the chunk is re-read several times, each
+  // pass through both read paths, before it is declared unreadable.
+  async function readSlice(file, start, end, signal) {
+    const want = end - start;
+    let last;
+    // A short read is a failed read: a browser that loses the backing file
+    // mid-read has been known to resolve with a truncated buffer rather than
+    // reject, and a chunk short of its length would seal happily and decrypt
+    // to the wrong bytes.
+    const sized = (buf) => {
+      if (buf.byteLength === want) return buf;
+      throw new Error('read ' + buf.byteLength + ' of ' + want + ' bytes');
+    };
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (aborted(signal)) throw abortError();
+      // Both readers are tried on every attempt rather than alternating: a
+      // browser missing FileReader, or one where it fails for its own
+      // reasons, would otherwise spend half the attempts on it.
+      try {
+        const slice = file.slice(start, end);
+        if (!slice.arrayBuffer) throw new Error('this browser cannot read a file slice');
+        return sized(await slice.arrayBuffer());
+      } catch (err) {
+        if (err && err.name === 'AbortError') throw err;
+        last = err; // the direct read's error is the one worth reporting
+      }
+      try {
+        return sized(await readBlobViaReader(file.slice(start, end)));
+      } catch (err) {
+        if (err && err.name === 'AbortError') throw err;
+      }
+      // Re-slicing from the File on the next pass is deliberate: a stale Blob
+      // reference is part of what goes wrong, and the pause gives iCloud a
+      // moment to finish fetching the bytes. No pause after the last one —
+      // there is nothing left to wait for.
+      if (attempt < 3) await sleep(250 * (attempt + 1));
+    }
+    throw fileGoneError(last);
+  }
+
+  // Ciphertext is handed to the blob store this often rather than kept in the
+  // JS heap to the end. A 2 GiB file held as 32768 Uint8Arrays and then copied
+  // into a Blob needs twice the file in memory at the moment of the copy,
+  // which is where an iPad quietly kills the tab — and a killed tab is
+  // indistinguishable, from the outside, from the upload being cut off. Blobs
+  // are backed by storage the browser can spill to disk, so flushing keeps the
+  // heap flat and costs one extra reference per 4 MiB.
+  const FLUSH_BYTES = 4 << 20;
+
   // encryptFile turns a File/Blob into a ciphertext Blob in chunk format, with
   // `manifest` bound into every chunk as additional authenticated data.
   //
@@ -377,17 +461,27 @@
     // The header goes in front, so the stored object says what it is. It is
     // covered by the chunks' AAD rather than a MAC of its own: change the
     // length or the manifest and every chunk stops verifying.
-    const parts = [writeHeader(manifest, VERSION)];
+    const flushed = [];
+    let parts = [writeHeader(manifest, VERSION)];
+    let pending = 0;
     for (let i = 0; i < chunks; i++) {
       if (aborted(signal)) throw abortError();
-      const slice = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, total));
-      const buf = await slice.arrayBuffer();
+      const start = i * CHUNK;
+      const buf = await readSlice(file, start, Math.min(start + CHUNK, total), signal);
       const ct = await subtle.encrypt(
         { name: 'AES-GCM', iv: chunkNonce(i), additionalData: manifest }, aesKey, buf);
       parts.push(new Uint8Array(ct));
+      pending += ct.byteLength;
+      if (pending >= FLUSH_BYTES) {
+        flushed.push(new Blob(parts));
+        parts = [];
+        pending = 0;
+      }
       if (onProgress) onProgress((i + 1) / chunks);
     }
-    return new Blob(parts, { type: 'application/octet-stream' });
+    if (parts.length) flushed.push(new Blob(parts));
+    // Concatenating blobs copies no bytes: the pieces are already stored.
+    return new Blob(flushed, { type: 'application/octet-stream' });
   }
 
   // decryptChunks is the shared body of versions 2 and 3: the manifest is
