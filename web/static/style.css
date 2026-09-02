@@ -1605,6 +1605,10 @@ body.bare {
   border: none;
   background: transparent;
   overflow: hidden;
+  /* The overlay handles the wheel and every touch gesture itself, so the
+     browser must not treat a pinch or a drag on it as scrolling the page. */
+  touch-action: none;
+  user-select: none;
 }
 /* display goes on [open], never on .zoom itself. The UA stylesheet hides a
    closed dialog with `dialog:not([open]) { display: none }`, and an author
@@ -1614,8 +1618,10 @@ body.bare {
 .zoom[open] { display: flex; }
 .zoom::backdrop { background: rgba(8, 11, 15, 0.92); }
 /* As large as the screen allows and no larger: sized to the viewport with
-   object-fit, so a small picture is scaled up and a huge one is scaled down to
-   fit rather than needing to be panned. */
+   object-fit, so a small picture is fitted on opening rather than needing to
+   be panned. From there app.js scales it up with a transform — which is why
+   the element keeps the viewport's size at every zoom level, and only ever
+   the transform changes. */
 .zoom-img {
   display: block;
   width: 100%;
@@ -1624,6 +1630,32 @@ body.bare {
   max-height: none;
   object-fit: contain;
   cursor: zoom-out;
+  transform-origin: 50% 50%;
+  will-change: transform;
+  -webkit-user-drag: none;
+}
+/* Zoomed in, the picture is something to move rather than something to close,
+   and the cursor should say so. */
+.zoom.zoomed .zoom-img { cursor: grab; }
+.zoom.zoomed.panning .zoom-img { cursor: grabbing; }
+
+/* Names the gestures while the picture is fitted, and reads out the zoom level
+   once it is not. Fixed rather than a flex item so it cannot squeeze the
+   picture, and click-through so it is never in the way of a pan. */
+.zoom-hint {
+  position: fixed;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
 }
 .zoom-close {
   position: fixed;
@@ -1652,6 +1684,15 @@ body.bare {
   font-size: 0.88rem;
   border: 1px dashed var(--border);
   border-radius: var(--radius);
+}
+/* The same note, but standing in for a player that would not run inside the
+   preview frame — which already draws the border this would otherwise repeat. */
+.dl-preview > .dl-nopreview {
+  margin: 0;
+  padding: 1.6rem 1.25rem;
+  border: none;
+  max-width: 42ch;
+  line-height: 1.5;
 }
 
 .dl-details {

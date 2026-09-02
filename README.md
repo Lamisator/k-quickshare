@@ -69,7 +69,13 @@ The whole scheme is in one file — [`web/static/e2e.js`](web/static/e2e.js), so
   terms are stated once on the header, its members indented beneath it, and the
   whole group selects, expands or collapses in one click.
 - Recipients download files individually or all at once as a ZIP built in their browser.
-- Inline preview for images, video, audio, PDF and text.
+- Inline preview for images, video, audio, PDF and text. A picture enlarges to
+  fill the screen, and from there the wheel, a trackpad or touchscreen pinch,
+  and the +/-/0 keys zoom into it; a zoomed-in picture is dragged to pan.
+- A video the browser has no decoder for — an iPhone `.mov` is usually HEVC, and
+  most Windows browsers cannot play that — says so and names the codec, instead
+  of failing as a black rectangle with sound. The codec is read out of the
+  container in the browser, after decryption.
 - Expiry by preset or an arbitrary date; download limits; optional share password.
 - QR code for any link, generated client-side.
 

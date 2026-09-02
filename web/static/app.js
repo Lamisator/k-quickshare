@@ -67,6 +67,164 @@
     return span;
   }
 
+  // ---- what is really inside a video --------------------------------------
+  //
+  // A .mov off a phone and an .mp4 off a camera are the same ISO base media
+  // container wearing different brands, and neither MIME type says a word
+  // about the codec inside — which is the thing that actually decides whether
+  // a browser can play the file. An iPhone .mov is usually HEVC, and a browser
+  // with no HEVC decoder fails on it in one of two ways:
+  //
+  //   * it refuses the file, which the recipient reads as "MIME type not
+  //     supported" and nothing else;
+  //   * or it opens the file, drops the video track it cannot decode, and
+  //     plays the SOUND. Measured on Chromium 152 with an HEVC .mov:
+  //     loadedmetadata, canplay, playing and timeupdate all fire, no error
+  //     event ever does, and videoWidth stays 0. A black rectangle with audio
+  //     coming out of it, and not one signal that anything went wrong.
+  //
+  // canPlayType() cannot settle it in advance either: the codec string it
+  // wants carries a profile and a level, a sample entry only gives the four
+  // characters in front of them, and a wrong "no" would withhold a preview
+  // that would have played. So the browser is left to try, and the container
+  // is walked far enough to name the codec — which is what turns the silent
+  // second case into something that can be explained, and what tells it apart
+  // from an audio-only file behaving perfectly.
+  //
+  // The walk reads the decrypted plaintext and nothing else: no manifest, no
+  // ciphertext, and nothing is re-serialised.
+
+  // The boxes on the way down to the sample table. Everything else is skipped
+  // by its own length, mdat included, so a 4 GB recording costs no reads.
+  const ISO_PARENTS = ['moov', 'trak', 'mdia', 'minf', 'stbl'];
+
+  // Sample formats worth naming to somebody whose browser just refused one.
+  const VIDEO_CODECS = {
+    avc1: 'H.264', avc3: 'H.264',
+    hvc1: 'HEVC (H.265)', hev1: 'HEVC (H.265)',
+    dvh1: 'Dolby Vision (HEVC)', dvhe: 'Dolby Vision (HEVC)',
+    av01: 'AV1', vp08: 'VP8', vp09: 'VP9',
+    mp4v: 'MPEG-4 Visual', jpeg: 'Motion JPEG', mjpa: 'Motion JPEG',
+    ap4h: 'Apple ProRes', ap4x: 'Apple ProRes', apch: 'Apple ProRes',
+    apcn: 'Apple ProRes', apco: 'Apple ProRes', apcs: 'Apple ProRes',
+  };
+
+  const be32 = (b, at) => ((b[at] << 24 | b[at + 1] << 16 | b[at + 2] << 8 | b[at + 3]) >>> 0);
+  const fourcc = (b, at) => String.fromCharCode(b[at], b[at + 1], b[at + 2], b[at + 3]);
+
+  // isoWalk collects the sample entry formats between start and end. Depth and
+  // box count are capped: this runs over a file a stranger uploaded, and a
+  // malformed one must not be able to spin the tab.
+  async function isoWalk(blob, start, end, depth, out, budget) {
+    let at = start;
+    while (at + 8 <= end && budget.n > 0) {
+      budget.n--;
+      const head = new Uint8Array(await blob.slice(at, Math.min(at + 16, end)).arrayBuffer());
+      if (head.length < 8) return;
+      let size = be32(head, 0);
+      const type = fourcc(head, 4);
+      let body = at + 8;
+      if (size === 1) {
+        // A 64-bit length belongs to the mdat of a long recording. The high
+        // word is past anything a browser holds in a blob, so a file claiming
+        // one is not walked further rather than being read with a wrapped
+        // offset.
+        if (head.length < 16 || be32(head, 8) !== 0) return;
+        size = be32(head, 12);
+        body = at + 16;
+      } else if (size === 0) {
+        size = end - at; // a zero length means "to the end of the file"
+      }
+      if (size < body - at) return; // nonsense length: stop rather than loop
+      const stop = Math.min(at + size, end);
+      if (type === 'stsd') {
+        // A FullBox: four bytes of version and flags, four of entry count,
+        // then the entries themselves.
+        await isoSampleEntries(blob, body + 8, stop, out, budget);
+      } else if (depth < 6 && ISO_PARENTS.indexOf(type) >= 0) {
+        await isoWalk(blob, body, stop, depth + 1, out, budget);
+      }
+      at += size;
+    }
+  }
+
+  async function isoSampleEntries(blob, at, end, out, budget) {
+    while (at + 8 <= end && budget.n > 0) {
+      budget.n--;
+      const head = new Uint8Array(await blob.slice(at, at + 8).arrayBuffer());
+      if (head.length < 8) return;
+      const size = be32(head, 0);
+      out.push(fourcc(head, 4));
+      if (size < 8) return;
+      at += size;
+    }
+  }
+
+  // sniffIso describes an ISO base media file — .mp4, .m4a, .m4v, .mov and the
+  // rest of the family — or returns null for anything that is not one, such as
+  // a .webm, an .avi, or a file that is not what its type claims.
+  async function sniffIso(blob) {
+    const head = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
+    if (head.length < 8) return null;
+    // Every such file opens with a box header, in practice one of these: ftyp
+    // since MP4, and the older QuickTime layouts that start straight in on the
+    // movie or the media data.
+    if (['ftyp', 'moov', 'mdat', 'wide', 'skip', 'free', 'pnot'].indexOf(fourcc(head, 4)) < 0) {
+      return null;
+    }
+    const formats = [];
+    await isoWalk(blob, 0, blob.size, 0, formats, { n: 4000 });
+    if (formats.length === 0) return null;
+    const video = formats.filter((f) => VIDEO_CODECS[f])[0] || '';
+    return { formats: formats, video: video, label: VIDEO_CODECS[video] || '' };
+  }
+
+  // watchPlayable replaces a player with a plain explanation if the browser
+  // turns out not to be able to play what it was handed.
+  //
+  // Three failures, and they look nothing alike:
+  //
+  //   * a flat refusal — the error event, which is what a browser does with a
+  //     container or a codec it will not open at all;
+  //   * sound but no picture — the file opened, the audio track plays and no
+  //     video track ever arrives. Nothing errors, so it is read off
+  //     videoWidth, and only for a file the walk above says HAS a video track:
+  //     an audio-only .m4a reports the same zero and is perfectly healthy;
+  //   * a video track that is announced and then decodes nothing, which shows
+  //     up as playback running with the decoded frame count stuck at zero.
+  function watchPlayable(box, el, kind, iso) {
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      // Tear the player down properly: revoking alone leaves audio playing.
+      el.pause();
+      URL.revokeObjectURL(el.src);
+      el.removeAttribute('src');
+      el.load();
+      el.remove();
+      const p = document.createElement('p');
+      p.className = 'dl-nopreview';
+      p.textContent = iso && iso.label ? t('preview_codec', iso.label) : t('preview_unplayable');
+      box.appendChild(p);
+    };
+    el.addEventListener('error', fail);
+    if (kind !== 'video' || !iso || !iso.video) return;
+
+    // HAVE_METADATA is where a working file already knows its dimensions.
+    const checkPicture = () => {
+      if (el.readyState >= 1 && el.videoWidth === 0) fail();
+    };
+    el.addEventListener('loadedmetadata', checkPicture);
+    el.addEventListener('loadeddata', checkPicture);
+    // The dimensions can be right and the decoder still produce nothing, and
+    // that only becomes visible once playback has actually run for a moment.
+    el.addEventListener('timeupdate', () => {
+      if (settled || el.currentTime < 0.4 || !el.getVideoPlaybackQuality) return;
+      if (el.getVideoPlaybackQuality().totalVideoFrames === 0) fail();
+    });
+  }
+
   // renderPreviewInto builds the preview node for a decrypted blob and appends
   // it to box. Shared by the single-file landing page and the batch list so the
   // content-sniffing rules below cannot drift apart between the two.
@@ -87,15 +245,25 @@
       frame.src = URL.createObjectURL(blob);
       frame.title = name;
       box.appendChild(frame);
-    } else {
-      const el = document.createElement(
-        kind === 'image' ? 'img' : kind === 'video' ? 'video' : 'audio');
-      if (kind !== 'image') { el.controls = true; el.preload = 'metadata'; }
+    } else if (kind === 'image') {
+      const el = document.createElement('img');
       el.src = URL.createObjectURL(blob);
-      if (kind === 'image') {
-        el.alt = name;
-        makeZoomable(el, name);
-      }
+      el.alt = name;
+      makeZoomable(el, name);
+      box.appendChild(el);
+    } else {
+      const el = document.createElement(kind === 'video' ? 'video' : 'audio');
+      el.controls = true;
+      el.preload = 'metadata';
+      const iso = await sniffIso(blob);
+      // Same bytes, honest label: a .mov is an ISO base media file like any
+      // .mp4, and the family is what a demuxer needs to be told. Chromium
+      // disclaims video/quicktime when asked (canPlayType returns "") even
+      // though it does in fact open one, and a player that takes that type at
+      // its word has no reason to try. The sender's own type is left alone
+      // everywhere else, the download included.
+      el.src = URL.createObjectURL(iso ? blob.slice(0, blob.size, kind + '/mp4') : blob);
+      watchPlayable(box, el, kind, iso);
       box.appendChild(el);
     }
     box.hidden = false;
@@ -124,7 +292,7 @@
     return new Blob(parts).arrayBuffer();
   }
 
-  // ---- click-to-enlarge ----------------------------------------------------
+  // ---- click-to-enlarge, then zoom ----------------------------------------
   //
   // The enlarged picture goes in FRONT of everything rather than growing
   // inside its own preview box. In the gallery that box is hemmed in by the
@@ -136,7 +304,104 @@
   // painted in the ordinary page can be drawn above it — no z-index would
   // help. A second modal dialog stacks on top of the first, which is exactly
   // the foreground this needs.
+  //
+  // Once it is open the picture can be zoomed into: the wheel, a trackpad
+  // pinch (which browsers deliver as ctrl+wheel), two fingers on a touchscreen
+  // and the +/-/0 keys all end up in ONE place — a scale and a translation in
+  // screen pixels — that applyZoom() writes out as a CSS transform.
+  //
+  // Nothing here scrolls. Panning is part of the same transform, deliberately:
+  // a scroll container would hand the gesture back to the browser at every
+  // edge, and on a phone that means the page behind the overlay starts moving
+  // in the middle of a pinch.
+  const ZOOM_MIN = 1;   // 1 is the whole picture, fitted to the viewport
+  const ZOOM_MAX = 12;
+  const ZOOM_STEP = 1.3; // one press of + or -
+  const ZOOM_PAN_KEY = 60; // pixels one arrow key pans a zoomed-in picture
+
   let zoomOverlay = null;
+  const zoomState = { scale: 1, tx: 0, ty: 0 };
+  // Pointers currently down on the overlay, by pointerId. Two of them are a
+  // pinch, one is a pan.
+  const zoomPointers = new Map();
+  let zoomPinch = null;   // spread and midpoint of the previous pinch frame
+  let zoomDragged = 0;    // pixels travelled, so a pan does not read as a click
+
+  // The picture is letterboxed inside the overlay by object-fit: contain, so
+  // the box it really occupies is smaller than the element in one dimension.
+  // Panning is clamped against THAT box — clamping against the element would
+  // let a portrait photo be dragged sideways into empty space.
+  function zoomFitted() {
+    const el = zoomOverlay.img;
+    const nw = el.naturalWidth, nh = el.naturalHeight;
+    if (!nw || !nh) return { w: el.clientWidth, h: el.clientHeight };
+    const s = Math.min(el.clientWidth / nw, el.clientHeight / nh);
+    return { w: nw * s, h: nh * s };
+  }
+
+  function applyZoom() {
+    const el = zoomOverlay.img;
+    const fit = zoomFitted();
+    const s = zoomState.scale;
+    // Half the overhang is as far as an edge can travel: past that there is
+    // nothing left to pan towards, and an axis with no overhang at all snaps
+    // back to centred.
+    const maxX = Math.max(0, (fit.w * s - el.clientWidth) / 2);
+    const maxY = Math.max(0, (fit.h * s - el.clientHeight) / 2);
+    zoomState.tx = Math.max(-maxX, Math.min(maxX, zoomState.tx));
+    zoomState.ty = Math.max(-maxY, Math.min(maxY, zoomState.ty));
+    el.style.transform =
+      'translate(' + zoomState.tx + 'px, ' + zoomState.ty + 'px) scale(' + s + ')';
+
+    const zoomed = s > ZOOM_MIN + 0.001;
+    zoomOverlay.el.classList.toggle('zoomed', zoomed);
+    el.title = zoomed ? t('zoom_out') : t('zoom_hint');
+    zoomOverlay.hint.textContent = zoomed ? Math.round(s * 100) + '%' : t('zoom_hint');
+  }
+
+  // zoomTo scales to `next` while holding the point of the picture that sits
+  // under (cx, cy) — a viewport coordinate: the cursor, or the midpoint
+  // between two fingers — exactly where it is.
+  //
+  // The transform's origin is the element's centre c, so a point p offsets
+  // from it lands at c + t + s·p. Solving for the t that keeps the anchor
+  // still across a scale change gives t' = d − (s'/s)·(d − t), with d the
+  // anchor's offset from c.
+  function zoomTo(next, cx, cy) {
+    const box = zoomOverlay.el.getBoundingClientRect();
+    const s = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next));
+    const k = s / zoomState.scale;
+    const dx = cx - (box.left + box.width / 2);
+    const dy = cy - (box.top + box.height / 2);
+    zoomState.tx = dx - k * (dx - zoomState.tx);
+    zoomState.ty = dy - k * (dy - zoomState.ty);
+    zoomState.scale = s;
+    applyZoom();
+  }
+
+  // Zooms about the middle of the viewport, for the keys and for anything else
+  // with no pointer behind it.
+  function zoomByStep(factor) {
+    const box = zoomOverlay.el.getBoundingClientRect();
+    zoomTo(zoomState.scale * factor, box.left + box.width / 2, box.top + box.height / 2);
+  }
+
+  function resetZoom() {
+    zoomState.scale = 1;
+    zoomState.tx = 0;
+    zoomState.ty = 0;
+    applyZoom();
+  }
+
+  // Spread and midpoint of the two live pointers, the raw material of a pinch.
+  function pinchFrame() {
+    const [a, b] = Array.from(zoomPointers.values());
+    return {
+      dist: Math.hypot(a.x - b.x, a.y - b.y),
+      x: (a.x + b.x) / 2,
+      y: (a.y + b.y) / 2,
+    };
+  }
 
   function buildZoomOverlay() {
     const el = document.createElement('dialog');
@@ -144,39 +409,132 @@
 
     const img = document.createElement('img');
     img.className = 'zoom-img';
-    // Clicking the picture puts it away again, the way clicking opened it.
-    img.addEventListener('click', () => el.close());
+    // Without this a drag on a picture becomes the browser's own image drag
+    // halfway through, and the pan stops dead.
+    img.draggable = false;
 
     const close = document.createElement('button');
     close.type = 'button';
     close.className = 'zoom-close';
     close.innerHTML =
       '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
-    close.addEventListener('click', () => el.close());
+    // Stops the click below from reading the button as a click on the picture.
+    close.addEventListener('click', (e) => { e.stopPropagation(); el.close(); });
 
-    // The backdrop is the dialog itself; the image and button sit on top of it.
-    // detail > 0 keeps a keyboard-activated button, which reports a click at
-    // (0,0), from reading as a click on the backdrop.
-    el.addEventListener('click', (e) => {
-      if (e.target === el && e.detail > 0) el.close();
+    // Says what the gestures are while the picture is fitted, and reads out the
+    // zoom level once it is not.
+    const hint = document.createElement('span');
+    hint.className = 'zoom-hint';
+
+    zoomOverlay = { el: el, img: img, close: close, hint: hint };
+
+    // The wheel sits on the dialog, not the picture, so the letterboxed strips
+    // beside a photo zoom too rather than feeling dead.
+    el.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      // deltaY is in lines or pages in some browsers; normalising to pixels
+      // keeps one notch of the wheel worth the same everywhere.
+      const px = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1);
+      // A trackpad pinch arrives as ctrl+wheel with far smaller deltas than a
+      // real wheel, so it needs the coarser rate to travel the same distance.
+      zoomTo(zoomState.scale * Math.exp(-px * (e.ctrlKey ? 0.01 : 0.0025)), e.clientX, e.clientY);
+    }, { passive: false });
+
+    el.addEventListener('pointerdown', (e) => {
+      if (close.contains(e.target)) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      zoomPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      zoomDragged = 0;
+      zoomPinch = zoomPointers.size === 2 ? pinchFrame() : null;
+      el.setPointerCapture(e.pointerId);
+      if (zoomState.scale > ZOOM_MIN) el.classList.add('panning');
     });
+
+    el.addEventListener('pointermove', (e) => {
+      const p = zoomPointers.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX;
+      p.y = e.clientY;
+      zoomDragged += Math.hypot(dx, dy);
+
+      if (zoomPointers.size >= 2) {
+        const now = pinchFrame();
+        if (zoomPinch && zoomPinch.dist > 0) {
+          // Two fingers do both jobs at once: the spread scales, and the
+          // midpoint's own travel drags the picture along with the hand.
+          zoomState.tx += now.x - zoomPinch.x;
+          zoomState.ty += now.y - zoomPinch.y;
+          zoomTo(zoomState.scale * (now.dist / zoomPinch.dist), now.x, now.y);
+        }
+        zoomPinch = now;
+      } else if (zoomState.scale > ZOOM_MIN) {
+        zoomState.tx += dx;
+        zoomState.ty += dy;
+        applyZoom();
+      }
+    });
+
+    const endPointer = (e) => {
+      if (!zoomPointers.delete(e.pointerId)) return;
+      // Lifting one finger of a pinch leaves the other one panning, and the
+      // stale frame would make the picture jump on the next move.
+      zoomPinch = zoomPointers.size === 2 ? pinchFrame() : null;
+      if (zoomPointers.size === 0) el.classList.remove('panning');
+    };
+    el.addEventListener('pointerup', endPointer);
+    el.addEventListener('pointercancel', endPointer);
+
+    // One rule for the picture and the backdrop alike: a zoomed-in picture
+    // goes back to fitting the screen, a fitted one goes away. A pan that
+    // ended where it started is still a click, hence the travel check.
+    // detail > 0 keeps a keyboard-activated button, which reports a click at
+    // (0, 0), from reading as a click on the overlay.
+    el.addEventListener('click', (e) => {
+      if (e.detail === 0 || zoomDragged > 4) return;
+      if (zoomState.scale > ZOOM_MIN) resetZoom();
+      else el.close();
+    });
+
+    el.addEventListener('keydown', (e) => {
+      if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomByStep(ZOOM_STEP); }
+      else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomByStep(1 / ZOOM_STEP); }
+      else if (e.key === '0') { e.preventDefault(); resetZoom(); }
+      else if (zoomState.scale > ZOOM_MIN &&
+               ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].indexOf(e.key) >= 0) {
+        // Only while zoomed in: fitted, these keys belong to the gallery
+        // underneath, which steps through the files with them.
+        e.preventDefault();
+        zoomState.tx += (e.key === 'ArrowLeft' ? 1 : e.key === 'ArrowRight' ? -1 : 0) * ZOOM_PAN_KEY;
+        zoomState.ty += (e.key === 'ArrowUp' ? 1 : e.key === 'ArrowDown' ? -1 : 0) * ZOOM_PAN_KEY;
+        applyZoom();
+      }
+    });
+
+    // naturalWidth is 0 until the blob has decoded, and the clamp above needs
+    // it; a fresh picture therefore gets a second pass once it is there.
+    img.addEventListener('load', applyZoom);
+    // Rotating a phone changes what counts as fitted, and can leave a picture
+    // panned past its new edge.
+    window.addEventListener('resize', () => { if (el.open) applyZoom(); });
 
     el.appendChild(img);
     el.appendChild(close);
+    el.appendChild(hint);
     document.body.appendChild(el);
-    zoomOverlay = { el: el, img: img, close: close };
   }
 
   function openZoom(src, name) {
     if (!zoomOverlay) buildZoomOverlay();
     zoomOverlay.img.src = src;
     zoomOverlay.img.alt = name || '';
-    zoomOverlay.img.title = t('zoom_out');
     zoomOverlay.el.setAttribute('aria-label', name || t('zoom_in'));
     zoomOverlay.close.setAttribute('aria-label', t('gallery_close'));
-    // A previous viewing may have been left panned into a corner.
-    zoomOverlay.el.scrollTop = 0;
-    zoomOverlay.el.scrollLeft = 0;
+    // A previous viewing may have been left zoomed into a corner.
+    zoomPointers.clear();
+    zoomPinch = null;
+    zoomDragged = 0;
+    resetZoom();
     zoomOverlay.el.showModal();
   }
 

@@ -144,9 +144,22 @@ var translations = map[string]map[string]string{
 	"js.gallery_limit_note": {"en": "Every file loaded here counts against this link's download limit.",
 		"de": "Jede hier geladene Datei zählt auf das Download-Limit dieses Links."},
 
+	// --- a preview the browser cannot play ---
+	// Not every codec survives the trip: an iPhone .mov is usually HEVC, and a
+	// Windows browser without that decoder either refuses the file outright or
+	// plays its sound over a black rectangle. Say which codec it was, because
+	// that is the one thing that tells the recipient what to open it with.
+	"js.preview_codec": {"en": "Your browser can't play this video — it uses %s. Download it to watch it in a player.",
+		"de": "Dein Browser kann dieses Video nicht abspielen — es verwendet %s. Lade es herunter und öffne es in einem Player."},
+	"js.preview_unplayable": {"en": "Your browser can't play this file. Download it to open it in a player.",
+		"de": "Dein Browser kann diese Datei nicht abspielen. Lade sie herunter und öffne sie in einem Player."},
+
 	// --- click-to-enlarge, on every image preview ---
 	"js.zoom_in":  {"en": "Enlarge", "de": "Vergrößern"},
 	"js.zoom_out": {"en": "Fit to view", "de": "Einpassen"},
+	// Shown in the enlarged view while the picture is still fitted; once it is
+	// zoomed in, the same spot reads out the zoom level instead.
+	"js.zoom_hint": {"en": "Scroll or pinch to zoom", "de": "Zum Zoomen scrollen oder aufziehen"},
 
 	// --- integrity of the decrypted result ---
 	"js.e2e_legacy": {"en": "This link uses an older format: the contents are authenticated, but the file's length and name are not. It was shared before the current format existed.",
@@ -639,7 +652,8 @@ func jsStrings(lang string) map[string]string {
 		"js.preview_all", "js.gallery_prev", "js.gallery_next", "js.gallery_close",
 		"js.gallery_show", "js.gallery_hint", "js.gallery_nothing",
 		"js.gallery_prefetch", "js.gallery_limit_note",
-		"js.zoom_in", "js.zoom_out",
+		"js.zoom_in", "js.zoom_out", "js.zoom_hint",
+		"js.preview_codec", "js.preview_unplayable",
 		"batch.n_files", "batch.one_file",
 		// The step-2 subtitle flips between these two as the gate opens.
 		"upload.step2_locked", "upload.step2_open",
