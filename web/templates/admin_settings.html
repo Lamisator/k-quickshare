@@ -35,6 +35,25 @@
 
 <section class="card settings-card">
   <div class="settings-head">
+    <h2>{{T .Lang "settings.upload"}}</h2>
+  </div>
+  <p class="settings-note">{{T .Lang "settings.upload_note"}}</p>
+
+  <form method="post" action="/admin/settings/upload" class="settings-form" autocomplete="off">
+    <label>
+      <span>{{T .Lang "settings.upload_bytes"}}</span>
+      <input name="max_bytes" value="{{.MaxUpload}}" placeholder="512 MiB" required>
+      <em class="hint">{{T .Lang "settings.upload_bytes_h"}}</em>
+    </label>
+
+    <div class="settings-actions">
+      <button type="submit" class="btn btn-primary">{{T .Lang "settings.upload_save"}}</button>
+    </div>
+  </form>
+</section>
+
+<section class="card settings-card">
+  <div class="settings-head">
     <h2>{{T .Lang "settings.oidc"}}</h2>
     <span class="chip {{if .OIDCLive}}chip-lock{{else}}chip-warn{{end}}">
       {{if .OIDCLive}}{{T .Lang "settings.active"}}{{else}}{{T .Lang "settings.inactive"}}{{end}}

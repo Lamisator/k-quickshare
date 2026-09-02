@@ -99,8 +99,8 @@ func TestUserQuotaOverridesRoundTrip(t *testing.T) {
 	// Setting only one dimension must leave the other inheriting — that is the
 	// case the two-field form makes easy to get wrong.
 	b := int64(5 << 30)
-	if err := a.setUserQuota(ctx, u.ID, &b, nil); err != nil {
-		t.Fatalf("setUserQuota: %v", err)
+	if err := a.setUserLimits(ctx, u.ID, &b, nil, nil); err != nil {
+		t.Fatalf("setUserLimits: %v", err)
 	}
 	got = find()
 	if got.QuotaBytes == nil || *got.QuotaBytes != b {
@@ -113,8 +113,8 @@ func TestUserQuotaOverridesRoundTrip(t *testing.T) {
 	// An explicit 0 must persist as 0, not collapse back to NULL: 0 is
 	// "unlimited for this user", NULL is "use the default".
 	zero := int64(0)
-	if err := a.setUserQuota(ctx, u.ID, &zero, nil); err != nil {
-		t.Fatalf("setUserQuota zero: %v", err)
+	if err := a.setUserLimits(ctx, u.ID, &zero, nil, nil); err != nil {
+		t.Fatalf("setUserLimits zero: %v", err)
 	}
 	got = find()
 	if got.QuotaBytes == nil {
@@ -125,7 +125,7 @@ func TestUserQuotaOverridesRoundTrip(t *testing.T) {
 	}
 
 	// Clearing puts it back on the default.
-	if err := a.setUserQuota(ctx, u.ID, nil, nil); err != nil {
+	if err := a.setUserLimits(ctx, u.ID, nil, nil, nil); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	if got = find(); got.QuotaBytes != nil {
@@ -221,8 +221,8 @@ func TestEffectiveQuotaResolution(t *testing.T) {
 	// An override applies to an admin as well, and takes effect immediately —
 	// effectiveQuota reads it in the upload transaction, not at sign-in.
 	b := int64(7 << 30)
-	if err := a.setUserQuota(ctx, admin.ID, &b, nil); err != nil {
-		t.Fatalf("setUserQuota: %v", err)
+	if err := a.setUserLimits(ctx, admin.ID, &b, nil, nil); err != nil {
+		t.Fatalf("setUserLimits: %v", err)
 	}
 	got := resolve(admin)
 	if got.Bytes != b {

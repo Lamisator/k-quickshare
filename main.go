@@ -34,17 +34,19 @@ type App struct {
 	db           *pgxpool.Pool
 	filesDir     string
 	tmpl         *template.Template
-	maxUpload    int64
 	cookieSecure bool
 	unlockKey    []byte // HMAC key for per-file password-unlock cookies
 	fileKEK      []byte // key-encryption key for at-rest file encryption (nil = disabled)
 
 	quota QuotaConfig
 
-	// The per-user allowance is admin-editable at runtime, so it lives behind
-	// a mutex rather than in the immutable QuotaConfig above.
-	quotaMu       sync.RWMutex
-	quotaDefaults UserQuota
+	// The per-user allowance and the per-file upload ceiling are both
+	// admin-editable at runtime, so they live behind a mutex rather than in
+	// the immutable QuotaConfig above. maxUploadDefault is the instance
+	// default; a user may carry an override (see maxUploadFor).
+	quotaMu          sync.RWMutex
+	quotaDefaults    UserQuota
+	maxUploadDefault int64
 
 	trustedProxies []*net.IPNet // networks whose X-Forwarded-For is honored
 	proxyWarnOnce  sync.Once    // guards the "untrusted X-Forwarded-For" warning
@@ -79,7 +81,9 @@ func main() {
 	dsn := mustEnv("DATABASE_URL")
 	filesDir := envOr("FILES_DIR", "/data/files")
 	listen := envOr("LISTEN_ADDR", ":8080")
-	maxUpload := envInt64("MAX_UPLOAD_BYTES", 512*1024*1024)
+	// Only the fallback: once an admin saves a limit on /admin/settings, the
+	// settings table wins and this is ignored (as with QUOTA_USER_*).
+	maxUploadEnv := envInt64("MAX_UPLOAD_BYTES", 512*1024*1024)
 	cookieSecure := envBool("COOKIE_SECURE", true)
 
 	envOIDCIssuer := os.Getenv("OIDC_ISSUER")
@@ -136,7 +140,6 @@ func main() {
 		db:           pool,
 		filesDir:     filesDir,
 		tmpl:         tmpl,
-		maxUpload:    maxUpload,
 		cookieSecure: cookieSecure,
 		unlockKey:    randomBytes(32),
 		fileKEK:      fileKEK,
@@ -165,6 +168,10 @@ func main() {
 		Files: envInt64("QUOTA_USER_FILES", 1000),
 	}); err != nil {
 		log.Fatalf("quota defaults: %v", err)
+	}
+
+	if err := app.loadMaxUploadDefault(ctx, maxUploadEnv); err != nil {
+		log.Fatalf("upload limit: %v", err)
 	}
 
 	if err := app.bootstrapAdmin(ctx, adminUser, adminPass); err != nil {
@@ -235,6 +242,7 @@ func main() {
 	mux.Handle("/admin/settings", http.HandlerFunc(app.requireAdmin(app.handleAdminSettings)))
 	mux.Handle("/admin/settings/oidc", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsOIDC)))
 	mux.Handle("/admin/settings/quota", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsQuota)))
+	mux.Handle("/admin/settings/upload", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsUpload)))
 
 	mux.Handle("/batches/", app.requireUserHandler(app.dispatchBatchOwnerRoutes))
 
@@ -275,8 +283,8 @@ func main() {
 		shutdownErr <- srv.Shutdown(sctx)
 	}()
 
-	log.Printf("pyxis listening on %s (files dir: %s, max upload: %d bytes, schema v%d)",
-		listen, filesDir, maxUpload, latestSchemaVersion())
+	log.Printf("pyxis listening on %s (files dir: %s, max upload: %s, schema v%d)",
+		listen, filesDir, humanSize(app.getMaxUploadDefault()), latestSchemaVersion())
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server: %v", err)
 	}
@@ -584,6 +592,21 @@ func parseSize(s string) (int64, error) {
 		return 0, errBadSize
 	}
 	return int64(n), nil
+}
+
+// parsePositiveSize is parseSize for a limit that cannot be zero. A storage
+// quota reads 0 as "unlimited"; a per-file upload ceiling has no such reading —
+// 0 would refuse every upload — so it is rejected as the typo it almost
+// certainly is.
+func parsePositiveSize(s string) (int64, error) {
+	n, err := parseSize(s)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, errBadSize
+	}
+	return n, nil
 }
 
 // sizeInput renders a byte count for an <input> the admin will edit and post

@@ -22,6 +22,7 @@ func (a *App) renderSettings(w http.ResponseWriter, r *http.Request, status int,
 		"CallbackHint": "https://<your-host>/auth/oidc/callback",
 		"QuotaBytes":   sizeInput(q.Bytes),
 		"QuotaFiles":   q.Files,
+		"MaxUpload":    sizeInput(a.getMaxUploadDefault()),
 		"Error":        errMsg,
 		"Success":      okMsg,
 	})
@@ -54,6 +55,31 @@ func (a *App) handleAdminSettingsQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("quota defaults saved: %s per user, %d files per user", humanSize(bytes), files)
 	a.renderSettings(w, r, http.StatusOK, "", a.tr(r, "msg.quota_default_saved"))
+}
+
+// handleAdminSettingsUpload stores the instance-wide per-file upload ceiling.
+// It applies to every account that has no override of its own — admins
+// included, unlike the storage quota; see the note on effectiveMaxUpload.
+func (a *App) handleAdminSettingsUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	max, err := parsePositiveSize(r.PostFormValue("max_bytes"))
+	if err != nil {
+		a.renderSettings(w, r, http.StatusBadRequest, a.tr(r, "msg.upload_bad_size"), "")
+		return
+	}
+	if err := a.saveMaxUploadDefault(r.Context(), max); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	log.Printf("upload limit saved: %s per file", humanSize(max))
+	a.renderSettings(w, r, http.StatusOK, "", a.tr(r, "msg.upload_saved", humanSize(max)))
 }
 
 func (a *App) handleAdminSettingsOIDC(w http.ResponseWriter, r *http.Request) {

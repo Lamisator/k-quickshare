@@ -58,17 +58,22 @@ func TestTemplatesRender(t *testing.T) {
 	fileGroups, hasBatches := groupFiles(files)
 
 	customBytes := int64(5 << 30)
+	customUpload := int64(2 << 30)
 	userRows := []UserRow{
 		// An admin on the default: unlimited, no override to render.
 		{ID: uid, Username: "marius", Email: "m@example.com", IsAdmin: true,
 			IsSuperAdmin: true, HasPassword: true, HasOIDC: true, CreatedAt: now,
-			UsedBytes: 3 << 30, UsedFiles: 12},
+			UsedBytes: 3 << 30, UsedFiles: 12, EffMaxUpload: 512 << 20},
 		// A member with a custom byte quota but an inherited file limit, which
 		// is the case where the two form fields disagree about being blank.
 		{ID: uuid.NewString(), Username: "guest", CreatedAt: now,
 			QuotaBytes: &customBytes, UsedBytes: 1 << 30, UsedFiles: 3,
 			EffQuota: UserQuota{Bytes: customBytes, Files: 1000}, Custom: true,
-			QuotaBytesInput: sizeInput(customBytes)},
+			QuotaBytesInput: sizeInput(customBytes),
+			// An upload ceiling of their own, which is a separate override
+			// from the quota and renders its own chip.
+			MaxUploadBytes: &customUpload, EffMaxUpload: customUpload,
+			MaxUploadInput: sizeInput(customUpload)},
 	}
 
 	base := func(lang string) map[string]any {
@@ -102,7 +107,8 @@ func TestTemplatesRender(t *testing.T) {
 			"MeIsSuper": false, "Error": "", "Success": ""},
 		"admin_settings.html": {"Active": "settings", "OIDC": OIDCSettings{Issuer: "https://x"},
 			"OIDCLive": false, "Error": "", "Success": "",
-			"QuotaBytes": sizeInput(20 << 30), "QuotaFiles": int64(1000)},
+			"QuotaBytes": sizeInput(20 << 30), "QuotaFiles": int64(1000),
+			"MaxUpload": sizeInput(512 << 20)},
 		"oidc_denied.html": {"User": (*User)(nil), "AllowedDomain": "a.example", "ActualDomain": "b.example"},
 	}
 	// Only two states survive: "gone", and the end-to-end landing page. The
@@ -337,7 +343,75 @@ func TestStorageBarsRefreshable(t *testing.T) {
 	}
 }
 
-// TestE2EScriptIncluded guards the wiring between e2e.js and app.js. app.js
+// TestUploadLimitIsEditable pins the admin surface for the per-file ceiling.
+// The limit exists in three places — the instance form, the per-user override
+// and the hint the uploader reads — and a rename in one of them that silently
+// stops matching the handler would leave a form that saves nothing.
+func TestUploadLimitIsEditable(t *testing.T) {
+	tmpl, err := loadTemplates()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	admin := &User{ID: uuid.New(), Username: "root", IsAdmin: true}
+	base := map[string]any{
+		"Lang": "en", "I18N": jsStrings("en"), "ReqPath": "/", "Title": "t",
+		"Theme": "dark", "User": admin, "Error": "", "Success": "",
+	}
+	render := func(name string, extra map[string]any) string {
+		t.Helper()
+		m := map[string]any{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		var sb strings.Builder
+		if err := tmpl.ExecuteTemplate(&sb, name, m); err != nil {
+			t.Fatalf("render %s: %v", name, err)
+		}
+		return sb.String()
+	}
+
+	// The instance-wide form must post the field handleAdminSettingsUpload reads.
+	out := render("admin_settings.html", map[string]any{
+		"Active": "settings", "OIDC": OIDCSettings{}, "OIDCLive": false,
+		"QuotaBytes": sizeInput(20 << 30), "QuotaFiles": int64(1000),
+		"MaxUpload": sizeInput(512 << 20),
+	})
+	for _, want := range []string{`action="/admin/settings/upload"`, `name="max_bytes"`, "512 MiB"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("admin settings: no %s — the instance upload limit cannot be saved", want)
+		}
+	}
+
+	// The per-user override rides on the row's existing limits form, so it must
+	// post to the same place handleAdminSetQuota is routed to.
+	custom := int64(2 << 30)
+	out = render("admin_users.html", map[string]any{
+		"Active": "users", "MeID": admin.ID.String(), "MeIsSuper": true,
+		"Users": []UserRow{{
+			ID: uuid.NewString(), Username: "guest", CreatedAt: time.Now(),
+			EffQuota: UserQuota{Bytes: 5 << 30}, EffMaxUpload: custom,
+			MaxUploadBytes: &custom, MaxUploadInput: sizeInput(custom),
+		}},
+	})
+	for _, want := range []string{`name="max_upload"`, `value="2 GiB"`, "max per file:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("admin users: no %s — the per-user upload limit cannot be set or read", want)
+		}
+	}
+
+	// And the uploader is told the ceiling that will actually be applied to
+	// them, which is what app.js checks a file against before encrypting it.
+	out = render("index.html", map[string]any{"Active": "upload", "MaxUpload": custom})
+	if !strings.Contains(out, `data-max-upload="2147483648"`) {
+		t.Error("the upload form does not carry the user's own limit; app.js would " +
+			"pre-flight files against the wrong size")
+	}
+}
+
+// TestE2EScriptIncluded guards the wiring between e2e.js and app.js.// TestE2EScriptIncluded guards the wiring between e2e.js and app.js. app.js
 // reads window.PYXIS_E2E and fails every upload closed with "Encryption
 // unavailable" when it is missing, so a layout that forgets the script tag
 // breaks uploads in every browser while all other tests still pass — which is

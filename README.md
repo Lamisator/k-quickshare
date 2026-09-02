@@ -808,7 +808,7 @@ Every setting is an environment variable. Only `DATABASE_URL` and
 | `FILES_DIR` | `/data/files` | Blob storage directory. |
 | `LISTEN_ADDR` | `:8080` | Bind address. |
 | `COOKIE_SECURE` | `true` | Set `false` only for local plain-HTTP work. |
-| `MAX_UPLOAD_BYTES` | `536870912` | Per-file ceiling (512 MiB). |
+| `MAX_UPLOAD_BYTES` | `536870912` | *Initial* per-file ceiling (512 MiB). Admin-editable afterwards. |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | First-run super-admin bootstrap. |
 | `OIDC_ISSUER` | — | Enables SSO. Also configurable in `/admin/settings`. |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | — | OIDC client credentials. |
@@ -873,6 +873,8 @@ in force.
 | `POST /delete` | Delete the files named by repeated `id` fields (the list's multi-select) |
 | `GET /account`, `POST /account/password` | Self-service account |
 | `/admin/users`, `/admin/settings` | Admin only |
+| `POST /admin/settings/upload` | Instance-wide per-file upload limit. Admin only |
+| `POST /admin/users/{id}/quota` | One user's storage allowance and upload limit. Admin only |
 
 `GET /healthz` also reports the schema version, and fails with 503 when the
 database is on a different one than the binary expects — a half-finished upgrade
@@ -1054,6 +1056,30 @@ one person above a restrictive default without editing the default. Admins are
 exempt from the default — as they always have been — but an override set on an
 admin does apply, because an admin who types a limit into another admin's row
 means it.
+
+**The per-file upload limit** resolves the same way — the override on the
+user's row when set, otherwise the instance default from `/admin/settings`,
+with `MAX_UPLOAD_BYTES` as the fallback until that default is first saved — but
+it differs from a quota in two deliberate ways.
+
+It is never zero: a quota of `0` means "unlimited", while an upload ceiling of
+`0` would refuse every file, so the forms reject it and a stored `0` falls back
+to the default rather than becoming limitless. And admins are **not** exempt.
+A quota bounds what an account accumulates over time; this bounds one request —
+the browser encrypts the whole file before sending, the server holds it while it
+arrives, and the reservation is booked from this number before a byte is
+written. An admin who needs to send something larger raises the instance limit
+or gives themselves an override; both are two clicks away, and both leave a
+trace in the log, which "the rule quietly did not apply to me" does not.
+
+The limit reaches the browser as well: the upload page carries the signed-in
+user's own ceiling, so a file over it is refused before it is encrypted rather
+than after minutes of work and a full upload.
+
+Raising it above what the reverse proxy in front of the app allows does not
+work — the proxy answers first, and the app never sees the request. Check the
+proxy's own body-size and read-timeout settings when you raise this limit
+substantially.
 
 The page shell shows each user a bar for their own quota, drawn only when
 something actually caps them, so an exempt admin sees none. The disk-usage bar

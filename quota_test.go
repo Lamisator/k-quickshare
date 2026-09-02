@@ -161,3 +161,64 @@ func TestQuotaViolation(t *testing.T) {
 		t.Error("instance-wide ceiling not enforced")
 	}
 }
+
+// TestParsePositiveSize pins the one way the upload ceiling differs from a
+// quota at the parsing stage: a quota of 0 is "unlimited", an upload limit of
+// 0 would refuse every file, so it is rejected instead of stored.
+func TestParsePositiveSize(t *testing.T) {
+	for _, good := range []string{"1", "512M", "2G", "1 GiB"} {
+		if _, err := parsePositiveSize(good); err != nil {
+			t.Errorf("parsePositiveSize(%q): %v", good, err)
+		}
+	}
+	for _, bad := range []string{"0", "0G", "", "-1", "abc"} {
+		if got, err := parsePositiveSize(bad); err == nil {
+			t.Errorf("parsePositiveSize(%q) = %d, want an error", bad, got)
+		}
+	}
+}
+
+// TestEffectiveMaxUpload states the resolution rules for the per-file ceiling,
+// and in particular the two places it deliberately parts company with
+// applyQuotaDefaults: an admin is NOT exempt, and 0 is not "unlimited".
+func TestEffectiveMaxUpload(t *testing.T) {
+	const def = 512 << 20
+	override := int64(2 << 30)
+	zero := int64(0)
+	negative := int64(-1)
+
+	if got := effectiveMaxUpload(nil, def); got != def {
+		t.Errorf("no override: got %d, want the instance default %d", got, def)
+	}
+	if got := effectiveMaxUpload(&override, def); got != override {
+		t.Errorf("override: got %d, want %d", got, override)
+	}
+	// A row holding 0 (or worse) must fall back, never become limitless: the
+	// body reader is sized from this number.
+	if got := effectiveMaxUpload(&zero, def); got != def {
+		t.Errorf("zero override: got %d, want the instance default %d", got, def)
+	}
+	if got := effectiveMaxUpload(&negative, def); got != def {
+		t.Errorf("negative override: got %d, want the instance default %d", got, def)
+	}
+
+	// An admin with no override of their own gets the instance limit, unlike
+	// the storage quota, which exempts them. maxUploadFor takes the user, so
+	// this is the check that the admin flag plays no part.
+	a := &App{}
+	a.setMaxUploadDefault(def)
+	admin := &User{IsAdmin: true, IsSuperAdmin: true}
+	if got := a.maxUploadFor(admin); got != def {
+		t.Errorf("admin: got %d, want the instance limit %d — admins are not exempt "+
+			"from the per-file ceiling", got, def)
+	}
+	admin.MaxUploadBytes = &override
+	if got := a.maxUploadFor(admin); got != override {
+		t.Errorf("admin with an override: got %d, want %d", got, override)
+	}
+	// No user at all (a path that does not upload) still resolves to something
+	// finite rather than zero.
+	if got := a.maxUploadFor(nil); got != def {
+		t.Errorf("nil user: got %d, want %d", got, def)
+	}
+}

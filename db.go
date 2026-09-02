@@ -291,6 +291,22 @@ var migrations = []migration{
 			`ALTER TABLE files ALTER COLUMN content_type DROP NOT NULL`,
 		},
 	},
+	{
+		version: 9,
+		name:    "per_user_upload_limit",
+		// The per-file upload ceiling used to be MAX_UPLOAD_BYTES and nothing
+		// else: instance-wide, and changeable only by editing the environment
+		// and restarting. It is now an admin-editable instance default (in
+		// `settings`) with a per-user override here, which is the same shape
+		// the storage quota already has.
+		//
+		// NULL means "inherit the instance default" — the column cannot say
+		// "unlimited", because unlike a quota there is no such thing for a
+		// single request: the body reader needs a ceiling.
+		stmts: []string{
+			`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_upload_bytes BIGINT`,
+		},
+	},
 }
 
 // migrateUsernameCaseUnique adds the case-insensitive uniqueness constraint,

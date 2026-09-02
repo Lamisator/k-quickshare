@@ -104,9 +104,11 @@ func (a *App) handleUploadPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.render(w, r, "index.html", map[string]any{
-		"Title":     a.tr(r, "title.upload") + " · Pyxis",
-		"Active":    "upload",
-		"MaxUpload": a.maxUpload,
+		"Title":  a.tr(r, "title.upload") + " · Pyxis",
+		"Active": "upload",
+		// The dropzone hint and app.js's pre-flight size check both read this,
+		// so it has to be the ceiling this user will actually be held to.
+		"MaxUpload": a.maxUploadFor(userFromContext(r.Context())),
 	})
 }
 
@@ -380,14 +382,16 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 // limit, a dropped connection and a genuinely malformed request were one
 // indistinguishable message, with the actual reason kept in the server log
 // where the person uploading could never see it.
-func (a *App) rejectUnparsableUpload(w http.ResponseWriter, r *http.Request, err error) {
+func (a *App) rejectUnparsableUpload(w http.ResponseWriter, r *http.Request, err error, maxUpload int64) {
 	var tooBig *http.MaxBytesError
 	switch {
 	case errors.As(err, &tooBig):
-		// The reader's ceiling is maxUpload plus slack for multipart framing,
-		// so quote the limit that was actually breached, not the ceiling.
-		log.Printf("upload refused: body over the %s limit", humanSize(a.maxUpload))
-		http.Error(w, fmt.Sprintf("file is larger than the %s upload limit", humanSize(a.maxUpload)),
+		// The reader's ceiling is the user's limit plus slack for multipart
+		// framing, so quote the limit that was actually breached, not the
+		// ceiling. The limit is per-user, so it is passed in rather than read
+		// again here.
+		log.Printf("upload refused: body over the %s limit", humanSize(maxUpload))
+		http.Error(w, fmt.Sprintf("file is larger than the %s upload limit", humanSize(maxUpload)),
 			http.StatusRequestEntityTooLarge)
 	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF),
 		errors.Is(r.Context().Err(), context.Canceled):
@@ -408,10 +412,14 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFromContext(r.Context())
-	r.Body = http.MaxBytesReader(w, r.Body, a.maxUpload+32<<20)
+	// One ceiling for this whole request: the user's own override, else the
+	// instance default. Read once so the reader's budget, the checks below and
+	// the message the uploader is shown cannot disagree with each other.
+	maxUpload := a.maxUploadFor(user)
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+32<<20)
 
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		a.rejectUnparsableUpload(w, r, err)
+		a.rejectUnparsableUpload(w, r, err, maxUpload)
 		return
 	}
 	// net/http normally deletes the temp files multipart spills for anything
@@ -560,11 +568,11 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid plain_size", http.StatusBadRequest)
 		return
 	}
-	if plainSize > a.maxUpload {
+	if plainSize > maxUpload {
 		dst.Close()
 		_ = os.Remove(dstPath)
 		http.Error(w, fmt.Sprintf("file is %s; the maximum is %s",
-			humanSize(plainSize), humanSize(a.maxUpload)), http.StatusRequestEntityTooLarge)
+			humanSize(plainSize), humanSize(maxUpload)), http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -682,10 +690,10 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	if written > a.maxUpload {
+	if written > maxUpload {
 		_ = os.Remove(dstPath)
 		http.Error(w, fmt.Sprintf("file is %s; the maximum is %s",
-			humanSize(written), humanSize(a.maxUpload)), http.StatusRequestEntityTooLarge)
+			humanSize(written), humanSize(maxUpload)), http.StatusRequestEntityTooLarge)
 		return
 	}
 

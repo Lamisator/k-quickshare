@@ -68,6 +68,12 @@
           {{if gt .EffQuota.Files 0}}{{.EffQuota.Files}}{{else}}{{T $.Lang "quota.unlimited"}}{{end}}
           {{T $.Lang "quota.files"}}
         </span>
+        {{/* The per-file ceiling is a different limit from the allowance above
+             — it bounds one upload, not the total — so it gets its own line
+             and its own chip when the account overrides the instance value. */}}
+        <span class="muted">{{T $.Lang "users.max_upload"}} {{humanSize .EffMaxUpload}}
+          {{if .MaxUploadBytes}}<span class="chip chip-quota">{{T $.Lang "quota.custom"}}</span>{{end}}
+        </span>
       </td>
       <td><span class="muted"><time data-ts="{{rfc3339 .CreatedAt}}">{{formatDate .CreatedAt}}</time></span></td>
       <td class="row-actions">
@@ -94,6 +100,9 @@
             <input name="files" value="{{.QuotaFilesInput}}" size="12"
                    placeholder="{{T $.Lang "users.quota_files_ph"}}"
                    aria-label="{{T $.Lang "users.quota_files_ph"}}">
+            <input name="max_upload" value="{{.MaxUploadInput}}" size="14"
+                   placeholder="{{T $.Lang "users.max_upload_ph"}}"
+                   aria-label="{{T $.Lang "users.max_upload_ph"}}">
             <button type="submit" class="btn btn-primary btn-sm">{{T $.Lang "users.save"}}</button>
           </form>
         </details>

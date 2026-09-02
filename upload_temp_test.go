@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestUploadRemovesMultipartTempFiles(t *testing.T) {
 	t.Setenv("TMPDIR", tmp)
 
 	a.filesDir = t.TempDir()
-	a.maxUpload = 128 << 20
+	a.setMaxUploadDefault(128 << 20)
 
 	u := mkUser(t, a, ctx, "upload-tmp-"+uuid.NewString()[:8], false)
 	sid, _, err := a.createSession(ctx, u.ID, nil)
@@ -119,7 +120,7 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	a, ctx := newQuotaTestApp(t)
 	t.Setenv("TMPDIR", t.TempDir())
 	a.filesDir = t.TempDir()
-	a.maxUpload = 8 << 20 // small, so the oversize case is cheap to send
+	a.setMaxUploadDefault(8 << 20) // small, so the oversize case is cheap to send
 
 	u := mkUser(t, a, ctx, "upload-rej-"+uuid.NewString()[:8], false)
 	sid, _, err := a.createSession(ctx, u.ID, nil)
@@ -155,7 +156,7 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	mw := multipart.NewWriter(pw)
 	go func() {
 		part, _ := mw.CreateFormFile("file", "big.bin")
-		io.CopyN(part, zeroReader{}, int64(a.maxUpload)+(64<<20))
+		io.CopyN(part, zeroReader{}, a.getMaxUploadDefault()+(64<<20))
 		mw.Close()
 		pw.Close()
 	}()
@@ -163,8 +164,8 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	if code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversize upload: got HTTP %d %q, want 413", code, body)
 	}
-	if !strings.Contains(body, humanSize(a.maxUpload)) {
-		t.Errorf("oversize upload: %q does not name the %s limit", body, humanSize(a.maxUpload))
+	if !strings.Contains(body, humanSize(a.getMaxUploadDefault())) {
+		t.Errorf("oversize upload: %q does not name the %s limit", body, humanSize(a.getMaxUploadDefault()))
 	}
 
 	// A well-formed but oversize plain_size takes the other 413 path, and must
@@ -181,7 +182,7 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 	if code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversize plain_size: got HTTP %d %q, want 413", code, body)
 	}
-	if !strings.Contains(body, humanSize(a.maxUpload)) || strings.Contains(body, "invalid plain_size") {
+	if !strings.Contains(body, humanSize(a.getMaxUploadDefault())) || strings.Contains(body, "invalid plain_size") {
 		t.Errorf("oversize plain_size: %q should state the file size and the limit", body)
 	}
 
@@ -199,13 +200,16 @@ func TestUploadRejectionsAreDistinguishable(t *testing.T) {
 		t.Errorf("legacy-format upload: got HTTP %d %q, want 400 naming e2e_version", code, body)
 	}
 
-	// Version 2 without a manifest is refused too: the manifest is what makes
-	// the container authenticated, so accepting the version and not the
-	// metadata would store a file that claims a guarantee it cannot keep.
+	// A current-version upload without a manifest is refused too: the manifest
+	// is what makes the container authenticated, so accepting the version and
+	// not the metadata would store a file that claims a guarantee it cannot
+	// keep. The version is written from the constant rather than spelled out,
+	// because a hardcoded one silently stops testing this the day the accepted
+	// range moves on — which is what had happened to the "3" that was here.
 	var noMan strings.Builder
 	mwNM := multipart.NewWriter(&noMan)
 	mwNM.WriteField("e2e", "1")
-	mwNM.WriteField("e2e_version", "3")
+	mwNM.WriteField("e2e_version", strconv.Itoa(e2eCurrentVersion))
 	mwNM.WriteField("plain_size", "5")
 	p2, _ := mwNM.CreateFormFile("file", "nomanifest.bin")
 	p2.Write(make([]byte, 21))

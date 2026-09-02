@@ -40,6 +40,11 @@ type User struct {
 	IsSuperAdmin bool
 	HasPassword  bool
 
+	// Per-file upload ceiling override, as stored: nil means "inherit the
+	// instance default". Read on every request with the session, so an admin's
+	// change applies to the user's very next upload.
+	MaxUploadBytes *int64
+
 	// Session-scoped, filled in by sessionUser: when this session last
 	// completed a fresh interactive OIDC authentication. Nil on a session that
 	// never did (a local password login, or an SSO session from before the
@@ -280,9 +285,10 @@ type UserRow struct {
 	HasOIDC      bool
 	CreatedAt    time.Time
 
-	// Quota override as stored: nil means "inherits the instance default".
-	QuotaBytes *int64
-	QuotaFiles *int64
+	// Overrides as stored: nil means "inherits the instance default".
+	QuotaBytes     *int64
+	QuotaFiles     *int64
+	MaxUploadBytes *int64
 	// Current consumption, counted exactly the way loadUsage counts it for
 	// enforcement — an admin comparing the two columns must not see the
 	// displayed usage disagree with the limit that is actually applied.
@@ -290,11 +296,13 @@ type UserRow struct {
 	UsedFiles int64
 
 	// Resolved for display; filled in by renderAdminUsers, not by the query.
-	EffQuota UserQuota
-	Custom   bool
+	EffQuota     UserQuota
+	EffMaxUpload int64
+	Custom       bool
 	// Override values pre-rendered for the edit form, empty when inherited.
 	QuotaBytesInput string
 	QuotaFilesInput string
+	MaxUploadInput  string
 }
 
 func (a *App) listUsers(ctx context.Context) ([]UserRow, error) {
@@ -303,7 +311,7 @@ func (a *App) listUsers(ctx context.Context) ([]UserRow, error) {
 		        (u.password_hash IS NOT NULL) AS has_password,
 		        (u.oidc_subject IS NOT NULL) AS has_oidc,
 		        u.is_admin, u.is_super_admin, u.created_at,
-		        u.quota_bytes, u.quota_files,
+		        u.quota_bytes, u.quota_files, u.max_upload_bytes,
 		        COALESCE(f.bytes, 0), COALESCE(f.files, 0)
 		 FROM users u
 		 LEFT JOIN (
@@ -324,7 +332,8 @@ func (a *App) listUsers(ctx context.Context) ([]UserRow, error) {
 		)
 		if err := rows.Scan(&u.ID, &u.Username, &email,
 			&u.HasPassword, &u.HasOIDC, &u.IsAdmin, &u.IsSuperAdmin, &u.CreatedAt,
-			&u.QuotaBytes, &u.QuotaFiles, &u.UsedBytes, &u.UsedFiles); err != nil {
+			&u.QuotaBytes, &u.QuotaFiles, &u.MaxUploadBytes,
+			&u.UsedBytes, &u.UsedFiles); err != nil {
 			return nil, err
 		}
 		if email != nil {
@@ -335,12 +344,14 @@ func (a *App) listUsers(ctx context.Context) ([]UserRow, error) {
 	return out, rows.Err()
 }
 
-// setUserQuota writes one user's overrides. A nil argument clears the column,
-// putting that dimension back on the instance default.
-func (a *App) setUserQuota(ctx context.Context, userID uuid.UUID, bytes, files *int64) error {
+// setUserLimits writes one user's overrides — the storage allowance and the
+// per-file upload ceiling, which the admin edits in one form. A nil argument
+// clears that column, putting the dimension back on the instance default.
+func (a *App) setUserLimits(ctx context.Context, userID uuid.UUID, bytes, files, maxUpload *int64) error {
 	_, err := a.db.Exec(ctx,
-		`UPDATE users SET quota_bytes = $1, quota_files = $2 WHERE id = $3`,
-		bytes, files, userID.String())
+		`UPDATE users SET quota_bytes = $1, quota_files = $2, max_upload_bytes = $3
+		 WHERE id = $4`,
+		bytes, files, maxUpload, userID.String())
 	return err
 }
 
@@ -476,12 +487,12 @@ func (a *App) sessionUser(ctx context.Context, token string) (*User, error) {
 	)
 	err := a.db.QueryRow(ctx,
 		`SELECT u.id::text, u.username, u.email, u.password_hash, u.oidc_issuer, u.oidc_subject,
-		        u.is_admin, u.is_super_admin, s.reauth_at
+		        u.is_admin, u.is_super_admin, u.max_upload_bytes, s.reauth_at
 		 FROM sessions s
 		 JOIN users u ON u.id = s.user_id
 		 WHERE s.id = $1 AND s.expires_at > NOW()`, sessionKey(token)).
 		Scan(&u.ID, &u.Username, &email, &hash, &issuer, &subject,
-			&u.IsAdmin, &u.IsSuperAdmin, &reauthAt)
+			&u.IsAdmin, &u.IsSuperAdmin, &u.MaxUploadBytes, &reauthAt)
 	if err != nil {
 		return nil, err
 	}

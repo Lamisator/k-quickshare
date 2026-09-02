@@ -131,15 +131,23 @@ func (a *App) renderAdminUsers(w http.ResponseWriter, r *http.Request, status in
 	}
 	me := userFromContext(r.Context())
 	def := a.getQuotaDefaults()
+	maxDef := a.getMaxUploadDefault()
 	for i := range users {
 		u := &users[i]
 		u.EffQuota = applyQuotaDefaults(u.IsAdmin, u.QuotaBytes, u.QuotaFiles, def)
+		u.EffMaxUpload = effectiveMaxUpload(u.MaxUploadBytes, maxDef)
+		// Custom stays about the storage allowance alone: it drives the chip
+		// next to the quota figures, and an upload-ceiling override is not a
+		// custom quota.
 		u.Custom = u.QuotaBytes != nil || u.QuotaFiles != nil
 		if u.QuotaBytes != nil {
 			u.QuotaBytesInput = sizeInput(*u.QuotaBytes)
 		}
 		if u.QuotaFiles != nil {
 			u.QuotaFilesInput = strconv.FormatInt(*u.QuotaFiles, 10)
+		}
+		if u.MaxUploadBytes != nil {
+			u.MaxUploadInput = sizeInput(*u.MaxUploadBytes)
 		}
 	}
 	a.renderStatus(w, r, status, "admin_users.html", map[string]any{
@@ -153,9 +161,11 @@ func (a *App) renderAdminUsers(w http.ResponseWriter, r *http.Request, status in
 	})
 }
 
-// handleAdminSetQuota stores a per-user override. Either field may be left
-// blank, which clears that column and puts the user back on the instance
-// default — the only way to express "inherit" once a limit has been set.
+// handleAdminSetQuota stores a per-user override: the storage allowance and
+// the per-file upload ceiling, which share one form on the row. Any field may
+// be left blank, which clears that column and puts the user back on the
+// instance default — the only way to express "inherit" once a limit has been
+// set.
 func (a *App) handleAdminSetQuota(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseAdminUserID(w, r, "/quota")
 	if !ok {
@@ -175,6 +185,14 @@ func (a *App) handleAdminSetQuota(w http.ResponseWriter, r *http.Request) {
 		a.renderAdminUsers(w, r, http.StatusBadRequest, a.tr(r, "msg.quota_bad_count"), "")
 		return
 	}
+	// parsePositiveSize rather than parseSize: a quota of 0 means "unlimited",
+	// but an upload ceiling of 0 would mean "no file may be uploaded at all",
+	// which nobody types on purpose. Blank is how you say "inherit".
+	maxUpload, err := parseQuotaOverride(r.PostFormValue("max_upload"), parsePositiveSize)
+	if err != nil {
+		a.renderAdminUsers(w, r, http.StatusBadRequest, a.tr(r, "msg.upload_bad_size"), "")
+		return
+	}
 
 	var username string
 	if err := a.db.QueryRow(r.Context(),
@@ -186,12 +204,12 @@ func (a *App) handleAdminSetQuota(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	if err := a.setUserQuota(r.Context(), id, bytes, files); err != nil {
+	if err := a.setUserLimits(r.Context(), id, bytes, files, maxUpload); err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	log.Printf("admin set quota for %s: bytes=%s files=%s",
-		username, quotaLogValue(bytes), quotaLogValue(files))
+	log.Printf("admin set limits for %s: bytes=%s files=%s max_upload=%s",
+		username, quotaLogValue(bytes), quotaLogValue(files), quotaLogValue(maxUpload))
 	a.renderAdminUsers(w, r, http.StatusOK, "", a.tr(r, "msg.quota_saved", username))
 }
 

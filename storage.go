@@ -69,6 +69,7 @@ func loadUsage(ctx context.Context, tx pgx.Tx, userID string) (usageSnapshot, er
 const (
 	settingQuotaUserBytes = "quota.user_bytes"
 	settingQuotaUserFiles = "quota.user_files"
+	settingUploadMaxBytes = "upload.max_bytes"
 )
 
 // loadQuotaDefaults resolves the instance-wide per-user allowance: the values
@@ -125,6 +126,80 @@ func (a *App) saveQuotaDefaults(ctx context.Context, q UserQuota) error {
 	}
 	a.setQuotaDefaults(q)
 	return nil
+}
+
+// --- per-file upload ceiling ----------------------------------------------
+//
+// This is a different kind of limit from the quota above and is resolved
+// differently on purpose.
+//
+// A quota bounds what an account may accumulate, so "unlimited" is meaningful
+// and admins are exempt from the default. A per-file ceiling bounds ONE
+// request — the multipart reader's budget, the temp file it spills to, the
+// reservation booked before a byte is written — so it applies to everyone,
+// admins included, and it is never zero. An admin who needs to send something
+// larger raises the instance limit, or gives themselves an override; both are
+// two clicks away and both leave a trace, which "the rule quietly did not
+// apply to me" does not.
+
+// loadMaxUploadDefault resolves the instance-wide per-file ceiling: the value
+// an admin saved, else the environment fallback. As with the quota defaults
+// the env var is a fallback and never a seed — once an admin has saved one,
+// changing MAX_UPLOAD_BYTES is deliberately a no-op.
+func (a *App) loadMaxUploadDefault(ctx context.Context, env int64) error {
+	m, err := a.loadAllSettings(ctx)
+	if err != nil {
+		return err
+	}
+	max := env
+	if n, ok := parseStoredInt(m[settingUploadMaxBytes]); ok && n > 0 {
+		max = n
+	}
+	a.setMaxUploadDefault(max)
+	log.Printf("upload limit: %s per file (per-user overrides may differ)", humanSize(max))
+	return nil
+}
+
+func (a *App) getMaxUploadDefault() int64 {
+	a.quotaMu.RLock()
+	defer a.quotaMu.RUnlock()
+	return a.maxUploadDefault
+}
+
+func (a *App) setMaxUploadDefault(n int64) {
+	a.quotaMu.Lock()
+	a.maxUploadDefault = n
+	a.quotaMu.Unlock()
+}
+
+func (a *App) saveMaxUploadDefault(ctx context.Context, n int64) error {
+	if err := a.saveSettings(ctx, map[string]string{
+		settingUploadMaxBytes: strconv.FormatInt(n, 10),
+	}); err != nil {
+		return err
+	}
+	a.setMaxUploadDefault(n)
+	return nil
+}
+
+// effectiveMaxUpload resolves the ceiling for one user. A nil or non-positive
+// override inherits the instance default: zero is not "unlimited" here, and a
+// row that somehow holds one must not turn into a limitless request.
+func effectiveMaxUpload(override *int64, def int64) int64 {
+	if override != nil && *override > 0 {
+		return *override
+	}
+	return def
+}
+
+// maxUploadFor is the ceiling applied to this request. The override rides on
+// the session user, which is re-read from the database on every request, so an
+// admin's change lands on the uploader's very next one.
+func (a *App) maxUploadFor(u *User) int64 {
+	if u == nil {
+		return a.getMaxUploadDefault()
+	}
+	return effectiveMaxUpload(u.MaxUploadBytes, a.getMaxUploadDefault())
 }
 
 // applyQuotaDefaults resolves what is actually enforced for one user from the
@@ -301,8 +376,8 @@ func (a *App) checkDiskFree(incoming int64) error {
 // is written to disk. The reservation is released by finalizeUpload (success)
 // or releaseReservation (failure); stale ones expire after reservationTTL.
 func (a *App) reserveUpload(ctx context.Context, user *User, estBytes int64) (uuid.UUID, error) {
-	if estBytes <= 0 || estBytes > a.maxUpload {
-		estBytes = a.maxUpload
+	if max := a.maxUploadFor(user); estBytes <= 0 || estBytes > max {
+		estBytes = max
 	}
 	if err := a.checkDiskFree(estBytes); err != nil {
 		return uuid.Nil, err

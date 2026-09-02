@@ -387,6 +387,8 @@ var translations = map[string]map[string]string{
 	"users.quota_bytes_ph": {"en": "storage, blank = default", "de": "Speicher, leer = Standard"},
 	"users.quota_files_ph": {"en": "files, blank = default", "de": "Dateien, leer = Standard"},
 	"users.t_quota_admin":  {"en": "Admins have no quota unless you set one here", "de": "Admins haben kein Kontingent, sofern hier keines gesetzt wird"},
+	"users.max_upload":     {"en": "max per file:", "de": "max. pro Datei:"},
+	"users.max_upload_ph":  {"en": "per file, blank = default", "de": "pro Datei, leer = Standard"},
 	"msg.user_required":    {"en": "Username is required.", "de": "Benutzername ist erforderlich."},
 	"msg.user_pw_short":    {"en": "Password must be at least 12 characters.", "de": "Das Passwort muss mindestens 12 Zeichen lang sein."},
 	"msg.user_exists":      {"en": "A user with that username already exists.", "de": "Ein Benutzer mit diesem Namen existiert bereits."},
@@ -408,6 +410,9 @@ var translations = map[string]map[string]string{
 	"msg.quota_bad_count": {"en": "The file limit must be a whole number, 0 for unlimited.",
 		"de": "Die Dateigrenze muss eine ganze Zahl sein, 0 für unbegrenzt."},
 	"msg.quota_default_saved": {"en": "Default quota saved.", "de": "Standard-Kontingent gespeichert."},
+	"msg.upload_bad_size": {"en": "Enter a size such as 512M, 2G or 1 GiB. The upload limit cannot be 0 — that would refuse every file.",
+		"de": "Gib eine Größe wie 512M, 2G oder 1 GiB ein. Das Upload-Limit kann nicht 0 sein — damit wäre jede Datei abgelehnt."},
+	"msg.upload_saved": {"en": "Upload limit saved: %s per file.", "de": "Upload-Limit gespeichert: %s pro Datei."},
 
 	// --- admin settings ---
 	"settings.heading":      {"en": "Settings", "de": "Einstellungen"},
@@ -442,6 +447,15 @@ var translations = map[string]map[string]string{
 		"en": "Maximum number of active files. 0 means unlimited.",
 		"de": "Maximale Anzahl aktiver Dateien. 0 bedeutet unbegrenzt."},
 	"settings.quota_save":  {"en": "Save quotas", "de": "Kontingente speichern"},
+	"settings.upload":      {"en": "Upload limit", "de": "Upload-Limit"},
+	"settings.upload_note": {
+		"en": "The largest single file anyone may upload. Unlike the storage quota this applies to admins too, because it bounds one request — the browser encrypts the whole file before sending it, and the server holds it while it arrives. Give an individual account a different ceiling on the Users page.",
+		"de": "Die größte einzelne Datei, die jemand hochladen darf. Anders als das Speicherkontingent gilt dies auch für Admins, denn es begrenzt eine einzelne Anfrage — der Browser verschlüsselt die ganze Datei vor dem Senden, und der Server hält sie, während sie eintrifft. Ein abweichendes Limit für ein einzelnes Konto wird auf der Benutzer-Seite gesetzt."},
+	"settings.upload_bytes": {"en": "Maximum file size", "de": "Maximale Dateigröße"},
+	"settings.upload_bytes_h": {
+		"en": "A size such as 512M, 2G or 1 GiB. Units are binary. There is no \"unlimited\": free disk space and the browser's own memory still apply.",
+		"de": "Eine Größe wie 512M, 2G oder 1 GiB. Einheiten sind binär. Es gibt kein „unbegrenzt“: freier Speicherplatz und der Arbeitsspeicher des Browsers bleiben maßgeblich."},
+	"settings.upload_save": {"en": "Save upload limit", "de": "Upload-Limit speichern"},
 	"msg.oidc_required":    {"en": "Issuer, Client ID, Client Secret and Redirect URL are required when OIDC is enabled.", "de": "Issuer, Client-ID, Client-Secret und Redirect-URL sind erforderlich, wenn OIDC aktiviert ist."},
 	"msg.oidc_unreachable": {"en": "Couldn't reach the OIDC provider with these settings: %s", "de": "Der OIDC-Provider ist mit diesen Einstellungen nicht erreichbar: %s"},
 	"msg.oidc_saved":       {"en": "OIDC settings saved and applied.", "de": "OIDC-Einstellungen gespeichert und angewendet."},
