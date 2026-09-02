@@ -411,7 +411,60 @@ func TestUploadLimitIsEditable(t *testing.T) {
 	}
 }
 
-// TestE2EScriptIncluded guards the wiring between e2e.js and app.js.// TestE2EScriptIncluded guards the wiring between e2e.js and app.js. app.js
+// TestUserRowsCarryTheirColumnNames guards the narrow-screen layout of the
+// users page. Below 900px the table becomes one card per account and the
+// heading row is hidden, so each cell's label comes from its own data-label
+// attribute; a cell that loses the attribute renders as a bare value under no
+// heading, and only on a phone, where nobody is looking when the test suite
+// runs on a desktop.
+func TestUserRowsCarryTheirColumnNames(t *testing.T) {
+	tmpl, err := loadTemplates()
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	admin := &User{ID: uuid.New(), Username: "root", IsAdmin: true}
+	var sb strings.Builder
+	err = tmpl.ExecuteTemplate(&sb, "admin_users.html", map[string]any{
+		"Lang": "en", "I18N": jsStrings("en"), "ReqPath": "/", "Title": "t",
+		"Theme": "dark", "User": admin, "Active": "users", "Error": "", "Success": "",
+		"MeID": admin.ID.String(), "MeIsSuper": true,
+		"Users": []UserRow{{
+			ID: uuid.NewString(), Username: "guest", Email: "g@example.com",
+			CreatedAt: time.Now(), EffQuota: UserQuota{Bytes: 5 << 30}, EffMaxUpload: 512 << 20,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	out := sb.String()
+
+	// Every column the card layout has to caption, in the words the hidden
+	// header row would have used.
+	for _, want := range []string{
+		`data-label="Email"`, `data-label="Methods"`, `data-label="Role"`,
+		`data-label="Usage / quota"`, `data-label="Created"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("a user row cell has no %s; on a phone that value renders "+
+				"under no heading at all", want)
+		}
+	}
+
+	// The limits editor's captions are the other half: stacked on a phone, a
+	// field holding a value shows no placeholder, and two of the three read the
+	// same. They are wrapped in labels, which is also what names them for a
+	// screen reader.
+	for _, want := range []string{
+		`class="inline-field"`, "<span>Storage</span>", "<span>Files</span>",
+		"<span>Max per file</span>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the limits editor is missing %s", want)
+		}
+	}
+}
+
+// TestE2EScriptIncluded guards the wiring between e2e.js and app.js.// TestE2EScriptIncluded guards the wiring between e2e.js and app.js.// TestE2EScriptIncluded guards the wiring between e2e.js and app.js. app.js
 // reads window.PYXIS_E2E and fails every upload closed with "Encryption
 // unavailable" when it is missing, so a layout that forgets the script tag
 // breaks uploads in every browser while all other tests still pass — which is

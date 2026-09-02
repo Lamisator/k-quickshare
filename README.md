@@ -925,6 +925,15 @@ web/static/          app.js, e2e.js, zip.js, qrlib.js, style.css
                      govulncheck, container build, secret scan
 ```
 
+**Narrow screens.** The breakpoints are 900px (the shell goes narrow: the
+sidebar collapses, and the users table becomes one card per account), 680px and
+560px. The users table is the one place where the layout changes shape rather
+than reflowing: seven columns and a row of buttons cannot be squeezed, and
+scrolled sideways the buttons are what falls off the screen. Each `<td>` there
+carries its column name in `data-label`, which the card layout renders above
+the value — a cell that loses the attribute shows a bare value under no heading,
+and only on a phone, so `TestUserRowsCarryTheirColumnNames` checks for them.
+
 Two rules the codebase enforces and that are easy to break:
 
 1. **No inline `<script>` or `style=` in templates.** The CSP forbids both. i18n

@@ -389,6 +389,13 @@ var translations = map[string]map[string]string{
 	"users.t_quota_admin":  {"en": "Admins have no quota unless you set one here", "de": "Admins haben kein Kontingent, sofern hier keines gesetzt wird"},
 	"users.max_upload":     {"en": "max per file:", "de": "max. pro Datei:"},
 	"users.max_upload_ph":  {"en": "per file, blank = default", "de": "pro Datei, leer = Standard"},
+	// Short field labels for the limits editor. They are hidden on a wide
+	// screen, where the three inputs sit side by side under one heading and the
+	// placeholders say which is which; stacked on a phone the placeholders are
+	// gone the moment a field holds a value, and two of them read "1 GiB".
+	"users.f_storage":      {"en": "Storage", "de": "Speicher"},
+	"users.f_files":        {"en": "Files", "de": "Dateien"},
+	"users.f_max_upload":   {"en": "Max per file", "de": "Max. pro Datei"},
 	"msg.user_required":    {"en": "Username is required.", "de": "Benutzername ist erforderlich."},
 	"msg.user_pw_short":    {"en": "Password must be at least 12 characters.", "de": "Das Passwort muss mindestens 12 Zeichen lang sein."},
 	"msg.user_exists":      {"en": "A user with that username already exists.", "de": "Ein Benutzer mit diesem Namen existiert bereits."},

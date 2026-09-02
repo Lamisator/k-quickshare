@@ -48,18 +48,18 @@
   {{range .Users}}
     <tr>
       <td class="cell-name">{{.Username}}{{if eq .ID $.MeID}} <span class="badge">{{T $.Lang "badge.you"}}</span>{{end}}</td>
-      <td>{{if .Email}}{{.Email}}{{else}}<span class="muted">—</span>{{end}}</td>
-      <td>
+      <td data-label="{{T $.Lang "users.col_email"}}">{{if .Email}}{{.Email}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td data-label="{{T $.Lang "users.col_methods"}}">
         {{if .HasPassword}}<span class="chip">{{T $.Lang "account.method_pw"}}</span>{{end}}
         {{if .HasOIDC}}<span class="chip chip-lock">Zitadel</span>{{end}}
         {{if not (or .HasPassword .HasOIDC)}}<span class="chip chip-warn">{{T $.Lang "users.no_login"}}</span>{{end}}
       </td>
-      <td>
+      <td data-label="{{T $.Lang "users.col_role"}}">
         {{if .IsSuperAdmin}}<span class="badge badge-super">{{T $.Lang "role.super"}}</span>
         {{else if .IsAdmin}}<span class="badge">{{T $.Lang "role.admin"}}</span>
         {{else}}<span class="muted">{{T $.Lang "users.member"}}</span>{{end}}
       </td>
-      <td class="quota-cell">
+      <td class="quota-cell" data-label="{{T $.Lang "users.col_quota"}}">
         <span>{{humanSize .UsedBytes}} /
           {{if gt .EffQuota.Bytes 0}}{{humanSize .EffQuota.Bytes}}{{else}}{{T $.Lang "quota.unlimited"}}{{end}}
           {{if .Custom}}<span class="chip chip-quota">{{T $.Lang "quota.custom"}}</span>{{end}}
@@ -75,7 +75,7 @@
           {{if .MaxUploadBytes}}<span class="chip chip-quota">{{T $.Lang "quota.custom"}}</span>{{end}}
         </span>
       </td>
-      <td><span class="muted"><time data-ts="{{rfc3339 .CreatedAt}}">{{formatDate .CreatedAt}}</time></span></td>
+      <td data-label="{{T $.Lang "users.col_created"}}"><span class="muted"><time data-ts="{{rfc3339 .CreatedAt}}">{{formatDate .CreatedAt}}</time></span></td>
       <td class="row-actions">
         {{if and .IsSuperAdmin (not $.MeIsSuper)}}
         <button type="button" class="btn btn-ghost btn-sm" disabled title="{{T $.Lang "users.t_super_pw"}}">{{T $.Lang "users.reset_pw"}}</button>
@@ -93,16 +93,28 @@
                    {{if and .IsAdmin (not .Custom)}}title="{{T $.Lang "users.t_quota_admin"}}"{{end}}>
             {{T $.Lang "users.quota"}}
           </summary>
+          {{/* Each field is wrapped in its own label, whose caption only shows
+               on a narrow screen: side by side the placeholders identify the
+               three boxes, but stacked on a phone a filled-in field shows no
+               placeholder at all and two of them read the same. The label
+               element also associates the caption with the input, which is
+               what the aria-label attributes used to stand in for. */}}
           <form method="post" action="/admin/users/{{.ID}}/quota" class="inline-form" autocomplete="off">
-            <input name="bytes" value="{{.QuotaBytesInput}}" size="14"
-                   placeholder="{{T $.Lang "users.quota_bytes_ph"}}"
-                   aria-label="{{T $.Lang "users.quota_bytes_ph"}}">
-            <input name="files" value="{{.QuotaFilesInput}}" size="12"
-                   placeholder="{{T $.Lang "users.quota_files_ph"}}"
-                   aria-label="{{T $.Lang "users.quota_files_ph"}}">
-            <input name="max_upload" value="{{.MaxUploadInput}}" size="14"
-                   placeholder="{{T $.Lang "users.max_upload_ph"}}"
-                   aria-label="{{T $.Lang "users.max_upload_ph"}}">
+            <label class="inline-field">
+              <span>{{T $.Lang "users.f_storage"}}</span>
+              <input name="bytes" value="{{.QuotaBytesInput}}" size="14"
+                     placeholder="{{T $.Lang "users.quota_bytes_ph"}}">
+            </label>
+            <label class="inline-field">
+              <span>{{T $.Lang "users.f_files"}}</span>
+              <input name="files" value="{{.QuotaFilesInput}}" size="12"
+                     placeholder="{{T $.Lang "users.quota_files_ph"}}">
+            </label>
+            <label class="inline-field">
+              <span>{{T $.Lang "users.f_max_upload"}}</span>
+              <input name="max_upload" value="{{.MaxUploadInput}}" size="14"
+                     placeholder="{{T $.Lang "users.max_upload_ph"}}">
+            </label>
             <button type="submit" class="btn btn-primary btn-sm">{{T $.Lang "users.save"}}</button>
           </form>
         </details>

@@ -1885,6 +1885,35 @@ body.bare {
   align-items: center;
   padding: 0.4rem 0.5rem 0;
 }
+/* The row editors open as a narrow stacked panel rather than a wide line of
+   inputs, at every width, for two reasons.
+   The line was already too wide for the table: with the editor shut the table
+   is exactly as wide as the page, and opening it grew the last cell by some
+   340px, so the whole table — every column, every other row — slid sideways
+   under a scrollbar just to type a number. A third field made that worse.
+   And the fields need their captions. Side by side while empty the
+   placeholders identify them, but a filled-in field shows no placeholder, and
+   two of the three then read "1 GiB". */
+.row-action .inline-form {
+  display: grid;
+  /* Wide enough for "20 GiB" and a readable caption, narrow enough that
+     opening it barely widens the table; the last of that is dataset-dependent
+     (a long email address decides the rest), so this is a compromise, not a
+     number that makes the scrollbar go away for everyone. */
+  width: 13rem;
+  gap: 0.45rem;
+  padding: 0.55rem 0.5rem 0.6rem;
+}
+.inline-field {
+  display: grid;
+  gap: 0.15rem;
+}
+.inline-field > span {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 .row-action .inline-form input {
   padding: 0.35rem 0.55rem;
   background: var(--bg);
@@ -1893,6 +1922,100 @@ body.bare {
   color: var(--text);
   font: inherit;
   font-size: 0.85rem;
+}
+
+/* Below the width where the shell itself goes narrow (the sidebar collapses at
+   the same breakpoint), the user table stops being a table and becomes one
+   card per account. Seven columns do not fit a phone, and they do not fit a
+   tablet held upright either: sideways-scrolled, the screen showed the name
+   and the email and nothing else — the role, both limits, the date and every
+   one of the row's buttons sat off to the right, behind a scroll nobody thinks
+   to try on what looks like a finished page. */
+@media (max-width: 900px) {
+  /* Each cell keeps its column name in data-label (set in admin_users.html) and
+     renders it above the value, so the heading row can go. */
+  .table-wrap { overflow-x: visible; }
+  .user-table {
+    border: none;
+    background: none;
+    display: block;
+    font-size: 0.95rem;
+  }
+  .user-table thead { display: none; }
+  .user-table tbody { display: block; }
+  .user-table tbody tr {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.9rem 1rem 1rem;
+    margin-bottom: 0.75rem;
+  }
+  .user-table tbody tr:hover { background: var(--surface); }
+  .user-table tbody tr:last-child { margin-bottom: 0; }
+  .user-table td {
+    display: block;
+    border-bottom: none;
+    padding: 0;
+    margin-top: 0.7rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .user-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    margin-bottom: 0.15rem;
+  }
+  /* The name is the card's heading, so it takes no label and no top margin. */
+  .user-table td.cell-name {
+    margin-top: 0;
+    font-size: 1.05rem;
+    font-weight: 650;
+  }
+
+  /* Buttons: full width and stacked, rather than four targets crowded onto one
+     line and then wrapped mid-word. */
+  .user-table td.row-actions {
+    display: grid;
+    /* Both are needed: the cell is a flex row on desktop, and its
+       justify-content: flex-end survives into the grid, where it packs a
+       content-sized track against the right edge instead of filling the card.
+       auto-fit gives a phone one button per line and a tablet a row of them,
+       without a second breakpoint deciding where that happens. */
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    justify-content: stretch;
+    gap: 0.4rem;
+    white-space: normal;
+    margin-top: 0.9rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--border);
+  }
+  .row-actions > form, .row-actions > .row-action, .row-actions > .btn { width: 100%; }
+  .row-actions .btn {
+    width: 100%;
+    justify-content: center;
+    /* Everything this layout covers is reachable by thumb — .btn-sm is 26px
+       tall, and the rule that fixes that elsewhere only starts at 560px. */
+    min-height: 38px;
+  }
+  .row-action > summary { display: flex; justify-content: center; }
+
+  /* An open editor takes the whole row: on a tablet it would otherwise be
+     squeezed into one of the button columns. */
+  .row-action[open] {
+    grid-column: 1 / -1;
+    padding: 0.15rem 0.5rem 0.6rem;
+  }
+  .row-action .inline-form {
+    width: 100%;
+    padding: 0.55rem 0 0;
+  }
+  .row-action .inline-form input { width: 100%; }
 }
 
 /* ================= Settings ================= */
@@ -2090,11 +2213,6 @@ body.bare {
   .dl-preview img, .dl-preview video { max-height: 55vh; }
   .dl-preview iframe { height: 60vh; }
   .e2e-text { max-height: 50vh; }
-
-  /* The 6-column user table scrolls sideways in .table-wrap; without nowrap
-     every cell would instead collapse into a column of single words. */
-  .table-wrap { -webkit-overflow-scrolling: touch; }
-  .user-table th, .user-table td { white-space: nowrap; }
 
   .queue-item { padding: 0.75rem 0.85rem 0.85rem; }
   .batch-share { padding: 0.85rem 0.9rem 0.9rem; }
