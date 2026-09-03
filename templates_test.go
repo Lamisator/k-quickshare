@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -575,6 +578,44 @@ func TestSwitcherLinkShape(t *testing.T) {
 // TestJSStringsResolve catches a key listed in jsStrings but absent from the
 // translations map. tr() falls back to the key itself, so the mistake shows up
 // only as a raw "reason_network" rendered in the UI — never as a failure.
+// TestCopyButtonsCarryTheirHandlerClass pins the one thing that makes a copy
+// button work.
+//
+// app.js binds copying through ONE delegated listener keyed on `.btn-copy`, so
+// that buttons added after load (a share panel, a drop's two links) work without
+// rebinding. A button that carries data-copy but not the class is inert: it
+// renders, it highlights on hover, and clicking it does nothing at all. That is
+// precisely what happened to the drop links, and nothing else failed — no error,
+// no console message, no test.
+func TestCopyButtonsCarryTheirHandlerClass(t *testing.T) {
+	entries, err := os.ReadDir("web/templates")
+	if err != nil {
+		t.Fatalf("read templates: %v", err)
+	}
+	// The opening tag of an element carrying data-copy, back to its "<".
+	tagWithCopy := regexp.MustCompile(`(?s)<[a-zA-Z][^<>]*\bdata-copy=[^<>]*>`)
+	checked := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".html") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join("web/templates", e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		for _, tag := range tagWithCopy.FindAllString(string(src), -1) {
+			checked++
+			if !strings.Contains(tag, "btn-copy") {
+				t.Errorf("%s: an element has data-copy but not the btn-copy class, so "+
+					"clicking it does nothing:\n  %s", e.Name(), strings.TrimSpace(tag))
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no data-copy elements found; the guard would pass vacuously")
+	}
+}
+
 func TestJSStringsResolve(t *testing.T) {
 	for _, lang := range supportedLangs {
 		for key, val := range jsStrings(lang) {
