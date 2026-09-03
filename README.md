@@ -41,6 +41,7 @@ The whole scheme is in one file — [`web/static/e2e.js`](web/static/e2e.js), so
 - [Features](#features)
 - [Cryptography](#cryptography)
 - [Batch shares](#batch-shares)
+- [Drops: receiving files](#drops-receiving-files)
 - [Running it](#running-it)
 - [Configuration](#configuration)
 - [Routes](#routes)
@@ -78,6 +79,20 @@ The whole scheme is in one file — [`web/static/e2e.js`](web/static/e2e.js), so
   container in the browser, after decryption.
 - Expiry by preset or an arbitrary date; download limits; optional share password.
 - QR code for any link, generated client-side.
+
+**Receiving**
+- **Drops** are share links pointing the other way: one link that only accepts
+  files, and a second one that reads them. Keyed with a **post-quantum KEM**
+  (X-Wing: ML-KEM-768 + X25519), because the sender and the recipient are
+  different people and no symmetric secret can travel between them.
+- The keypair is generated in the owner's browser. The server stores the public
+  half *sealed* and never sees the private one — it holds no key for a drop, as
+  it holds none for anything else.
+- A drop's terms are the owner's: an expiry, a size per file, a total size, and
+  **how many files** — one, if that is the job. Everything sent counts against
+  the owner's quota and never exceeds their own upload ceiling.
+- Received files open in the same page a share does: sealed names, inline
+  preview, the gallery, "Download everything" zipped in the browser.
 
 **Access**
 - Local accounts (Argon2id, database-backed sessions) and OIDC single sign-on,
@@ -609,6 +624,21 @@ Both have innocent explanations (the owner deleted a file; a member was uploaded
 seconds ago and its roster update has not landed) and neither can be told apart
 from tampering in the browser, so both are stated plainly.
 
+### The server generates no keypair, and stores no private key
+
+A drop's keypair is born in the owner's browser and the server is never sent the
+half that reads. What it holds is a *public* key it cannot even read (sealed
+under a key derived from the public link's fragment), a SHA-256 it cannot
+invert, and one KEM ciphertext per delivery it cannot open.
+
+The shipped binary contains no asymmetric cryptography at all — no
+`crypto/mlkem`, `crypto/ecdh`, `crypto/rsa`, `crypto/ecdsa` or `crypto/ed25519`
+import outside test scope, which `TestServerHasNoAsymmetricCryptography`
+enforces on every push. It does generate symmetric randomness for its own
+session machinery: Argon2id salts, session tokens (only their SHA-256 is
+stored), GCM nonces, and one in-memory HMAC key for share-unlock cookies,
+regenerated at every start. None of them can open a file, a share or a drop.
+
 ### The application KEK
 
 `FILE_ENCRYPTION_KEY` still exists, but it no longer touches uploaded files. It
@@ -711,6 +741,193 @@ Two consequences worth knowing:
   sizes, not even the file count. A bare link leaks nothing.
 
 ---
+
+## Drops: receiving files
+
+A **drop** is a share link pointing the other way. The owner publishes a link
+that only *accepts* files and keeps a second one that reads them.
+
+```
+   /r/{publicId}#S            the public link — hand this out
+   /i/{dropId}#K              the private link — the only way to read
+```
+
+Everything else in Pyxis is symmetric: whoever encrypted a file can decrypt it,
+and the link carries the key both ways. That cannot work here. The person
+sending a file has no account, has never met the owner, and must not be able to
+read what anyone else sent — or what they sent themselves a moment earlier. So a
+drop is keyed with a **key encapsulation mechanism**, and the only asymmetric
+cryptography in the product lives here.
+
+### Why X-Wing
+
+[X-Wing](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/) is
+ML-KEM-768 (FIPS 203) and X25519 under a fixed combiner. It is secure if
+**either** primitive is, so its strength is the stronger leg's.
+
+| | Classical | Against a quantum computer | NIST category |
+|---|---|---|---|
+| RSA-4096 | ≈ 149.7 bits | none — Shor's algorithm | — |
+| X25519 — the classical leg | 128 bits | none | — |
+| ML-KEM-768 — the PQ leg | ≈ 181 bits | ≈ 164 bits | 3 (≈ AES-192) |
+| **X-Wing** | **≈ 181 bits** | ≈ 164 bits | 3 |
+| AES-256-GCM — the payload, unchanged | 256 bits | ≈ 128 bits (Grover) | 5 |
+
+A hybrid KEM's strength is the *maximum* of its legs, not the minimum. The
+figures are directional — lattice and factoring estimates are not the same kind
+of measurement — but every reasonable reading puts ML-KEM-768 above RSA-4096,
+and unlike RSA it does not go to zero against a quantum computer. NSA's CNSA 2.0
+deprecates every RSA key size by 2030.
+
+The other reason is a practical one: **X-Wing's private key is a 32-byte seed**,
+which base64url-encodes to the same 43 characters every Pyxis link already
+carries. A raw ML-KEM decapsulation key is 2400 bytes and would not survive
+being copied, let alone photographed as a QR code.
+
+| | Size |
+|---|---|
+| Private key (the whole decapsulation key) | 32 B |
+| Public key | 1216 B |
+| Ciphertext, one per delivery | 1120 B |
+| Shared secret | 32 B |
+
+WebCrypto cannot do this yet — ML-KEM is in the WICG *Modern Algorithms* draft
+and no browser exposes it to script — so `web/static/mlkem.js` is a vendored,
+unminified build of `@noble/post-quantum`'s `ml_kem768_x25519`, loaded only on
+the three drop pages. Its provenance and the command that regenerates it are in
+the file's header. Go needs nothing new: `crypto/mlkem`, `crypto/sha3` and
+`crypto/ecdh` are standard library, and they are used only in `xwing_test.go`,
+as the oracle that holds the browser implementation to the draft's test vectors.
+
+### The key schedule
+
+One secret, in the owner's link and nowhere else. Everything — including the
+public link — is derived from it, so an owner who loses the link they handed out
+can produce it again, and a holder of the public link learns nothing about the
+private one.
+
+```
+  K — 32 random bytes, generated in the owner's tab, written into the
+      PRIVATE link's #fragment
+      │
+      ├── HKDF(K, "", "pyxis-drop-kem-v1")   ──▶  X-Wing seed
+      │                                            ├── decapsulation key (stays in the tab)
+      │                                            └── public key, 1216 bytes
+      │
+      └── HKDF(K, "", "pyxis-drop-share-v1") ──▶  S, the PUBLIC link's #fragment
+                                                   │
+                          ┌────────────────────────┴───────────────────────┐
+                          ▼                                                ▼
+              HKDF(S, "", "…-drop-pk-v1")                  HKDF(S, "", "…-drop-up-v1")
+                          │                                                │
+            seals the public key into                   the upload token; the server
+            drops.enc_pk, AAD = public id               stores only SHA-256(token)
+```
+
+The public key is **sealed rather than published**, which buys three things at
+the cost of one AES-GCM operation: the public link stays 43 characters; a server
+that swaps in a key of its own is caught, because it cannot forge a blob under a
+key derived from `S`; and the write capability lives in a fragment rather than
+in a path that access logs, proxies and `Referer` headers have all seen.
+
+### One delivery, one encapsulation
+
+Each visit that uploads becomes a **submission** — and a submission *is a batch*:
+
+```
+  uploader's tab                                        the drop
+  ──────────────                                        ────────
+  open drops.enc_pk with HKDF(S, "", "…-drop-pk-v1") ◀── enc_pk (sealed)
+      │
+      ▼
+  (ct, ss) = X-Wing.Encapsulate(pk)            ct → the submission row,
+      │                                             1120 opaque bytes
+      ▼
+  root = HKDF(ss, salt = SHA-256(ct), "pyxis-drop-sub-v1")
+      │
+      ├─ HKDF(root, "", "pyxis-e2e-batch-v1")  → wraps each file's own key
+      ├─ HKDF(root, "", "pyxis-e2e-roster-v1") → seals the member list
+      ├─ HKDF(root, "", "pyxis-e2e-name-v1")   → seals names and types
+      └─ HKDF(root, "", "pyxis-drop-note-v1")  → seals the sender's note
+
+  From here on: byte for byte the existing batch format. PYX5 containers,
+  padded name blobs, a sealed roster with a monotonic seq.
+```
+
+Binding the ciphertext in as the HKDF salt is belt and braces — X-Wing already
+claims MAL-BIND-K-CT and MAL-BIND-K-PK, which raw ML-KEM does not — and it keeps
+drop keys in a different space from URL-fragment shares even though both end in
+the same three branches.
+
+Because the root secret keeps its shape, the inbox is the batch download page
+with a different front door: the same list, the same sealed names, the same
+per-row progress, preview, gallery and client-side ZIP. `app.js` mounts one
+controller on both; the member list stays flat and each member carries its own
+key set and remembers which delivery it came from.
+
+### What each link can do
+
+| | Public link | Private link | The server |
+|---|---|---|---|
+| Upload a file | yes | yes, by deriving `S` | no — needs the token |
+| Read the drop's public key | yes | yes | **no** — it is sealed |
+| List what arrived | no | yes | counts and sizes only |
+| Read a name or a type | no | yes | no |
+| Decrypt a file | no | yes | no |
+| Regenerate the other link | no | yes | no |
+
+An uploader cannot read back what they sent. That is a property of the design,
+not an omission — encapsulation only goes one way — and the upload page says so.
+
+### Limits, counts and quota
+
+A drop's terms are set by the owner and enforced by the server, inside the same
+advisory-locked transaction that already serialises uploads.
+
+| Limit | Meaning | Empty means |
+|---|---|---|
+| `max_files_per_submission` | files one visitor may send in one go — **1 is a single-file drop** | the other caps apply |
+| `max_files` | files the drop will ever hold, across everyone | unlimited |
+| `max_submissions` | how many separate senders | unlimited |
+| `max_file_bytes` | largest single file, never above the owner's own ceiling | the owner's ceiling |
+| `max_total_bytes` | everything in the drop | unlimited |
+
+The create form offers three presets over those columns — **One file only**,
+**One delivery**, **Open drop box** — and writes real values into visible
+fields, the way the Single-Use preset on the upload page does.
+
+The **count** is the part that is easy to get wrong. Bytes are reserved before a
+body is read, so two uploaders racing for the last megabyte each see the other's
+reservation; a count that looked only at stored rows would let both into a drop
+that accepts one file, because at the moment they both check, neither row exists.
+`upload_reservations` therefore carries its drop and its submission, and the
+count includes reservations. `TestDropCountSurvivesARace` fires two uploads at a
+one-file drop and asserts that exactly one survives.
+
+Everything that lands is charged to the **owner**: their quota, their file
+allowance, their per-file ceiling — resolved from the owner's row inside the
+reservation, not from the anonymous requester. A drop that reaches `max_files`
+closes itself, so the public page says the drop is complete instead of offering
+a dropzone that can only refuse.
+
+### What this adds to the threat model
+
+| Question | Answer |
+|---|---|
+| Can the server read a submission? | No. It holds a ciphertext and a sealed public key; the decapsulation key exists only in the owner's fragment. |
+| Can it substitute its own public key? | Not without the link: `enc_pk` is sealed under a key derived from `S`. It could serve an *older* sealed blob — the same rollback bound the roster has. There is no key rotation, so there is nothing older to serve. |
+| Can it forge a delivery? | Yes, and so can anyone holding the public link — that is what a public drop box is. A delivery proves possession of the link and nothing about who sent it. |
+| What does it learn? | What it already learns from a share — exact sizes, times, which files arrived together — plus the sender's IP and how many deliveries a drop received. Not a name, not a type, not a byte. |
+| Can an uploader read the drop? | No. |
+| What if the owner loses the private link? | Everything in the drop is gone, permanently — and it is now other people's files. The create page says so before the link is generated. |
+| A hostile server shipping modified JavaScript? | Still not defended, and cannot be. Unchanged by this feature. |
+
+**A drop is the first unauthenticated write path in the application.** Anyone
+with the link spends the owner's quota. What bounds that: the caps above, an
+expiry the form defaults to rather than leaving open, a per-(source, drop) rate
+limit shared across replicas through `auth_failures`, and an optional password
+for a link that is going somewhere public — the same PBKDF2 auth branch a
+password share uses, gating the upload rather than the ciphertext.
 
 ## Running it
 
@@ -862,6 +1079,15 @@ in force.
 | `GET /b/{id}/f/{fileID}/raw` | One member's ciphertext; counts one download |
 | `GET /files/{id}` | Single-file landing page |
 | `GET /files/{id}/raw` | Ciphertext for a single-file share; counts one download |
+| `GET /r/{publicID}` | A drop's upload page |
+| `GET /r/{publicID}/key` | The sealed public key and the drop's terms (JSON) |
+| `POST /r/{publicID}/unlock` | Submit the derived auth token for a password-gated drop |
+| `POST /r/{publicID}/submissions` | Open a delivery: its encapsulation and sealed note |
+| `POST /r/{publicID}/upload` | One file into that delivery |
+| `POST /r/{publicID}/submissions/{id}/roster` | The delivery's sealed member list |
+| `GET /i/{dropID}` | The owner's inbox — the key is in the fragment |
+| `GET /i/{dropID}/manifest` | Every delivery, with its encapsulation and wrapped keys (JSON) |
+| `GET /i/{dropID}/f/{fileID}/raw` | One received file's ciphertext; counts nothing |
 | `GET /healthz` | Health check |
 
 **Authenticated**
@@ -881,6 +1107,8 @@ in force.
 | `/admin/users`, `/admin/settings` | Admin only |
 | `POST /admin/settings/upload` | Instance-wide per-file upload limit. Admin only |
 | `POST /admin/users/{id}/quota` | One user's storage allowance and upload limit. Admin only |
+| `GET /drops`, `POST /drops` | Your drops, and creating one |
+| `POST /drops/{id}/close` · `/delete` | Stop accepting; delete the drop and everything in it |
 
 `GET /healthz` also reports the schema version, and fails with 503 when the
 database is on a different one than the binary expects — a half-finished upgrade
@@ -915,6 +1143,7 @@ templates and static assets are plain files.
 main.go              wiring, routes, middleware, env
 handlers.go          upload, single-file shares, history
 handlers_batch.go    batch creation, landing, manifest, gated raw access
+handlers_drops.go    drops: creation, the public upload side, the owner's inbox
 handlers_users.go    admin user management
 handlers_settings.go OIDC settings
 auth.go              sessions, password auth, guards
@@ -926,7 +1155,7 @@ db.go                schema and migrations
 i18n.go              EN/DE catalogue
 theme.go             theme cookie
 web/templates/       html/template pages
-web/static/          app.js, e2e.js, zip.js, qrlib.js, style.css
+web/static/          app.js, e2e.js, mlkem.js, zip.js, qrlib.js, style.css
 .github/workflows/   CI: vet, gofmt, race tests against PostgreSQL,
                      govulncheck, container build, secret scan
 ```
@@ -987,6 +1216,17 @@ advisories land without anyone pushing.
   database*, OIDC identities are scoped to their issuer (including the one-time
   adoption of pre-issuer rows), and the rate limiter counts across replicas.
 - `quota_db_test.go` — needs `TEST_DATABASE_URL`. The quota rules decided in SQL.
+- `xwing_test.go` — X-Wing in Go, as the oracle for `web/static/mlkem.js`:
+  the three test vectors of `draft-connolly-cfrg-xwing-kem-10` (in
+  `testdata/`), and the whole drop key schedule compared against values the
+  browser modules produced in Node — both branches off the owner's secret, both
+  off the share secret, the sealed public key opened under the right drop id and
+  refused under another, the decapsulation, and the four branches under the
+  submission root. It also holds `TestServerHasNoAsymmetricCryptography`, which
+  fails the build if `crypto/mlkem`, `crypto/ecdh`, `crypto/rsa`, `crypto/ecdsa`
+  or `crypto/ed25519` is ever imported outside test scope.
+- `drops_db_test.go` — needs `TEST_DATABASE_URL`. A drop's limits, including
+  two senders racing for the last slot of a one-file drop.
 - `templates_test.go` — renders every template in both languages, checks
   translation completeness, verifies `e2e.js` is actually loaded (a missing script
   tag once broke every upload while all other tests passed), and that no
@@ -1153,7 +1393,19 @@ download rather than bounding idleness.
 
 - **A lost link is a lost file.** There is no recovery path, no administrator
   override, no reset. This is the point of the design, but it does mean support
-  requests have exactly one answer.
+  requests have exactly one answer. For a **drop** the same rule applies to
+  files other people sent: lose the private link and their deliveries are gone.
+- **A drop cannot rotate its key.** One keypair for the life of the link; the
+  answer to a compromised public link is to close the drop and make another.
+- **A drop authenticates nobody.** Anyone with the public link can send
+  anything, under any name they type into the sender field. The inbox presents
+  that name as what it is — something the sender typed — and never as an
+  identity the application checked.
+- **A sender cannot see, edit or withdraw what they sent.** Encapsulation only
+  goes one way, and there is no receipt link.
+- **The drop pages carry ~100 KB of vendored ML-KEM.** WebCrypto has no key
+  encapsulation yet; when it does, `E2E` can feature-detect it and the bundle
+  becomes dead weight. It is loaded on the three drop pages and nowhere else.
 - **Batch options are fixed** once the first file lands. Changing expiry or
   password means starting a new link.
 - **ZIP is STORE-only and capped at 4 GiB.** No compression, no ZIP64. Large

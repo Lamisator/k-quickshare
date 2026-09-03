@@ -130,6 +130,31 @@
   LABELS[4] = LABELS[1];
   LABELS[5] = LABELS[1];
 
+  // Drop labels, indexed by DROP_VERSION.
+  //
+  // Same discipline as LABELS above and for the same reason: every one of these
+  // strings is load-bearing protocol. A drop's whole key schedule hangs off one
+  // 32-byte secret, so changing a label here silently changes every key derived
+  // from it — and the failure mode is a drop that stops opening with no way to
+  // tell that from a corrupted link. New labels get a new version; the old row
+  // stays so live drops keep working.
+  const DROP_LABELS = {
+    1: {
+      kem: 'pyxis-drop-kem-v1',     // owner secret -> X-Wing seed
+      share: 'pyxis-drop-share-v1', // owner secret -> the public link's secret
+      pk: 'pyxis-drop-pk-v1',       // share secret -> key sealing the public key
+      up: 'pyxis-drop-up-v1',       // share secret -> upload token
+      sub: 'pyxis-drop-sub-v1',     // KEM shared secret -> a submission's root
+      note: 'pyxis-drop-note-v1',   // submission root -> key sealing the sender note
+    },
+  };
+
+  // Drop protocol version this build writes, recorded on the drop row.
+  const DROP_VERSION = 1;
+
+  const DROP_PK_AAD_PREFIX = 'pyxis-drop-pk-v1|';
+  const NOTE_AAD_PREFIX = 'pyxis-note-v1|';
+
   const ROSTER_AAD_PREFIX = 'pyxis-roster-v2|';
   const NAME_AAD_PREFIX = 'pyxis-name-v1|';
   const NAME_NONCE = 12;
@@ -262,6 +287,182 @@
       roster: await importAes(rosterKey),
       name: await importAes(nameKey),
     };
+  }
+
+  // --- drop keys -----------------------------------------------------------
+  //
+  // Every other share in Pyxis is symmetric: whoever encrypted it can decrypt
+  // it, and the link carries the key both ways. A DROP inverts that. A stranger
+  // holding the public link must be able to seal files that only the owner can
+  // open, and must not be able to open anything — including what they just
+  // sent. That is a key encapsulation problem, so it needs an asymmetric
+  // primitive: X-Wing (ML-KEM-768 + X25519), in mlkem.js.
+  //
+  // What the KEM does NOT do is replace the schedule below it. Encapsulation
+  // produces a 32-byte shared secret, which is exactly the shape of the secret
+  // a batch link already carries — so from that point on a submission IS a
+  // batch, byte for byte: the same three HKDF branches, the same wrapped file
+  // keys, the same sealed names, the same roster. The new cryptography is one
+  // step at the front, and nothing downstream of it had to change.
+  //
+  //   K  — 32 random bytes, the owner's secret, only ever in the private
+  //   │    link's #fragment
+  //   ├── HKDF(K, "", kem)   -> X-Wing seed -> (decapsulation key, public key)
+  //   └── HKDF(K, "", share) -> S, the public link's #fragment
+  //                             ├── HKDF(S, "", pk) -> seals the public key
+  //                             └── HKDF(S, "", up) -> the upload token
+  //
+  // S is one-way from K, so the public link tells its holder nothing about the
+  // private one; and K regenerates S, so an owner who loses the link they gave
+  // out can always produce it again from the one they kept.
+
+  function dropLabels(version) {
+    return DROP_LABELS[version] || DROP_LABELS[DROP_VERSION];
+  }
+
+  function dropKem() {
+    const kem = window.PYXIS_KEM;
+    // Fail closed and say which half is missing: a drop page without the KEM
+    // must never quietly fall back to something the server could open.
+    if (!kem || typeof kem.encapsulate !== 'function') {
+      throw new Error('post-quantum KEM unavailable');
+    }
+    return kem;
+  }
+
+  // The owner's side. Returns everything derivable from the private link, which
+  // is everything: the public key to publish, the share secret to hand out, and
+  // the KEM seed that opens submissions.
+  async function deriveDropOwnerKeys(secret, version) {
+    const kem = dropKem();
+    const l = dropLabels(version);
+    const empty = new Uint8Array(0);
+    const [kemSeed, shareSecret] = await Promise.all([
+      hkdf32(secret, empty, l.kem),
+      hkdf32(secret, empty, l.share),
+    ]);
+    const pair = kem.keygen(kemSeed);
+    return {
+      kemSeed: kemSeed,
+      shareSecret: shareSecret,
+      publicKey: pair.publicKey,
+    };
+  }
+
+  // The public link's side. `token` is the only value here that ever leaves a
+  // browser: the server keeps SHA-256(token) and compares, exactly as it does
+  // for a password share's auth branch, so a stolen database yields no way to
+  // write into the drop.
+  async function deriveDropShareKeys(shareSecret, version) {
+    const l = dropLabels(version);
+    const empty = new Uint8Array(0);
+    const [pkKey, token] = await Promise.all([
+      hkdf32(shareSecret, empty, l.pk),
+      hkdf32(shareSecret, empty, l.up),
+    ]);
+    return { pk: await importAes(pkKey), token: token };
+  }
+
+  function dropPkAAD(publicId) {
+    return te.encode(DROP_PK_AAD_PREFIX + publicId);
+  }
+
+  // The public key is sealed rather than published. It costs one AES-GCM
+  // operation and buys two things: the public link's fragment stays 43
+  // characters (a 1216-byte key in a URL would not survive being copied, let
+  // alone photographed as a QR code), and a server that swaps in a public key
+  // of its own is caught — it cannot forge a blob under a key derived from S,
+  // which it has never seen. The public id is the AAD, so a sealed key cannot
+  // be moved from one drop to another either.
+  async function sealDropPublicKey(pkKey, publicId, publicKey) {
+    const nonce = randomBytes(WRAP_NONCE);
+    const sealed = await subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: dropPkAAD(publicId) }, pkKey, publicKey);
+    const out = new Uint8Array(WRAP_NONCE + sealed.byteLength);
+    out.set(nonce, 0);
+    out.set(new Uint8Array(sealed), WRAP_NONCE);
+    return out;
+  }
+
+  async function openDropPublicKey(pkKey, publicId, sealed) {
+    if (!sealed || sealed.length <= WRAP_NONCE) throw new Error('malformed drop key');
+    const raw = await subtle.decrypt(
+      { name: 'AES-GCM', iv: sealed.subarray(0, WRAP_NONCE), additionalData: dropPkAAD(publicId) },
+      pkKey, sealed.subarray(WRAP_NONCE));
+    const pk = new Uint8Array(raw);
+    if (pk.length !== dropKem().PUBLIC_KEY_LEN) throw new Error('drop key has the wrong length');
+    return pk;
+  }
+
+  function dropEncapsulate(publicKey) {
+    const { cipherText, sharedSecret } = dropKem().encapsulate(publicKey);
+    return { ct: cipherText, ss: sharedSecret };
+  }
+
+  function dropDecapsulate(kemSeed, ct) {
+    return dropKem().decapsulate(ct, kemSeed);
+  }
+
+  // One submission's keys, from the KEM shared secret.
+  //
+  // The ciphertext is bound in as the HKDF salt. X-Wing already claims
+  // MAL-BIND-K-CT and MAL-BIND-K-PK — raw ML-KEM does not — so this is belt and
+  // braces rather than load-bearing, but it costs nothing and it keeps drop
+  // keys in a different space from URL-fragment shares even though both end in
+  // the same three branches.
+  async function deriveSubmissionKeys(ss, ct, version) {
+    const digest = new Uint8Array(await subtle.digest('SHA-256', ct));
+    const root = await hkdf32(ss, digest, dropLabels(version).sub);
+    const keys = await deriveBatchKeys(root, VERSION);
+    const noteKey = await hkdf32(root, new Uint8Array(0), dropLabels(version).note);
+    return {
+      key: keys.key,
+      roster: keys.roster,
+      name: keys.name,
+      note: await importAes(noteKey),
+    };
+  }
+
+  // --- the sender's note ---------------------------------------------------
+  //
+  // A drop's whole point is that the owner does not know who will use it, so a
+  // submission carries an optional "from" and a message. It is sealed like a
+  // file name — same padding, so its length says nothing about its contents,
+  // and the batch id as AAD so it cannot be moved onto another submission.
+  //
+  // It proves nothing about who sent it. Anyone with the link can write
+  // anything here, and the inbox must present it as what it is: a label the
+  // sender chose, not an identity the application verified.
+
+  function noteAAD(batchId) {
+    return te.encode(NOTE_AAD_PREFIX + batchId);
+  }
+
+  async function sealNote(noteKey, batchId, fields) {
+    const json = te.encode(JSON.stringify({
+      v: 1,
+      from: (fields.from || '').slice(0, 200),
+      message: (fields.message || '').slice(0, 1000),
+    }));
+    if (2 + json.length > 4096) throw new Error('note is too long to seal');
+    const body = padNameBody(json);
+    const nonce = randomBytes(NAME_NONCE);
+    const sealed = await subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: noteAAD(batchId) }, noteKey, body);
+    const out = new Uint8Array(NAME_NONCE + sealed.byteLength);
+    out.set(nonce, 0);
+    out.set(new Uint8Array(sealed), NAME_NONCE);
+    return out;
+  }
+
+  async function openNote(noteKey, batchId, sealed) {
+    if (!sealed || sealed.length <= NAME_NONCE) throw new Error('malformed note');
+    const body = await subtle.decrypt(
+      { name: 'AES-GCM', iv: sealed.subarray(0, NAME_NONCE), additionalData: noteAAD(batchId) },
+      noteKey, sealed.subarray(NAME_NONCE));
+    const n = JSON.parse(td.decode(unpadNameBody(new Uint8Array(body))));
+    if (n.v !== 1) throw new Error('unsupported note version ' + n.v);
+    return { from: n.from || '', message: n.message || '' };
   }
 
   // --- manifests -----------------------------------------------------------
@@ -725,6 +926,19 @@
     openRoster: openRoster,
     sealName: sealName,
     openName: openName,
+    DROP_VERSION: DROP_VERSION,
+    kemAvailable: function () {
+      return !!(window.PYXIS_KEM && typeof window.PYXIS_KEM.encapsulate === 'function');
+    },
+    deriveDropOwnerKeys: deriveDropOwnerKeys,
+    deriveDropShareKeys: deriveDropShareKeys,
+    sealDropPublicKey: sealDropPublicKey,
+    openDropPublicKey: openDropPublicKey,
+    dropEncapsulate: dropEncapsulate,
+    dropDecapsulate: dropDecapsulate,
+    deriveSubmissionKeys: deriveSubmissionKeys,
+    sealNote: sealNote,
+    openNote: openNote,
     SALT_LEN: 16,
     KEY_LEN: 32,
   };

@@ -372,12 +372,132 @@ func (a *App) checkDiskFree(incoming int64) error {
 	return nil
 }
 
+// --- drop limits -----------------------------------------------------------
+//
+// A drop is the one upload path with no session behind it: whoever holds the
+// public link may write, and everything they write is charged to the OWNER's
+// quota. So the owner's limits are not the only ones that matter — a drop
+// carries its own, and they are counted here rather than in the handler,
+// because the only place a count means anything is inside the transaction that
+// already serialises uploads.
+//
+// The file COUNT is the part that is easy to get wrong. Bytes are reserved
+// before a body is read, so two uploaders racing for the last megabyte both see
+// the other's reservation; a count that looked only at stored rows would let
+// both of them into a drop that accepts one file, because at the moment they
+// both check, neither row exists yet. Reservations therefore carry their drop
+// and their submission, and are counted alongside the rows.
+
+var errDropLimit = errors.New("drop limit reached")
+
+// dropLimits is what the owner set on the drop. A nil pointer means "no limit
+// of this kind"; the owner's own quota and per-file ceiling still apply on top
+// and are enforced separately.
+type dropLimits struct {
+	MaxFileBytes     *int64
+	MaxTotalBytes    *int64
+	MaxFiles         *int
+	MaxPerSubmission *int
+	MaxSubmissions   *int
+}
+
+// dropTarget names the drop an upload is going into and the submission within
+// it. Nil for every ordinary, signed-in upload.
+type dropTarget struct {
+	DropID  string
+	BatchID string
+	Limits  dropLimits
+}
+
+type dropUsageSnapshot struct {
+	bytes       int64 // active bytes already in the drop, reservations included
+	files       int64 // active files already in the drop, reservations included
+	submissions int64 // submissions opened on the drop
+	subFiles    int64 // files already in THIS submission, reservations included
+}
+
+func loadDropUsage(ctx context.Context, tx pgx.Tx, dropID, batchID string) (dropUsageSnapshot, error) {
+	var d dropUsageSnapshot
+	// activeFileWhere names its columns unqualified, so the drop is selected
+	// with a subquery rather than a join: a join would make expires_at
+	// ambiguous between files and batches, which is an error at run time and
+	// nowhere else.
+	err := tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(size_bytes), 0),
+		        COUNT(*),
+		        COUNT(*) FILTER (WHERE batch_id = $2)
+		 FROM files
+		 WHERE batch_id IN (SELECT id FROM batches WHERE drop_id = $1)
+		   AND `+activeFileWhere, dropID, batchID).
+		Scan(&d.bytes, &d.files, &d.subFiles)
+	if err != nil {
+		return d, err
+	}
+	var resBytes, resFiles, resSubFiles int64
+	err = tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(bytes), 0), COUNT(*), COUNT(*) FILTER (WHERE batch_id = $2)
+		 FROM upload_reservations
+		 WHERE drop_id = $1 AND created_at > NOW() - $3::interval`,
+		dropID, batchID, reservationTTL.String()).
+		Scan(&resBytes, &resFiles, &resSubFiles)
+	if err != nil {
+		return d, err
+	}
+	d.bytes += resBytes
+	d.files += resFiles
+	d.subFiles += resSubFiles
+	err = tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM batches WHERE drop_id = $1 AND archived_at IS NULL`, dropID).
+		Scan(&d.submissions)
+	return d, err
+}
+
+// dropViolation reports the first limit this upload would break. The messages
+// are shown to a stranger who cannot see the drop's settings page, so they say
+// what the limit IS rather than only that one was hit.
+func dropViolation(l dropLimits, u dropUsageSnapshot, incoming int64) error {
+	if l.MaxTotalBytes != nil && *l.MaxTotalBytes > 0 && u.bytes+incoming > *l.MaxTotalBytes {
+		return fmt.Errorf("%w: this drop accepts %s in total", errDropLimit, humanSize(*l.MaxTotalBytes))
+	}
+	if l.MaxFiles != nil && *l.MaxFiles > 0 && u.files+1 > int64(*l.MaxFiles) {
+		return fmt.Errorf("%w: this drop accepts %d file(s) and already has them",
+			errDropLimit, *l.MaxFiles)
+	}
+	if l.MaxPerSubmission != nil && *l.MaxPerSubmission > 0 && u.subFiles+1 > int64(*l.MaxPerSubmission) {
+		return fmt.Errorf("%w: this drop accepts %d file(s) per delivery",
+			errDropLimit, *l.MaxPerSubmission)
+	}
+	return nil
+}
+
+// dropAcceptsAnotherSubmission is the same arithmetic one step earlier, for the
+// request that OPENS a submission — before any file has been offered.
+func dropAcceptsAnotherSubmission(ctx context.Context, tx pgx.Tx, dropID string, l dropLimits) error {
+	u, err := loadDropUsage(ctx, tx, dropID, uuid.Nil.String())
+	if err != nil {
+		return err
+	}
+	if l.MaxSubmissions != nil && *l.MaxSubmissions > 0 && u.submissions+1 > int64(*l.MaxSubmissions) {
+		return fmt.Errorf("%w: this drop accepts %d delivery(ies)", errDropLimit, *l.MaxSubmissions)
+	}
+	if l.MaxFiles != nil && *l.MaxFiles > 0 && u.files >= int64(*l.MaxFiles) {
+		return fmt.Errorf("%w: this drop accepts %d file(s) and already has them",
+			errDropLimit, *l.MaxFiles)
+	}
+	return nil
+}
+
 // reserveUpload atomically books estBytes against the quota before any data
 // is written to disk. The reservation is released by finalizeUpload (success)
 // or releaseReservation (failure); stale ones expire after reservationTTL.
-func (a *App) reserveUpload(ctx context.Context, user *User, estBytes int64) (uuid.UUID, error) {
-	if max := a.maxUploadFor(user); estBytes <= 0 || estBytes > max {
-		estBytes = max
+func (a *App) reserveUpload(ctx context.Context, user *User, estBytes int64, drop *dropTarget) (uuid.UUID, error) {
+	ceiling := a.maxUploadFor(user)
+	if drop != nil && drop.Limits.MaxFileBytes != nil && *drop.Limits.MaxFileBytes > 0 &&
+		*drop.Limits.MaxFileBytes < ceiling {
+		ceiling = *drop.Limits.MaxFileBytes
+	}
+	if estBytes <= 0 || estBytes > ceiling {
+		estBytes = ceiling
 	}
 	if err := a.checkDiskFree(estBytes); err != nil {
 		return uuid.Nil, err
@@ -402,10 +522,22 @@ func (a *App) reserveUpload(ctx context.Context, user *User, estBytes int64) (uu
 	if err := a.quotaViolation(q, u, estBytes); err != nil {
 		return uuid.Nil, err
 	}
+	var dropID, batchID *string
+	if drop != nil {
+		du, derr := loadDropUsage(ctx, tx, drop.DropID, drop.BatchID)
+		if derr != nil {
+			return uuid.Nil, derr
+		}
+		if derr := dropViolation(drop.Limits, du, estBytes); derr != nil {
+			return uuid.Nil, derr
+		}
+		dropID, batchID = &drop.DropID, &drop.BatchID
+	}
 	resID := uuid.New()
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO upload_reservations (id, user_id, bytes) VALUES ($1, $2, $3)`,
-		resID.String(), user.ID.String(), estBytes); err != nil {
+		`INSERT INTO upload_reservations (id, user_id, bytes, drop_id, batch_id)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		resID.String(), user.ID.String(), estBytes, dropID, batchID); err != nil {
 		return uuid.Nil, err
 	}
 	return resID, tx.Commit(ctx)
@@ -414,7 +546,7 @@ func (a *App) reserveUpload(ctx context.Context, user *User, estBytes int64) (uu
 // finalizeUpload swaps the reservation for the real files row under the same
 // advisory lock, re-checking the quota against the actual written size.
 func (a *App) finalizeUpload(ctx context.Context, user *User, resID uuid.UUID,
-	written int64, insertFile func(pgx.Tx) error) error {
+	written int64, drop *dropTarget, insertFile func(pgx.Tx) error) error {
 	tx, err := a.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -438,6 +570,18 @@ func (a *App) finalizeUpload(ctx context.Context, user *User, resID uuid.UUID,
 	}
 	if err := a.quotaViolation(q, u, written); err != nil {
 		return err
+	}
+	// The reservation is already gone above, so this counts what is actually
+	// stored plus every OTHER upload still in flight — which is what makes two
+	// simultaneous uploads into a one-file drop resolve to exactly one file.
+	if drop != nil {
+		du, derr := loadDropUsage(ctx, tx, drop.DropID, drop.BatchID)
+		if derr != nil {
+			return derr
+		}
+		if derr := dropViolation(drop.Limits, du, written); derr != nil {
+			return derr
+		}
 	}
 	if err := insertFile(tx); err != nil {
 		return err

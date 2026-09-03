@@ -1,0 +1,82 @@
+{{template "bare_header" .}}
+{{template "filesprite" .}}
+
+{{/* The owner's side of a drop — and deliberately the batch download page in
+     everything but its front door: the same list, the same sealed names, the
+     same per-row progress, the same preview and gallery, the same client-side
+     ZIP. That is why the ids below are the batch page's ids and app.js mounts
+     ONE controller on both. Two copies of that code would be two places for
+     the roster check, the download accounting and the gallery to drift.
+
+     What differs is where the keys come from. A batch link carries one secret;
+     a drop carries a decapsulation key, and every delivery in it has its own
+     encapsulation, its own key schedule and its own sealed roster. The listing
+     stays flat and each member remembers which delivery it came from, so the
+     grouping is presentation and everything below it is unchanged.
+
+     Nothing is rendered here: it arrives from /i/{id}/manifest as ciphertext
+     and only the fragment can turn it into a listing. */}}
+<div class="dl-card dl-card-wide" id="batch-root" data-source="inbox"
+     data-drop="{{.ID}}" data-public="{{.PublicID}}" data-version="{{.DropVersion}}" data-mode="url">
+  <p class="dl-kicker">{{T .Lang "inbox.kicker"}} · <span class="e2e-badge">{{T .Lang "drops.pq_badge"}}</span></p>
+
+  <div class="dl-file-head">
+    <span class="ficon ficon-archive" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h4l2 3h4l2-3h4"/><path d="M4 13l2-7h12l2 7v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
+    </span>
+    <div class="dl-file-title">
+      <h1>{{if .Label}}{{.Label}}{{else}}{{T .Lang "inbox.heading"}}{{end}}</h1>
+      <span class="muted" id="batch-summary">{{T .Lang "inbox.summary" .FileCount .Submissions}}</span>
+    </div>
+  </div>
+
+  <noscript><p class="alert">{{T .Lang "dl.js_required"}}</p></noscript>
+  <p class="alert" id="key-missing" hidden>{{T .Lang "dl.key_missing"}}</p>
+  <p class="alert" id="batch-error" hidden></p>
+  <p class="alert alert-warn" id="batch-warning" hidden></p>
+
+  <div id="batch-main">
+    <dl class="dl-details">
+      <dt>{{T .Lang "inbox.created"}}</dt>
+      <dd><time data-ts="{{rfc3339 .CreatedAt}}">{{formatTime .CreatedAt}}</time></dd>
+      <dt>{{T .Lang "dl.expires"}}</dt>
+      <dd>{{if .ExpiresAt}}<time data-ts="{{rfc3339 .ExpiresAt}}">{{formatTime .ExpiresAt}}</time>
+          <span class="chip chip-expiry">{{T .Lang "files.expires_in" (until .Lang .ExpiresAt)}}</span>
+          {{else}}{{T .Lang "dl.never"}}{{end}}</dd>
+      {{if not .Open}}
+      <dt>{{T .Lang "drops.closed"}}</dt>
+      <dd>{{T .Lang "inbox.closed"}}</dd>
+      {{end}}
+      <dt>{{T .Lang "drops.public_link"}}</dt>
+      {{/* Re-derived in the tab from the private link's secret, so an owner who
+           lost the link they gave out can produce it again without the server
+           having ever held either one. */}}
+      <dd class="inbox-public">
+        <input type="text" id="inbox-public-url" class="share-url" readonly>
+        <button type="button" class="btn btn-ghost btn-sm" id="inbox-public-copy" data-copy="">{{T .Lang "js.copy"}}</button>
+      </dd>
+    </dl>
+
+    <div class="queue-item e2e-progress" id="batch-progress" hidden>
+      <div class="queue-info">
+        <span class="queue-name" id="batch-status"></span>
+        <span class="queue-status" id="batch-pct"></span>
+      </div>
+      <div class="queue-bar"><div class="queue-fill" id="batch-fill"></div></div>
+    </div>
+
+    <button type="button" id="batch-zip" class="btn btn-primary btn-block btn-download" hidden>
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>
+      {{T .Lang "js.inbox_download_all"}}
+    </button>
+
+    <button type="button" id="batch-preview-all" class="btn btn-ghost btn-block btn-stacked" hidden>
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      {{T .Lang "batch.preview_all"}}
+    </button>
+
+    <ul class="batch-list" id="batch-list"></ul>
+  </div>
+</div>
+
+{{template "bare_footer_kem" .}}

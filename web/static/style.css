@@ -2270,6 +2270,115 @@ body.bare {
   .batch-row { padding: 0.7rem 0.75rem; gap: 0.65rem; }
 }
 
+/* ---- drops ---------------------------------------------------------------
+   A drop is a share link pointing the other way, so its pieces borrow the
+   share panel's shapes rather than inventing new ones: the same boxes, the
+   same chips, the same list rhythm. The one place it deliberately looks
+   different is the private link, which is the only element in the application
+   that, once lost, cannot be recovered from anywhere. */
+
+.share-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin-bottom: 0.9rem;
+}
+.share-box-private {
+  border-color: var(--warning);
+  background: linear-gradient(180deg, rgba(240, 198, 116, 0.06), transparent 60%), var(--surface);
+}
+.share-label { font-weight: 600; font-size: 0.9rem; }
+.share-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.share-url {
+  flex: 1 1 18rem;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+}
+.share-note { margin: 0; font-size: 0.8rem; line-height: 1.45; color: var(--text-muted); }
+
+.opt-wide { grid-column: 1 / -1; }
+.opt-wide textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.drop-note {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 0.7rem 0.9rem;
+  margin: 0.9rem 0;
+}
+.drop-note-label {
+  display: block;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+.drop-note p { margin: 0; font-size: 0.9rem; line-height: 1.5; overflow-wrap: anywhere; }
+
+.list-section { margin-top: 2rem; }
+.list-title { font-size: 1.05rem; margin: 0 0 0.35rem; }
+
+.drop-list { list-style: none; margin: 1rem 0 0; padding: 0; }
+.drop-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin-bottom: 0.6rem;
+  flex-wrap: wrap;
+}
+.drop-main { display: flex; flex-direction: column; gap: 0.25rem; flex: 1 1 20rem; min-width: 0; }
+.drop-name { font-weight: 600; }
+.drop-facts { font-size: 0.82rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.drop-facts.muted { color: var(--text-muted); }
+.drop-actions { display: flex; gap: 0.4rem; align-items: center; }
+.chip-ok { color: var(--success); border-color: var(--success); }
+
+.inbox-public { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+
+/* A dropzone that cannot accept anything — no key, or a key that did not open
+   the recipient's — must not look like one that can. */
+.dz-disabled { opacity: 0.5; pointer-events: none; }
+
+/* ---- inbox: one header per delivery ----
+   Only drawn when a drop holds more than one, so a single delivery reads
+   exactly like a batch. The sender's name is what the sender typed, and the
+   styling deliberately keeps it quieter than a decrypted file name. */
+.batch-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.7rem 0.85rem 0.55rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.batch-group-title { font-weight: 600; font-size: 0.88rem; }
+.batch-group-from { font-weight: 400; color: var(--text-muted); }
+.batch-group-meta { font-size: 0.78rem; }
+.batch-group-message {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.queue-failed .queue-fill { background: var(--danger); }
+
 @media (max-width: 560px) {
   .main { padding: 1.25rem 0.85rem 2.5rem; }
   .options { grid-template-columns: 1fr; }

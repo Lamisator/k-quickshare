@@ -193,6 +193,12 @@ func main() {
 	mux.HandleFunc("/healthz", app.handleHealth)
 	mux.HandleFunc("/files/", app.dispatchFileRoutes)
 	mux.HandleFunc("/b/", app.dispatchBatchRoutes)
+	// A drop's two public faces. /r/ accepts files from anyone holding the
+	// public link; /i/ reads them with the key in the private link's fragment.
+	// Neither needs a session: the capability is the link, and the server can
+	// decrypt nothing either of them touches.
+	mux.HandleFunc("/r/", app.dispatchDropUploadRoutes)
+	mux.HandleFunc("/i/", app.dispatchDropInboxRoutes)
 	mux.HandleFunc("/lang", app.handleLang)
 	mux.HandleFunc("/theme", app.handleTheme)
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +225,8 @@ func main() {
 	mux.Handle("/upload", app.requireUserHandler(app.handleUpload))
 	mux.Handle("/usage", app.requireUserHandler(app.handleStorageBars))
 	mux.Handle("/batches", app.requireUserHandler(app.handleCreateBatch))
+	mux.Handle("/drops", app.requireUserHandler(app.handleDrops))
+	mux.Handle("/drops/", app.requireUserHandler(app.dispatchDropOwnerRoutes))
 	mux.Handle("/delete/", app.requireUserHandler(app.handleDelete))
 	// Bulk delete from the file list. Registered as its own exact pattern so it
 	// cannot collide with a share id under /delete/.

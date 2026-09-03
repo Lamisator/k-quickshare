@@ -38,6 +38,14 @@ const (
 	keyModeE2EURL      = 3 // key only in the URL fragment
 	keyModeE2EPassword = 4 // key derived from the share password in the browser;
 	// the server stores just a hash of a separately-derived auth token
+	// 5 — the key comes from a post-quantum KEM encapsulation, which is what a
+	// DROP needs: the person encrypting and the person decrypting are different
+	// people, so no symmetric secret can travel between them. A stranger with
+	// the public link encapsulates to the drop's public key and gets a shared
+	// secret the owner can recover from the private link and nobody else can —
+	// including the uploader's own tab a moment later. The server holds the
+	// ciphertext and, as in modes 3 and 4, can decrypt nothing.
+	keyModeE2EKEM = 5
 
 	encSaltLen = 16
 
@@ -105,6 +113,47 @@ const (
 	// Four pad blocks is far more than any file name needs and still small
 	// enough that the column cannot be used to store anything else.
 	maxEncNameLen = encNameNonce + 4*encNamePad + gcmOverhead
+
+	// --- drops -------------------------------------------------------------
+	//
+	// The KEM is X-Wing (ML-KEM-768 + X25519, draft-connolly-cfrg-xwing-kem),
+	// implemented in web/static/mlkem.js and mirrored in xwing_test.go. None of
+	// it runs here: these are lengths, so the server can refuse a malformed blob
+	// without ever being able to interpret a well-formed one.
+	dropVersionV1      = 1
+	dropCurrentVersion = dropVersionV1
+
+	// The public key, and the public key as stored: sealed under a key derived
+	// from the PUBLIC link's fragment. Sealing it keeps that link 43 characters
+	// long — a 1216-byte key in a URL would not survive being copied, let alone
+	// photographed — and means a server that swaps in a key of its own is caught
+	// by GCM rather than believed.
+	dropPublicKeyLen = 1216
+	dropNonceLen     = 12
+	dropSealedPKLen  = dropNonceLen + dropPublicKeyLen + gcmOverhead
+
+	// One submission's encapsulation, stored on its batch row.
+	dropCiphertextLen = 1120
+
+	// The upload token derived from the public link's fragment. The server keeps
+	// SHA-256 of it, exactly as it does for a password share's auth branch, so
+	// the capability to write into a drop lives in a fragment the server never
+	// receives rather than in a path its access log records.
+	dropTokenLen = 32
+
+	// AAD prefixes. The drop's public id binds a sealed public key to one drop;
+	// the submission's batch id binds a sealed sender note to one submission.
+	dropPKAADPrefix = "pyxis-drop-pk-v1|"
+	noteAADPrefix   = "pyxis-note-v1|"
+
+	// A drop's label and the note shown to uploaders are the two strings the
+	// server can read, because the uploader has to be shown them before any key
+	// exchange has happened. They are bounded so they cannot become storage.
+	maxDropLabelLen = 120
+	maxDropNoteLen  = 2000
+
+	// A sender's note travels sealed and padded exactly like a file name, so
+	// maxEncNameLen and validEncNameLen apply to it unchanged.
 
 	// A manifest is a short JSON object. The ceiling exists so a client cannot
 	// make the server store, and every downloader fetch, an arbitrary blob

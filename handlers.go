@@ -406,16 +406,56 @@ func (a *App) rejectUnparsableUpload(w http.ResponseWriter, r *http.Request, err
 	}
 }
 
+// uploadContext is who an upload belongs to and where it is going.
+//
+// Two paths reach storeUpload and they differ in exactly one thing: who the
+// requester is. A signed-in upload is charged to the person making it. A DROP
+// upload is charged to the drop's owner, and the person making it has no
+// account at all — the drop route has already checked the upload token, opened
+// the submission and resolved the drop's limits, so everything below can treat
+// the two identically. The alternative was a second copy of the version,
+// manifest, sealed-name and length ladder, which is a second place for it to
+// drift.
+type uploadContext struct {
+	owner *User      // whose quota, file allowance and per-file ceiling apply
+	batch *batchMeta // pre-resolved: a drop submission, or nil
+	drop  *dropMeta  // set only for a drop upload
+}
+
+// ceiling is the largest file this request may carry: the owner's own limit,
+// lowered by the drop's if the drop asks for less. It is never raised by a
+// drop — an owner cannot hand out a link that lifts their own ceiling.
+func (up uploadContext) ceiling(a *App) int64 {
+	max := a.maxUploadFor(up.owner)
+	if up.drop != nil && up.drop.MaxFileBytes != nil && *up.drop.MaxFileBytes > 0 &&
+		*up.drop.MaxFileBytes < max {
+		max = *up.drop.MaxFileBytes
+	}
+	return max
+}
+
+func (up uploadContext) target() *dropTarget {
+	if up.drop == nil || up.batch == nil {
+		return nil
+	}
+	return &dropTarget{DropID: up.drop.ID, BatchID: up.batch.ID, Limits: up.drop.limits()}
+}
+
 func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	user := userFromContext(r.Context())
-	// One ceiling for this whole request: the user's own override, else the
-	// instance default. Read once so the reader's budget, the checks below and
-	// the message the uploader is shown cannot disagree with each other.
-	maxUpload := a.maxUploadFor(user)
+	a.storeUpload(w, r, uploadContext{owner: userFromContext(r.Context())})
+}
+
+func (a *App) storeUpload(w http.ResponseWriter, r *http.Request, up uploadContext) {
+	user := up.owner
+	// One ceiling for this whole request: the owner's own override, else the
+	// instance default, lowered by the drop's own limit where there is one.
+	// Read once so the reader's budget, the checks below and the message the
+	// uploader is shown cannot disagree with each other.
+	maxUpload := up.ceiling(a)
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+32<<20)
 
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -465,24 +505,34 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		batch      *batchMeta
 		wrappedKey []byte
 	)
-	if bidStr := r.FormValue("batch_id"); bidStr != "" {
-		bid, perr := uuid.Parse(bidStr)
-		if perr != nil {
-			http.Error(w, "invalid batch_id", http.StatusBadRequest)
-			return
-		}
-		batch, err = a.loadBatchForUpload(r, bid, user.ID.String())
-		if err != nil {
-			switch {
-			case errors.Is(err, pgx.ErrNoRows), errors.Is(err, errNotBatchOwner):
-				http.Error(w, "batch not found", http.StatusNotFound)
-			case errors.Is(err, errBatchClosed):
-				http.Error(w, "batch is no longer open", http.StatusGone)
-			default:
-				httpError(w, err, http.StatusInternalServerError)
+	switch {
+	case up.batch != nil:
+		// A drop submission. Ownership was settled by the upload token, which
+		// only a holder of the public link can produce, and the submission was
+		// opened by the same request that proved it.
+		batch = up.batch
+	default:
+		if bidStr := r.FormValue("batch_id"); bidStr != "" {
+			bid, perr := uuid.Parse(bidStr)
+			if perr != nil {
+				http.Error(w, "invalid batch_id", http.StatusBadRequest)
+				return
 			}
-			return
+			batch, err = a.loadBatchForUpload(r, bid, user.ID.String())
+			if err != nil {
+				switch {
+				case errors.Is(err, pgx.ErrNoRows), errors.Is(err, errNotBatchOwner):
+					http.Error(w, "batch not found", http.StatusNotFound)
+				case errors.Is(err, errBatchClosed):
+					http.Error(w, "batch is no longer open", http.StatusGone)
+				default:
+					httpError(w, err, http.StatusInternalServerError)
+				}
+				return
+			}
 		}
+	}
+	if batch != nil {
 		if r.FormValue("e2e") != "1" {
 			http.Error(w, "batch uploads must be end-to-end encrypted", http.StatusBadRequest)
 			return
@@ -499,13 +549,19 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Content-Length is a slight overestimate of the file size (multipart
 	// overhead), which is exactly the conservative direction we want; when
 	// it's unknown the full per-file maximum is reserved.
-	resID, err := a.reserveUpload(r.Context(), user, r.ContentLength)
+	resID, err := a.reserveUpload(r.Context(), user, r.ContentLength, up.target())
 	if err != nil {
-		if errors.Is(err, errQuotaExceeded) {
+		switch {
+		case errors.Is(err, errQuotaExceeded):
 			http.Error(w, err.Error(), http.StatusInsufficientStorage)
-			return
+		case errors.Is(err, errDropLimit):
+			// The drop is full, or this delivery is. Not a server fault and not
+			// a quota the sender can do anything about: 409 says the request
+			// conflicts with the state of the drop, which is exactly the case.
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			httpError(w, err, http.StatusInternalServerError)
 		}
-		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
 	reserved := true
@@ -536,6 +592,11 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		written      int64
 		copyErr      error
 	)
+	if up.drop != nil {
+		// Not a URL key and not a password: this file's key was wrapped under a
+		// secret that came out of a KEM encapsulation, and the row says so.
+		keyMode = keyModeE2EKEM
+	}
 	if r.FormValue("e2e") != "1" {
 		dst.Close()
 		_ = os.Remove(dstPath)
@@ -723,7 +784,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Swap the reservation for the real row under the quota lock, re-checking
 	// against the actual size.
-	err = a.finalizeUpload(r.Context(), user, resID, written, func(tx pgx.Tx) error {
+	err = a.finalizeUpload(r.Context(), user, resID, written, up.target(), func(tx pgx.Tx) error {
 		var batchID *string
 		if batch != nil {
 			batchID = &batch.ID
@@ -744,14 +805,23 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		// The rollback restored the reservation row; the deferred release
 		// removes it.
 		_ = os.Remove(dstPath)
-		if errors.Is(err, errQuotaExceeded) {
+		switch {
+		case errors.Is(err, errQuotaExceeded):
 			http.Error(w, err.Error(), http.StatusInsufficientStorage)
-			return
+		case errors.Is(err, errDropLimit):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			httpError(w, err, http.StatusInternalServerError)
 		}
-		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
 	reserved = false // reservation row consumed by finalizeUpload
+
+	// A drop that has just taken its last file closes itself, so the public
+	// page says "complete" instead of offering a dropzone that can only refuse.
+	if up.drop != nil {
+		a.closeDropIfFull(r.Context(), up.drop)
+	}
 
 	// For URL-keyed files the fragment is the only copy of the secret. In the
 	// server-assisted mode it is returned here once and never stored; in E2E
@@ -764,6 +834,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	shareURL := "/files/" + id.String()
 	if batch != nil {
 		shareURL = "/b/" + batch.ID
+	}
+	if up.drop != nil {
+		// A sender gets no link. They cannot read what they just sent — the
+		// encapsulation only goes one way — and handing them a URL would imply
+		// otherwise. /b/{id} refuses a drop submission for the same reason.
+		shareURL = ""
 	}
 	if wantsJSON(r) {
 		res := map[string]any{
@@ -783,6 +859,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			res["keyed"] = !batch.isPassword()
 		}
 		writeJSON(w, http.StatusCreated, res)
+		return
+	}
+	// A sender has no account, so the upload page is not "/" for them — that is
+	// a sign-in wall. Send them back to the drop they were filling.
+	if up.drop != nil {
+		http.Redirect(w, r, "/r/"+up.drop.PublicID, http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)

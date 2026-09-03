@@ -1,0 +1,197 @@
+{{template "header" .}}
+
+<div class="page-head">
+  <h1>{{T .Lang "drops.heading"}}</h1>
+  <p class="page-sub">{{T .Lang "drops.sub"}}</p>
+</div>
+
+<section class="uploader">
+  {{/* Every value that matters cryptographically is produced in the tab and
+       posted by app.js: the sealed public key and the verifier for an upload
+       token this form never carries. The fields below are only terms. */}}
+  <form id="drop-form" autocomplete="off" data-max-upload="{{.MaxUpload}}">
+
+    <section class="step step-open" id="drop-params">
+      <div class="step-head">
+        <span class="step-num" aria-hidden="true">1</span>
+        <div class="step-titles">
+          <h2 class="step-title">{{T .Lang "drops.new"}}</h2>
+          <p class="step-sub">{{T .Lang "drops.presets"}}</p>
+        </div>
+        <span class="chip e2e-badge">{{T .Lang "drops.pq_badge"}}</span>
+      </div>
+
+      <div class="step-body">
+        <div class="quick-opts">
+          <button type="button" id="drop-preset-one" class="btn btn-ghost btn-toggle" aria-pressed="false">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8z"/><path d="M14 3v5h5"/></svg>
+            {{T .Lang "drops.preset_one"}}
+          </button>
+          <button type="button" id="drop-preset-delivery" class="btn btn-ghost btn-toggle" aria-pressed="false">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>
+            {{T .Lang "drops.preset_delivery"}}
+          </button>
+          <button type="button" id="drop-preset-open" class="btn btn-ghost btn-toggle" aria-pressed="true">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="M7 16l5 5 5-5"/><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2"/></svg>
+            {{T .Lang "drops.preset_open"}}
+          </button>
+          {{/* The three explanations ride as data attributes: app.js swaps the
+               text when a preset is pressed, and the CSP forbids the inline
+               script that would otherwise carry these strings. */}}
+          <span class="quick-opts-hint" id="drop-preset-hint"
+                data-one="{{T .Lang "drops.preset_one_h"}}"
+                data-delivery="{{T .Lang "drops.preset_delivery_h"}}"
+                data-open="{{T .Lang "drops.preset_open_h"}}">{{T .Lang "drops.preset_open_h"}}</span>
+        </div>
+
+        <fieldset class="options">
+          <legend>{{T .Lang "drops.label"}}</legend>
+          <label class="opt">
+            <span>{{T .Lang "drops.label"}}</span>
+            <input id="drop-label" type="text" maxlength="120" placeholder="{{T .Lang "drops.label_ph"}}">
+          </label>
+          <label class="opt">
+            <span>{{T .Lang "drops.expiry"}}</span>
+            <select id="drop-expires">
+              <option value="24">{{T .Lang "expiry.24h"}}</option>
+              <option value="168" selected>{{T .Lang "expiry.7d"}}</option>
+              <option value="720">{{T .Lang "expiry.30d"}}</option>
+              <option value="0">{{T .Lang "expiry.never"}}</option>
+            </select>
+          </label>
+          <label class="opt">
+            <span>{{T .Lang "drops.password"}}</span>
+            <input id="drop-password" type="text" placeholder="{{T .Lang "drops.password_ph"}}" autocomplete="off">
+          </label>
+        </fieldset>
+        <p class="step-hint">{{T .Lang "drops.password_hint"}}</p>
+
+        <fieldset class="options">
+          <legend>{{T .Lang "drops.limits"}}</legend>
+          <label class="opt">
+            <span>{{T .Lang "drops.max_files"}}</span>
+            <input id="drop-max-files" type="number" min="0" step="1" placeholder="{{T .Lang "drops.unlimited_ph"}}">
+          </label>
+          <label class="opt">
+            <span>{{T .Lang "drops.max_per_sub"}}</span>
+            <input id="drop-max-per-sub" type="number" min="0" step="1" placeholder="{{T .Lang "drops.unlimited_ph"}}">
+          </label>
+          <label class="opt">
+            <span>{{T .Lang "drops.max_subs"}}</span>
+            <input id="drop-max-subs" type="number" min="0" step="1" placeholder="{{T .Lang "drops.unlimited_ph"}}">
+          </label>
+          <label class="opt">
+            <span>{{T .Lang "drops.max_file_size"}} ({{T .Lang "drops.mb"}})</span>
+            <input id="drop-max-file-mb" type="number" min="0" step="1" placeholder="{{T .Lang "drops.unlimited_ph"}}">
+          </label>
+          <label class="opt">
+            <span>{{T .Lang "drops.max_total"}} ({{T .Lang "drops.mb"}})</span>
+            <input id="drop-max-total-mb" type="number" min="0" step="1" placeholder="{{T .Lang "drops.unlimited_ph"}}">
+          </label>
+        </fieldset>
+        <p class="step-hint">{{T .Lang "drops.ceiling_hint" (humanSize .MaxUpload)}}</p>
+
+        <fieldset class="options">
+          <legend>{{T .Lang "drops.note"}}</legend>
+          <label class="opt opt-wide">
+            <span>{{T .Lang "drops.note"}}</span>
+            <textarea id="drop-note" rows="2" maxlength="2000" placeholder="{{T .Lang "drops.note_ph"}}"></textarea>
+          </label>
+        </fieldset>
+        <p class="step-hint">{{T .Lang "drops.note_hint"}}</p>
+
+        <div class="step-actions">
+          <button type="button" class="btn btn-primary" id="drop-create">{{T .Lang "drops.create"}}</button>
+          <span class="step-hint" id="drop-create-status"></span>
+        </div>
+        <p class="alert" id="drop-error" hidden></p>
+      </div>
+    </section>
+
+    {{/* Filled in by app.js after the keypair exists. Both links carry a
+         fragment the server has never seen, so this panel is the only place
+         they will ever appear. */}}
+    <section class="step step-open" id="drop-result" hidden>
+      <div class="step-head">
+        <span class="step-num" aria-hidden="true">2</span>
+        <div class="step-titles">
+          <h2 class="step-title">{{T .Lang "drops.links_heading"}}</h2>
+          <p class="step-sub">{{T .Lang "drops.pq_hint"}}</p>
+        </div>
+      </div>
+      <div class="step-body">
+        <div class="share-box">
+          <span class="share-label">{{T .Lang "drops.public_link"}}</span>
+          <div class="share-row">
+            <input type="text" id="drop-public-url" class="share-url" readonly>
+            <button type="button" class="btn btn-ghost" id="drop-public-copy" data-copy="">{{T .Lang "js.copy"}}</button>
+            <button type="button" class="btn btn-ghost btn-qr" id="drop-public-qr" data-qr-url="" aria-label="QR">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14h1M14 20h3M20 20h1"/></svg>
+            </button>
+          </div>
+          <p class="share-note">{{T .Lang "drops.public_hint"}}</p>
+        </div>
+
+        <div class="share-box share-box-private">
+          <span class="share-label">{{T .Lang "drops.private_link"}}</span>
+          <div class="share-row">
+            <input type="text" id="drop-private-url" class="share-url" readonly>
+            <button type="button" class="btn btn-ghost" id="drop-private-copy" data-copy="">{{T .Lang "js.copy"}}</button>
+            <button type="button" class="btn btn-ghost btn-qr" id="drop-private-qr" data-qr-url="" aria-label="QR">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14h1M14 20h3M20 20h1"/></svg>
+            </button>
+          </div>
+          <p class="alert alert-warn">{{T .Lang "drops.private_hint"}}</p>
+          <a class="btn btn-primary btn-block" id="drop-open-inbox" href="#">{{T .Lang "drops.open_inbox"}}</a>
+        </div>
+      </div>
+    </section>
+  </form>
+</section>
+
+<section class="list-section">
+  <h2 class="list-title">{{T .Lang "drops.list"}}</h2>
+  <p class="page-sub">{{T .Lang "drops.inbox_hint"}}</p>
+
+  {{if not .Drops}}
+  <p class="empty">{{T .Lang "drops.empty"}}</p>
+  {{else}}
+  <ul class="drop-list">
+    {{range .Drops}}
+    <li class="drop-item" data-drop="{{.ID}}">
+      <div class="drop-main">
+        <span class="drop-name">{{if .Label}}{{.Label}}{{else}}{{T $.Lang "drops.title"}}{{end}}</span>
+        <span class="drop-facts">
+          {{T $.Lang "drops.received" .Files (humanSize .Bytes)}} ·
+          {{T $.Lang "drops.deliveries" .Submissions}}
+          {{if .Open}}<span class="chip chip-ok">{{T $.Lang "drops.accepting"}}</span>
+          {{else}}<span class="chip">{{T $.Lang "drops.closed"}}</span>{{end}}
+          {{if .HasPassword}}<span class="chip">{{T $.Lang "files.protected"}}</span>{{end}}
+        </span>
+        <span class="drop-facts muted">
+          {{T $.Lang "inbox.created"}} <time data-ts="{{rfc3339 .CreatedAt}}">{{formatDate .CreatedAt}}</time>
+          {{if .ExpiresAt}} · {{T $.Lang "drops.expiry"}} <time data-ts="{{rfc3339 .ExpiresAt.UTC}}">{{formatDate .ExpiresAt.UTC}}</time>{{end}}
+          {{if gt .MaxFiles 0}} · {{T $.Lang "drops.max_files"}}: {{.MaxFiles}}{{end}}
+          {{if gt .MaxPerSubmission 0}} · {{T $.Lang "drops.max_per_sub"}}: {{.MaxPerSubmission}}{{end}}
+          {{if gt .MaxSubmissions 0}} · {{T $.Lang "drops.max_subs"}}: {{.MaxSubmissions}}{{end}}
+        </span>
+      </div>
+      <div class="drop-actions">
+        {{if .Open}}
+        <form method="post" action="/drops/{{.ID}}/close" class="inline-form"
+              data-confirm="{{T $.Lang "drops.confirm_close"}}">
+          <button type="submit" class="btn btn-ghost btn-sm" title="{{T $.Lang "drops.close_hint"}}">{{T $.Lang "drops.close"}}</button>
+        </form>
+        {{end}}
+        <form method="post" action="/drops/{{.ID}}/delete" class="inline-form"
+              data-confirm="{{T $.Lang "drops.confirm_delete"}}">
+          <button type="submit" class="btn btn-ghost btn-sm btn-danger">{{T $.Lang "drops.delete"}}</button>
+        </form>
+      </div>
+    </li>
+    {{end}}
+  </ul>
+  {{end}}
+</section>
+
+{{template "footer_kem" .}}

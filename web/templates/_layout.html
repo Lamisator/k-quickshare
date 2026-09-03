@@ -177,6 +177,13 @@
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         {{T .Lang "nav.files"}}
       </a>
+      {{/* The link that points the other way: a drop accepts files instead of
+           handing them out. Same section, because it is the same job seen from
+           the other end. */}}
+      <a href="/drops" class="side-link{{if eq .Active "drops"}} side-active{{end}}">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="M7 16l5 5 5-5"/><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2"/></svg>
+        {{T .Lang "nav.drops"}}
+      </a>
       {{if .User}}{{if .User.IsAdmin}}
       <span class="nav-section">{{T .Lang "nav.section.admin"}}</span>
       {{/* Deliberately not merged into "My files": an admin sees other people's
@@ -229,6 +236,35 @@
   </main>
 </div>
 <script src="/static/qrlib.js"></script>
+<script src="/static/e2e.js"></script>
+<script src="/static/zip.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}
+
+{{/* The same footer for the pages that need the post-quantum KEM: the drop
+     create page, the public upload page and the inbox. mlkem.js is a vendored
+     ~100 KB bundle and only those three pages have any use for it, so it is not
+     in the footer every page shares. It must come BEFORE e2e.js, whose drop
+     routines look for window.PYXIS_KEM. */}}
+{{define "footer_kem"}}
+  </main>
+</div>
+<script src="/static/qrlib.js"></script>
+<script src="/static/mlkem.js"></script>
+<script src="/static/e2e.js"></script>
+<script src="/static/zip.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}
+
+{{define "bare_footer_kem"}}
+</main>
+<footer class="bare-foot">{{T .Lang "dl.footer" "Pyxis"}}</footer>
+<script src="/static/qrlib.js"></script>
+<script src="/static/mlkem.js"></script>
 <script src="/static/e2e.js"></script>
 <script src="/static/zip.js"></script>
 <script src="/static/app.js"></script>

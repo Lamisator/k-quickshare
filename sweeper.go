@@ -32,6 +32,9 @@ func (a *App) sweepOnce(ctx context.Context) {
 	if err := a.sweepExpiredBatches(ctx); err != nil {
 		log.Printf("sweeper: batches: %v", err)
 	}
+	if err := a.sweepExpiredDrops(ctx); err != nil {
+		log.Printf("sweeper: drops: %v", err)
+	}
 	if err := a.sweepExpiredSessions(ctx); err != nil {
 		log.Printf("sweeper: sessions: %v", err)
 	}
@@ -53,6 +56,50 @@ func (a *App) sweepStaleReservations(ctx context.Context) error {
 }
 
 const archiveRetention = 30 * 24 * time.Hour
+
+// sweepExpiredDrops retires a drop the same way a share is retired, one stage
+// at a time: an expired drop stops accepting immediately and its submissions
+// are archived with their blobs deleted, the rows survive the retention window
+// so the owner can still see that something arrived and expired, and then
+// everything is purged.
+//
+// A closed drop is NOT swept. Closing means "no more files", not "delete what
+// you already have" — the owner still has to fetch them, and their expiry is
+// what decides when they go.
+func (a *App) sweepExpiredDrops(ctx context.Context) error {
+	stored, err := a.collectStored(ctx,
+		`UPDATE files SET archived_at = NOW()
+		  WHERE archived_at IS NULL
+		    AND batch_id IN (
+		        SELECT b.id FROM batches b JOIN drops d ON d.id = b.drop_id
+		         WHERE d.expires_at IS NOT NULL AND d.expires_at <= NOW())
+		 RETURNING stored_name`)
+	if err != nil {
+		return err
+	}
+	a.removeBlobs(stored)
+	if len(stored) > 0 {
+		log.Printf("sweeper: archived %d file(s) from expired drop(s), blobs deleted", len(stored))
+	}
+	if _, err := a.db.Exec(ctx,
+		`UPDATE batches SET archived_at = NOW()
+		  WHERE archived_at IS NULL AND drop_id IN (
+		      SELECT id FROM drops WHERE expires_at IS NOT NULL AND expires_at <= NOW())`); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec(ctx,
+		`UPDATE drops SET archived_at = NOW()
+		  WHERE archived_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW()`); err != nil {
+		return err
+	}
+	// Stage 2: purge. The batches and files cascade from the drop row.
+	if _, err := a.db.Exec(ctx,
+		`DELETE FROM drops WHERE archived_at <= NOW() - $1::interval`,
+		archiveRetention.String()); err != nil {
+		return err
+	}
+	return nil
+}
 
 // sweepExpiredFiles implements the two-stage lifecycle: a file whose link
 // expired or whose download limit is used up is ARCHIVED immediately (blob

@@ -986,6 +986,21 @@
     const ZIP = window.PYXIS_ZIP;
     const batchId = batchRoot.getAttribute('data-batch');
     const mode = batchRoot.getAttribute('data-mode');
+
+    // The same controller serves two pages. A BATCH is one link, one secret,
+    // one member list. An INBOX is a drop: several deliveries from people who
+    // never met, each with its own KEM encapsulation, its own key schedule and
+    // its own sealed roster.
+    //
+    // The difference is confined to two things — where the keys come from, and
+    // which URL serves the bytes. Everything after that is identical, so the
+    // member list stays FLAT and each member simply carries its own key set and
+    // remembers which delivery it belongs to. Grouping is then presentation,
+    // and the roster check, the download accounting, the preview, the gallery
+    // and the zip writer stay in one place instead of two.
+    const isInbox = batchRoot.getAttribute('data-source') === 'inbox';
+    const dropId = batchRoot.getAttribute('data-drop');
+    const rawBase = isInbox ? '/i/' + dropId : '/b/' + batchId;
     const errBox = document.getElementById('batch-error');
     const warnBox = document.getElementById('batch-warning');
     const keyMissing = document.getElementById('key-missing');
@@ -1003,6 +1018,10 @@
     let nameKey = null;
     let batchVersion = 1;
     let members = [];
+    // Set on an inbox only: the X-Wing decapsulation key, derived from the
+    // private link's fragment. It never leaves this tab and is the one thing
+    // that can turn a delivery's encapsulation into a key schedule.
+    let kemSeed = null;
 
     const fail = (msg) => {
       errBox.textContent = msg;
@@ -1025,26 +1044,92 @@
     const clearProgress = () => { progress.hidden = true; };
 
     async function loadManifest() {
+      if (isInbox) return loadInbox();
       const res = await fetch('/b/' + batchId + '/manifest', {
         headers: { Accept: 'application/json' },
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       members = data.files || [];
+      // One link, one secret: every member opens under the same keys.
+      for (const m of members) m.keys = { key: batchKey, roster: rosterKey, name: nameKey };
       batchVersion = Number(data.e2eVersion) || 1;
       await openNames();
-      await verifyRoster(data);
+      await verifyRoster(data, members);
+    }
+
+    // loadInbox turns a drop's deliveries into the flat member list the rest of
+    // this controller already knows how to render.
+    //
+    // One decapsulation per delivery, and it is the only asymmetric operation
+    // on the page: everything under it — unwrapping a file key, opening a
+    // sealed name, checking a roster — is the same symmetric machinery a batch
+    // link uses, because the shared secret has the same shape as the secret a
+    // batch link carries.
+    async function loadInbox() {
+      const res = await fetch('/i/' + dropId + '/manifest', { headers: { Accept: 'application/json' } });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const subs = data.submissions || [];
+      const dropVersion = Number(batchRoot.getAttribute('data-version')) || 1;
+      members = [];
+      const notes = [];
+      for (let i = 0; i < subs.length; i++) {
+        const sub = subs[i];
+        const group = {
+          id: sub.id,
+          index: i + 1,
+          receivedAt: sub.receivedAt,
+          from: '',
+          message: '',
+        };
+        let keys;
+        try {
+          const ss = E2E.dropDecapsulate(kemSeed, E2E.b64uDecode(sub.kemCt));
+          keys = await E2E.deriveSubmissionKeys(ss, E2E.b64uDecode(sub.kemCt), dropVersion);
+        } catch (err) {
+          // A delivery this key cannot open is reported, not hidden: it is
+          // either damage or something the server put here that no holder of
+          // the public link ever sealed.
+          group.failed = true;
+          notes.push(t('inbox_note_sealed'));
+          continue;
+        }
+        if (sub.encNote) {
+          try {
+            const opened = await E2E.openNote(keys.note, sub.id, E2E.b64uDecode(sub.encNote));
+            group.from = opened.from || '';
+            group.message = opened.message || '';
+          } catch (err) {
+            notes.push(t('inbox_note_sealed'));
+          }
+        }
+        const subMembers = sub.files || [];
+        for (const m of subMembers) {
+          m.keys = keys;
+          m.group = group;
+        }
+        batchVersion = Number(sub.e2eVersion) || batchVersion;
+        // Each delivery vouches for its own membership, so the roster is
+        // checked per delivery and against that delivery's members only.
+        await openNames(subMembers);
+        await verifyRoster(sub, subMembers, sub.id);
+        // Appended AFTER the check, because verifyRoster may put a delivery
+        // back into the order its sender sealed.
+        for (const m of subMembers) members.push(m);
+      }
+      if (notes.length) warn(Array.from(new Set(notes)));
     }
 
     // From container version 4 the listing carries no names, only a sealed blob
     // per member. Opening them costs one AES-GCM decryption each — no
     // ciphertext is fetched and no download slot is spent — which is exactly
     // why the name is sealed apart from the file it belongs to.
-    async function openNames() {
-      for (const m of members) {
-        if (m.name || !m.encName || !nameKey) continue;
+    async function openNames(list) {
+      for (const m of (list || members)) {
+        if (m.name || !m.encName || !m.keys || !m.keys.name) continue;
         try {
-          const opened = await E2E.openName(nameKey, m.manifestId, E2E.b64uDecode(m.encName));
+          const opened = await E2E.openName(m.keys.name, m.manifestId, E2E.b64uDecode(m.encName));
           m.name = opened.name;
           // The type it was sealed with is authenticated, and from container
           // version 5 it is the ONLY copy: the server has none. The icon and
@@ -1080,8 +1165,16 @@
     // a member uploaded moments ago, before its roster update landed. Neither
     // can be told apart from tampering here, so both are stated plainly and an
     // unverified member is kept out of "Download all".
-    async function verifyRoster(data) {
+    //
+    // On an inbox this runs once per delivery, over that delivery's members and
+    // under that delivery's own roster key: a drop's deliveries vouch for
+    // themselves and for nothing else. One sender cannot sign for another's
+    // files, which is exactly the guarantee a drop can and cannot give.
+    async function verifyRoster(data, list, scopeId) {
       const notes = [];
+      const scope = scopeId || batchId;
+      const group = list || members;
+      const rKey = group.length && group[0].keys ? group[0].keys.roster : rosterKey;
       if (batchVersion < 2) {
         // A pre-version-2 batch never had a roster. Say so once rather than
         // implying a guarantee this link cannot give.
@@ -1091,12 +1184,12 @@
       let roster;
       try {
         if (!data.roster) throw new Error('no roster');
-        roster = await E2E.openRoster(rosterKey, batchId, E2E.b64uDecode(data.roster));
+        roster = await E2E.openRoster(rKey, scope, E2E.b64uDecode(data.roster));
       } catch (err) {
         // Either the server has no roster for a batch that must have one, or it
         // does not open under this link's key. Both mean the member list is
         // unverifiable, which is the strongest statement this page can make.
-        for (const m of members) m.unverified = true;
+        for (const m of group) m.unverified = true;
         warn([t('batch_no_roster')]);
         return;
       }
@@ -1104,7 +1197,7 @@
       const byID = new Map();
       for (const f of roster.files || []) byID.set(f.id, f);
 
-      for (const m of members) {
+      for (const m of group) {
         const entry = byID.get(m.id);
         if (!entry) {
           m.unverified = true;
@@ -1125,7 +1218,7 @@
         // only line of defence — but it turns "decryption failed" into a
         // statement about what actually went wrong.
         try {
-          if (E2E.parseManifest(E2E.b64uDecode(m.manifest)).batch !== batchId) {
+          if (E2E.parseManifest(E2E.b64uDecode(m.manifest)).batch !== scope) {
             m.unverified = true;
           }
         } catch (err) {
@@ -1133,7 +1226,7 @@
         }
       }
 
-      const extra = members.filter((m) => m.unverified).length;
+      const extra = group.filter((m) => m.unverified).length;
       if (extra > 0) notes.push(t('batch_unverified', extra));
       if (byID.size > 0) {
         notes.push(t('batch_missing', byID.size,
@@ -1145,13 +1238,13 @@
       // "Download all" archive and the order they are read in — the roster
       // fixes the sequence, so check it rather than only the membership.
       if (notes.length === 0) {
-        const servedOrder = members.map((m) => m.id).join(' ');
+        const servedOrder = group.map((m) => m.id).join(' ');
         const sealedOrder = (roster.files || []).map((f) => f.id).join(' ');
         if (servedOrder !== sealedOrder) {
           notes.push(t('batch_reordered'));
           // Restore the sealed order rather than only complaining about it.
           const pos = new Map((roster.files || []).map((f, i) => [f.id, i]));
-          members.sort((a, b) => pos.get(a.id) - pos.get(b.id));
+          group.sort((a, b) => pos.get(a.id) - pos.get(b.id));
         }
       }
       warn(notes);
@@ -1166,8 +1259,8 @@
       if (plainCache.has(m.id)) return plainCache.get(m.id);
       const stage = onStage || (() => {});
       const p = (async () => {
-        const fileKey = await E2E.unwrapFileKey(batchKey, E2E.b64uDecode(m.wrappedKey));
-        const buf = await fetchWithProgress('/b/' + batchId + '/f/' + m.id + '/raw',
+        const fileKey = await E2E.unwrapFileKey(m.keys.key, E2E.b64uDecode(m.wrappedKey));
+        const buf = await fetchWithProgress(rawBase + '/f/' + m.id + '/raw',
           (f) => stage(t('e2e_downloading'), f));
         if (Number(m.e2eVersion) === 2 && !m.manifest) throw new Error('missing manifest');
         const out = await E2E.openFile(
@@ -1239,12 +1332,55 @@
       setRowProgress(m, label, frac);
     };
 
+    // A delivery header carries what the sender chose to say, and says plainly
+    // that nothing verifies it. Anyone with the public link can write anything
+    // here — that is what a public drop box is — so the page must not present a
+    // typed name the way it presents a decrypted file name.
+    function deliveryHeader(group, numbered) {
+      const li = document.createElement('li');
+      li.className = 'batch-group';
+      const title = document.createElement('span');
+      title.className = 'batch-group-title';
+      // Numbering a delivery only makes sense beside others.
+      title.textContent = numbered ? t('inbox_delivery', String(group.index))
+        : (group.from ? '' : t('inbox_anonymous'));
+      if (group.from) {
+        const from = document.createElement('span');
+        from.className = 'batch-group-from';
+        from.textContent = numbered ? t('inbox_from', group.from) : group.from;
+        // Said out loud rather than implied: this is a name someone typed into
+        // a public form, and the page must not dress it up as an identity.
+        from.title = t('inbox_unverified_sender');
+        if (title.textContent) title.appendChild(document.createTextNode(' '));
+        title.appendChild(from);
+      }
+      li.appendChild(title);
+
+      const meta = document.createElement('span');
+      meta.className = 'batch-group-meta muted';
+      const when = group.receivedAt ? new Date(group.receivedAt) : null;
+      meta.textContent = [
+        when && !isNaN(when) ? when.toLocaleString() : '',
+        group.from ? '' : t('inbox_anonymous'),
+      ].filter(Boolean).join(' · ');
+      li.appendChild(meta);
+
+      if (group.message) {
+        const msg = document.createElement('p');
+        msg.className = 'batch-group-message';
+        msg.textContent = group.message;
+        li.appendChild(msg);
+      }
+      return li;
+    }
+
     function renderList() {
       listEl.textContent = '';
       rowUI.clear();
       let total = 0;
       for (const m of members) total += Number(m.size) || 0;
       summaryEl.textContent = fileCountLabel(members.length) + ' · ' + fmtSize(total);
+      if (isInbox && members.length === 0) summaryEl.textContent = t('inbox_empty');
       zipBtn.hidden = members.length === 0;
       // Nothing to open a gallery on unless the server marked something
       // previewable, and an empty gallery is worse than no button.
@@ -1256,7 +1392,20 @@
         listEl.appendChild(li);
         return;
       }
+      let lastGroup = null;
       for (const m of members) {
+        // One header per delivery, drawn when there is something to say: more
+        // than one delivery to separate, or a sender who wrote a name or a
+        // message. A lone anonymous delivery gets none, so a drop that received
+        // one thing reads exactly like a batch — but a note must never be
+        // swallowed by that simplification, because it is the only thing the
+        // sender got to tell the recipient.
+        const several = members.some((o) => o.group && o.group !== m.group);
+        if (m.group && m.group !== lastGroup && (several || m.group.from || m.group.message)) {
+          listEl.appendChild(deliveryHeader(m.group, several));
+        }
+        if (m.group) lastGroup = m.group;
+
         const li = document.createElement('li');
         li.className = 'batch-row';
 
@@ -1763,9 +1912,39 @@
       renderList();
     }
 
+    async function showPublicLink(owner) {
+      const field = document.getElementById('inbox-public-url');
+      const copy = document.getElementById('inbox-public-copy');
+      const publicId = batchRoot.getAttribute('data-public');
+      if (!field || !publicId) return;
+      const url = new URL('/r/' + publicId + '#' + E2E.b64uEncode(owner.shareSecret),
+        location.href).toString();
+      field.value = url;
+      if (copy) copy.setAttribute('data-copy', url);
+    }
+
     if (!E2E || !E2E.available || !ZIP) {
       fail(t('e2e_unsupported'));
       zipBtn.classList.add('btn-disabled');
+    } else if (isInbox) {
+      const secret = (location.hash || '').replace(/^#/, '');
+      if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) {
+        keyMissing.hidden = false;
+      } else if (!E2E.kemAvailable()) {
+        fail(t('drop_kem_missing'));
+      } else {
+        const dropVersion = Number(batchRoot.getAttribute('data-version')) || 1;
+        E2E.deriveDropOwnerKeys(E2E.b64uDecode(secret), dropVersion)
+          .then(async (owner) => {
+            kemSeed = owner.kemSeed;
+            // The public link is derived from the private one, so an owner who
+            // lost the link they handed out can produce it again here — from a
+            // secret the server has never held either half of.
+            await showPublicLink(owner);
+            return startBatch();
+          })
+          .catch(() => fail(t('inbox_failed')));
+      }
     } else if (mode === 'url') {
       const secret = (location.hash || '').replace(/^#/, '');
       if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) {
@@ -1813,6 +1992,475 @@
       };
       unlockBtn.addEventListener('click', unlock);
       pwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
+    }
+  }
+
+  // A v4 UUID, from crypto.getRandomValues where randomUUID is missing. Both
+  // drop pages need one: a drop's public id and a submission's id are AADs, so
+  // they are chosen by the party doing the sealing rather than by the server.
+  function uuidV4() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' +
+      h.slice(16, 20) + '-' + h.slice(20);
+  }
+
+  // ---- creating a drop -----------------------------------------------------
+  //
+  // The only page in the application that generates an asymmetric keypair, and
+  // it does so here, in the tab, because that is the whole point: the server
+  // must never hold the half that reads. What it is sent is a sealed public key
+  // and a hash. What it is never sent is either fragment.
+
+  const dropForm = document.getElementById('drop-form');
+  if (dropForm) {
+    const E2E = window.PYXIS_E2E;
+    const createBtn = document.getElementById('drop-create');
+    const statusEl = document.getElementById('drop-create-status');
+    const errBox = document.getElementById('drop-error');
+    const resultBox = document.getElementById('drop-result');
+    const paramsBox = document.getElementById('drop-params');
+
+    const el = (id) => document.getElementById(id);
+    const fail = (msg) => {
+      errBox.textContent = msg;
+      errBox.hidden = false;
+      statusEl.textContent = '';
+    };
+
+    // The presets write real numbers into the real fields, the way the
+    // Single-Use preset on the upload page does. Nothing is hidden behind a
+    // mode: what the drop will accept stays visible and editable.
+    const presets = {
+      'drop-preset-one': { files: '1', perSub: '1', subs: '1', hint: 'drops.preset_one_h' },
+      'drop-preset-delivery': { files: '', perSub: '', subs: '1', hint: 'drops.preset_delivery_h' },
+      'drop-preset-open': { files: '', perSub: '', subs: '', hint: 'drops.preset_open_h' },
+    };
+    const hintEl = document.getElementById('drop-preset-hint');
+    for (const id of Object.keys(presets)) {
+      const btn = el(id);
+      if (!btn) continue;
+      btn.addEventListener('click', () => {
+        for (const other of Object.keys(presets)) {
+          const b = el(other);
+          if (b) b.setAttribute('aria-pressed', String(other === id));
+        }
+        el('drop-max-files').value = presets[id].files;
+        el('drop-max-per-sub').value = presets[id].perSub;
+        el('drop-max-subs').value = presets[id].subs;
+        // The hints ride on the element as data attributes: the strings belong
+        // to the page's catalogue, not to the JS one, and the CSP forbids an
+        // inline script that could carry them.
+        if (hintEl) hintEl.textContent = hintEl.getAttribute('data-' + id.replace('drop-preset-', '')) || '';
+      });
+    }
+
+    const mbToBytes = (v) => {
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) && n > 0 ? String(n * 1024 * 1024) : '';
+    };
+
+    if (createBtn) {
+      createBtn.addEventListener('click', async () => {
+        errBox.hidden = true;
+        if (!E2E || !E2E.available) { fail(t('e2e_unsupported')); return; }
+        if (!E2E.kemAvailable()) { fail(t('drop_kem_missing')); return; }
+        createBtn.disabled = true;
+        statusEl.textContent = t('drop_creating');
+        try {
+          // One secret, and everything else hangs off it: the KEM seed, the
+          // public link's secret, the key that seals the public key and the
+          // upload token. It exists in this tab and in the private link.
+          const secret = E2E.randomBytes(E2E.KEY_LEN);
+          const dropVersion = E2E.DROP_VERSION;
+          const owner = await E2E.deriveDropOwnerKeys(secret, dropVersion);
+          const share = await E2E.deriveDropShareKeys(owner.shareSecret, dropVersion);
+
+          const body = new URLSearchParams();
+          body.set('drop_version', String(dropVersion));
+          body.set('kem_alg', window.PYXIS_KEM.ALG);
+          body.set('label', el('drop-label').value.trim());
+          body.set('note', el('drop-note').value.trim());
+          body.set('expires_hours', el('drop-expires').value);
+          body.set('max_files', el('drop-max-files').value.trim());
+          body.set('max_files_per_submission', el('drop-max-per-sub').value.trim());
+          body.set('max_submissions', el('drop-max-subs').value.trim());
+          body.set('max_file_bytes', mbToBytes(el('drop-max-file-mb').value));
+          body.set('max_total_bytes', mbToBytes(el('drop-max-total-mb').value));
+
+          // The server is told the HASH of the upload token, never the token.
+          // A drop's token is a standing write capability on the owner's
+          // quota; there is no moment at which the server needs the value
+          // itself, so it never gets it.
+          const digest = await crypto.subtle.digest('SHA-256', share.token);
+          body.set('upload_verifier', E2E.b64uEncode(new Uint8Array(digest)));
+
+          const password = el('drop-password').value;
+          if (password) {
+            const salt = E2E.randomBytes(E2E.SALT_LEN);
+            const derived = await E2E.derivePasswordKeys(password, salt, E2E.VERSION);
+            body.set('auth_salt', E2E.b64uEncode(salt));
+            body.set('auth_verifier', E2E.b64uEncode(derived.auth));
+          }
+
+          // Created first, sealed second: the public id is the sealed key's
+          // AAD, so a drop has to exist before its key can be sealed to it.
+          // The row is written with a placeholder and updated in the same
+          // request — see the two-step POST below.
+          const res = await fetch('/drops', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              Accept: 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: await withSealedKey(body, owner, share),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+
+          const base = location.origin;
+          const publicURL = base + data.uploadUrl + '#' + E2E.b64uEncode(owner.shareSecret);
+          const privateURL = base + data.inboxUrl + '#' + E2E.b64uEncode(secret);
+
+          el('drop-public-url').value = publicURL;
+          el('drop-public-copy').setAttribute('data-copy', publicURL);
+          el('drop-public-qr').setAttribute('data-qr-url', publicURL);
+          el('drop-private-url').value = privateURL;
+          el('drop-private-copy').setAttribute('data-copy', privateURL);
+          el('drop-private-qr').setAttribute('data-qr-url', privateURL);
+          el('drop-open-inbox').setAttribute('href', privateURL);
+
+          resultBox.hidden = false;
+          paramsBox.classList.add('step-locked');
+          statusEl.textContent = t('drop_created');
+          resultBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } catch (err) {
+          fail(t('drop_create_failed') + ' (' + err.message + ')');
+        } finally {
+          createBtn.disabled = false;
+        }
+      });
+    }
+
+    // The public id is the AAD of the sealed public key, and the id is the
+    // server's to mint — so the key is sealed against an id chosen HERE and
+    // sent with it. The server stores the id it was given rather than one of
+    // its own, which is what keeps the AAD honest without a second round trip.
+    async function withSealedKey(body, owner, share) {
+      const publicId = uuidV4();
+      const sealed = await E2E.sealDropPublicKey(share.pk, publicId, owner.publicKey);
+      body.set('public_id', publicId);
+      body.set('enc_pk', E2E.b64uEncode(sealed));
+      return body.toString();
+    }
+
+  }
+
+  // ---- sending files to a drop ---------------------------------------------
+  //
+  // No account, no session, and no way back: this page can seal files to the
+  // recipient's key and nothing else. It cannot read what it just sent, what
+  // anyone else sent, or how much is in the drop beyond what the page was told.
+
+  const dropRoot = document.getElementById('drop-root');
+  if (dropRoot) {
+    const E2E = window.PYXIS_E2E;
+    const publicId = dropRoot.getAttribute('data-public');
+    const dropVersion = Number(dropRoot.getAttribute('data-version')) || 1;
+    const maxUpload = Number(dropRoot.getAttribute('data-max-upload')) || 0;
+    const maxFiles = Number(dropRoot.getAttribute('data-max-files')) || 0;
+    const mode = dropRoot.getAttribute('data-mode');
+    const errBox = document.getElementById('drop-error');
+    const keyMissing = document.getElementById('key-missing');
+    const zone = document.getElementById('drop-zone');
+    const input = document.getElementById('drop-input');
+    const queue = document.getElementById('drop-queue');
+    const doneBox = document.getElementById('drop-done');
+    const mainBox = document.getElementById('drop-main');
+
+    let publicKey = null;   // the recipient's, opened from the sealed blob
+    let uploadToken = null; // derived from this page's fragment
+    let submission = null;  // { id, keys, roster, seq }
+    let sent = 0;
+
+    const fail = (msg) => {
+      if (!errBox) return;
+      errBox.textContent = msg;
+      errBox.hidden = false;
+    };
+
+    const secret = (location.hash || '').replace(/^#/, '');
+
+    async function unsealKey() {
+      const share = await E2E.deriveDropShareKeys(E2E.b64uDecode(secret), dropVersion);
+      uploadToken = share.token;
+      const res = await fetch('/r/' + publicId + '/key', { headers: { Accept: 'application/json' } });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      // If this throws, the served key was not sealed by whoever created this
+      // link — a wrong link, or a substituted key. Either way nothing may be
+      // encrypted to it, and the message says so in those terms.
+      publicKey = await E2E.openDropPublicKey(share.pk, publicId, E2E.b64uDecode(data.encPk));
+    }
+
+    // One submission per visit: opened lazily with the first file, so a page
+    // someone opened and closed again leaves no empty delivery behind.
+    async function ensureSubmission() {
+      if (submission) return submission;
+      const { ct, ss } = E2E.dropEncapsulate(publicKey);
+      const keys = await E2E.deriveSubmissionKeys(ss, ct, dropVersion);
+
+      // The submission's id is generated HERE, for the same reason the drop's
+      // public id is: it is the AAD of the sealed note and of every file's
+      // manifest, so it has to exist before anything can be sealed against it.
+      // The server takes the id it is given or refuses the request; it cannot
+      // hand back a different one afterwards without breaking every seal.
+      const id = uuidV4();
+      const from = (document.getElementById('drop-from') || {}).value || '';
+      const message = (document.getElementById('drop-message') || {}).value || '';
+
+      const body = new URLSearchParams();
+      body.set('token', E2E.b64uEncode(uploadToken));
+      body.set('id', id);
+      body.set('kem_ct', E2E.b64uEncode(ct));
+      if (from || message) {
+        body.set('enc_note', E2E.b64uEncode(
+          await E2E.sealNote(keys.note, id, { from: from, message: message })));
+      }
+
+      const res = await fetch('/r/' + publicId + '/submissions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: body.toString(),
+      });
+      if (res.status === 409) throw new Error(t('drop_full'));
+      if (res.status === 410) throw new Error(t('drop_closed'));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      submission = { id: data.id, keys: keys, roster: [], seq: 0, ct: ct };
+      return submission;
+    }
+
+    function row(file) {
+      const li = document.createElement('li');
+      li.className = 'queue-item';
+      const info = document.createElement('div');
+      info.className = 'queue-info';
+      const name = document.createElement('span');
+      name.className = 'queue-name';
+      name.textContent = file.name;
+      const status = document.createElement('span');
+      status.className = 'queue-status';
+      status.textContent = t('queued');
+      info.appendChild(name);
+      info.appendChild(status);
+      const bar = document.createElement('div');
+      bar.className = 'queue-bar';
+      const fill = document.createElement('div');
+      fill.className = 'queue-fill';
+      bar.appendChild(fill);
+      li.appendChild(info);
+      li.appendChild(bar);
+      queue.appendChild(li);
+      return {
+        li: li,
+        set: (label, frac) => {
+          status.textContent = frac === undefined ? label
+            : label + ' ' + Math.round(Math.max(0, Math.min(1, frac)) * 100) + '%';
+          if (frac !== undefined) fill.style.width = Math.round(frac * 100) + '%';
+        },
+        done: () => { li.classList.add('queue-done'); fill.style.width = '100%'; },
+        failed: () => { li.classList.add('queue-failed'); },
+      };
+    }
+
+    async function sendOne(file) {
+      const ui = row(file);
+      try {
+        if (maxUpload > 0 && file.size > maxUpload) {
+          ui.set(t('too_large', fmtSize(maxUpload)));
+          ui.failed();
+          return;
+        }
+        ui.set(t('drop_sealing'), 0);
+        const sub = await ensureSubmission();
+
+        const fileKeyRaw = E2E.randomBytes(E2E.KEY_LEN);
+        const fileKey = await E2E.importAes(fileKeyRaw);
+        const wrapped = await E2E.wrapFileKey(sub.keys.key, fileKeyRaw);
+        const fileId = E2E.newFileId();
+        const manifestBytes = E2E.buildManifest({
+          id: fileId, batch: sub.id, size: file.size,
+        });
+        const encName = await E2E.sealName(sub.keys.name, fileId,
+          { name: file.name, type: file.type || 'application/octet-stream' });
+        const cipher = await E2E.encryptFile(file, fileKey, manifestBytes,
+          (f) => ui.set(t('e2e_encrypting'), f));
+
+        const form = new FormData();
+        // Named after the id, never after the file: a multipart filename is
+        // plaintext the server would otherwise see and log.
+        form.append('file', cipher, fileId + '.enc');
+        form.append('e2e', '1');
+        form.append('e2e_version', String(E2E.VERSION));
+        form.append('plain_size', String(file.size));
+        form.append('manifest', E2E.b64uEncode(manifestBytes));
+        form.append('enc_name', E2E.b64uEncode(encName));
+        form.append('wrapped_key', E2E.b64uEncode(wrapped));
+
+        ui.set(t('drop_sending'), 0);
+        const url = '/r/' + publicId + '/upload?submission=' + encodeURIComponent(sub.id) +
+          '&token=' + encodeURIComponent(E2E.b64uEncode(uploadToken));
+        const res = await sendWithProgress(url, form, (f) => ui.set(t('drop_sending'), f));
+        if (res.status === 409) { ui.set(t('drop_full')); ui.failed(); return; }
+        if (res.status === 410) { ui.set(t('drop_closed')); ui.failed(); return; }
+        if (res.status === 507) { ui.set(t('quota')); ui.failed(); return; }
+        if (res.status < 200 || res.status >= 300) throw new Error('HTTP ' + res.status);
+
+        const created = JSON.parse(res.text || '{}');
+        sub.roster.push({
+          id: created.id,
+          name: file.name,
+          size: file.size,
+          type: file.type || 'application/octet-stream',
+          manifest: await E2E.sha256b64u(manifestBytes),
+        });
+        sub.seq++;
+        const sealedRoster = await E2E.sealRoster(sub.keys.roster, sub.id, {
+          v: E2E.VERSION, batch: sub.id, seq: sub.seq, files: sub.roster,
+        });
+        const rbody = new URLSearchParams();
+        rbody.set('token', E2E.b64uEncode(uploadToken));
+        rbody.set('roster', E2E.b64uEncode(sealedRoster));
+        rbody.set('seq', String(sub.seq));
+        await fetch('/r/' + publicId + '/submissions/' + sub.id + '/roster', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: rbody.toString(),
+        });
+
+        ui.set(t('drop_sent'));
+        ui.done();
+        sent++;
+        if (doneBox) doneBox.hidden = false;
+      } catch (err) {
+        ui.set(t('failed') + ': ' + err.message);
+        ui.failed();
+      }
+    }
+
+    // XHR rather than fetch, for the same reason the share uploader uses it:
+    // upload progress. fetch still cannot report how much of a body has gone.
+    function sendWithProgress(url, form, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url);
+        xhr.setRequestHeader('Accept', 'application/json');
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) onProgress(e.loaded / e.total);
+        });
+        xhr.addEventListener('load', () => resolve({ status: xhr.status, text: xhr.responseText }));
+        xhr.addEventListener('error', () => reject(new Error(t('network'))));
+        xhr.addEventListener('abort', () => reject(new Error(t('cancelled'))));
+        xhr.send(form);
+      });
+    }
+
+    let running = Promise.resolve();
+    function enqueueFiles(list) {
+      let files = Array.from(list || []);
+      if (!files.length) return;
+      if (maxFiles > 0 && sent + files.length > maxFiles) {
+        // Refused here, before anything is encrypted, and the server enforces
+        // the same number inside the transaction that books the upload.
+        files = files.slice(0, Math.max(0, maxFiles - sent));
+        fail(t('drop_file_limit', String(maxFiles)));
+      }
+      for (const f of files) {
+        running = running.then(() => sendOne(f));
+      }
+    }
+
+    if (zone && input) {
+      zone.addEventListener('click', () => input.click());
+      zone.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+      });
+      input.addEventListener('change', () => { enqueueFiles(input.files); input.value = ''; });
+      ['dragenter', 'dragover'].forEach((ev) => zone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        zone.classList.add('dz-over');
+      }));
+      ['dragleave', 'drop'].forEach((ev) => zone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        zone.classList.remove('dz-over');
+      }));
+      zone.addEventListener('drop', (e) => {
+        if (e.dataTransfer) enqueueFiles(e.dataTransfer.files);
+      });
+    }
+
+    async function start() {
+      try {
+        await unsealKey();
+      } catch (err) {
+        fail(t('drop_key_bad'));
+        if (zone) zone.classList.add('dz-disabled');
+        return;
+      }
+    }
+
+    if (!E2E || !E2E.available) {
+      fail(t('e2e_unsupported'));
+    } else if (!E2E.kemAvailable()) {
+      fail(t('drop_kem_missing'));
+    } else if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) {
+      if (keyMissing) keyMissing.hidden = false;
+      if (zone) zone.classList.add('dz-disabled');
+    } else if (mode === 'password' && !dropRoot.getAttribute('data-unlocked')) {
+      const pwInput = document.getElementById('drop-password');
+      const unlockBtn = document.getElementById('drop-unlock');
+      const lockBox = document.getElementById('drop-lock');
+      const salt = E2E.b64uDecode(dropRoot.getAttribute('data-salt') || '');
+      const unlock = async () => {
+        if (!pwInput.value) return;
+        unlockBtn.disabled = true;
+        errBox.hidden = true;
+        try {
+          const derived = await E2E.derivePasswordKeys(pwInput.value, salt, E2E.VERSION);
+          const res = await fetch('/r/' + publicId + '/unlock', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'auth=' + encodeURIComponent(E2E.b64uEncode(derived.auth)),
+          });
+          if (res.status === 429) { fail(t('rate_limited')); return; }
+          if (!res.ok) { fail(t('e2e_wrong_pw')); pwInput.value = ''; return; }
+          if (lockBox) lockBox.hidden = true;
+          if (mainBox) mainBox.hidden = false;
+          await start();
+        } catch (err) {
+          fail(t('e2e_failed') + ' (' + err.message + ')');
+        } finally {
+          unlockBtn.disabled = false;
+        }
+      };
+      if (unlockBtn) unlockBtn.addEventListener('click', unlock);
+      if (pwInput) pwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
+    } else if (dropRoot.getAttribute('data-open')) {
+      start();
     }
   }
 

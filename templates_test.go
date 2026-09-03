@@ -57,6 +57,17 @@ func TestTemplatesRender(t *testing.T) {
 	}
 	fileGroups, hasBatches := groupFiles(files)
 
+	// One drop of each shape the list has to draw: an open one with limits, and
+	// a closed one with none.
+	dropRows := []DropRow{
+		{ID: uuid.NewString(), PublicID: uuid.NewString(), Label: "Signed contract",
+			CreatedAt: now, ExpiresAt: &exp, Files: 2, Submissions: 1, Bytes: 4096,
+			MaxFiles: 3, MaxPerSubmission: 1, MaxSubmissions: 2,
+			MaxFileBytes: 1 << 20, MaxTotalBytes: 1 << 30, HasPassword: true},
+		{ID: uuid.NewString(), PublicID: uuid.NewString(),
+			CreatedAt: now, ClosedAt: &now, Files: 0, Submissions: 0, Bytes: 0},
+	}
+
 	customBytes := int64(5 << 30)
 	customUpload := int64(2 << 30)
 	userRows := []UserRow{
@@ -110,6 +121,27 @@ func TestTemplatesRender(t *testing.T) {
 			"QuotaBytes": sizeInput(20 << 30), "QuotaFiles": int64(1000),
 			"MaxUpload": sizeInput(512 << 20)},
 		"oidc_denied.html": {"User": (*User)(nil), "AllowedDomain": "a.example", "ActualDomain": "b.example"},
+		// A drop's three pages. The owner's list renders what the server may
+		// know — counts, sizes, terms — and nothing it may not, because it
+		// holds no key for any of it.
+		"drops.html": {"Active": "drops", "MaxUpload": int64(1 << 30), "Drops": dropRows},
+		// The public page as a stranger sees it: no session, no listing, and
+		// the recipient's key still sealed.
+		"drop_upload.html": {"User": (*User)(nil), "PublicID": uuid.NewString(),
+			"Label": "Signed contract", "Note": "Please send the countersigned copy.",
+			"Open": true, "Closed": false, "HasPassword": true, "Unlocked": false,
+			"DropVersion": dropCurrentVersion, "MaxUpload": int64(512 << 20),
+			"AuthSalt": "c2FsdA", "ExpiresAt": exp.UTC(),
+			"MaxFiles": 3, "MaxPerSubmission": 1, "MaxTotalBytes": int64(1 << 30),
+			"FilesLeft": int64(2), "BytesLeft": int64(1 << 29),
+			"FilesUsed": int64(1), "BytesUsed": int64(1 << 29)},
+		// The inbox is the batch page with a different front door, so it is
+		// rendered with the same empty shell: everything in it arrives as
+		// ciphertext and is built by app.js.
+		"inbox.html": {"User": (*User)(nil), "ID": uuid.NewString(), "PublicID": uuid.NewString(),
+			"Label": "Signed contract", "CreatedAt": now, "ExpiresAt": exp.UTC(),
+			"FileCount": int64(4), "TotalSize": int64(4096), "Submissions": int64(2),
+			"Open": true, "DropVersion": dropCurrentVersion},
 	}
 	// Only two states survive: "gone", and the end-to-end landing page. The
 	// server-decrypted and server-password-gated states went with key modes 0-2.

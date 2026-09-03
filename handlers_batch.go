@@ -40,7 +40,20 @@ type batchMeta struct {
 	E2EVersion    int
 	Roster        []byte
 	RosterSeq     int64
+
+	// Set when this batch is a SUBMISSION to a drop rather than a share the
+	// owner created. KemCT is the X-Wing encapsulation its key schedule
+	// descends from and EncNote the sender's sealed note; both are opaque here.
+	DropID  *string
+	KemCT   []byte
+	EncNote []byte
 }
+
+// isSubmission reports whether this batch belongs to a drop. A submission is
+// reachable ONLY through its drop's inbox: /b/{id} refuses it, exactly as
+// /files/{id}/raw refuses a batch member. Otherwise the batch page would offer
+// a second door into files whose terms — and whose expiry — belong to the drop.
+func (bm *batchMeta) isSubmission() bool { return bm.DropID != nil }
 
 // 12-byte GCM nonce + 32-byte file key + 16-byte tag, as produced by
 // wrapFileKey() in web/static/e2e.js.
@@ -217,6 +230,13 @@ func (a *App) loadBatchForUpload(r *http.Request, id uuid.UUID, userID string) (
 	if bm.CreatedBy == nil || *bm.CreatedBy != userID {
 		return nil, errNotBatchOwner
 	}
+	// A drop submission is not a batch its owner may add to. It was created by
+	// a stranger holding the public link, its roster is theirs to seal, and the
+	// owner has no key for it — being able to inject a file into someone else's
+	// delivery would make the sealed roster say something untrue.
+	if bm.isSubmission() {
+		return nil, errNotBatchOwner
+	}
 	if bm.ArchivedAt != nil || (bm.ExpiresAt != nil && time.Now().After(*bm.ExpiresAt)) {
 		return nil, errBatchClosed
 	}
@@ -233,11 +253,11 @@ func (a *App) loadBatchMeta(r *http.Request, id uuid.UUID) (*batchMeta, error) {
 	err := a.db.QueryRow(r.Context(),
 		`SELECT created_at, created_by, expires_at, max_downloads, download_count,
 		        key_mode, auth_salt, auth_verifier, archived_at,
-		        e2e_version, roster, roster_seq
+		        e2e_version, roster, roster_seq, drop_id::text, kem_ct, enc_note
 		 FROM batches WHERE id = $1`, id.String()).
 		Scan(&bm.CreatedAt, &bm.CreatedBy, &bm.ExpiresAt, &bm.MaxDownloads,
 			&bm.DownloadCount, &bm.KeyMode, &bm.AuthSalt, &bm.AuthVerifier, &bm.ArchivedAt,
-			&bm.E2EVersion, &bm.Roster, &bm.RosterSeq)
+			&bm.E2EVersion, &bm.Roster, &bm.RosterSeq, &bm.DropID, &bm.KemCT, &bm.EncNote)
 	if err != nil {
 		return nil, err
 	}
@@ -291,6 +311,13 @@ func (a *App) dispatchBatchRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	if bm.isSubmission() {
+		// Only the drop's inbox serves this, and only with the key in its
+		// private link. Answering "not found" rather than "forbidden" is right:
+		// to anyone without that link there is nothing here.
+		a.renderGone(w, r, http.StatusNotFound, "dl.not_found")
 		return
 	}
 	if bm.MaxDownloads != nil && bm.DownloadCount >= *bm.MaxDownloads {
@@ -499,6 +526,20 @@ func (a *App) handleBatchFileRaw(w http.ResponseWriter, r *http.Request, bm *bat
 	if !a.consumeBatchDownload(w, r, bm) {
 		return
 	}
+	name := id.String()
+	if origName != nil {
+		name = downloadName(*origName, id.String())
+	}
+	a.serveBlob(w, r, storedName, name, uploadedAt)
+
+	a.archiveBatchIfSpent(r, bm)
+}
+
+// serveBlob streams one stored object as an opaque attachment. It is always
+// ciphertext: the name is a hint for the browser's downloads folder and the
+// type is deliberately octet-stream, because from container version 5 the
+// server has not been told what any of this is.
+func (a *App) serveBlob(w http.ResponseWriter, r *http.Request, storedName, name string, modTime time.Time) {
 	f, err := os.Open(filepath.Join(a.filesDir, storedName))
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
@@ -507,15 +548,9 @@ func (a *App) handleBatchFileRaw(w http.ResponseWriter, r *http.Request, bm *bat
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	name := id.String()
-	if origName != nil {
-		name = downloadName(*origName, id.String())
-	}
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="%s.enc"`, quoteForHeader(name)))
-	http.ServeContent(w, r, name+".enc", uploadedAt, f)
-
-	a.archiveBatchIfSpent(r, bm)
+	http.ServeContent(w, r, name+".enc", modTime, f)
 }
 
 // consumeBatchDownload burns one slot off the batch. The limit counts FILE

@@ -220,6 +220,40 @@ func (a *App) findUserByUsername(ctx context.Context, username string) (*User, s
 // The second lookup adopts a row written before the issuer was recorded: it can
 // only ever match an account this instance created itself, and it claims the
 // row for the configured issuer so the ambiguity is gone from then on.
+// findUserByID resolves the account an upload is charged to. A drop upload
+// arrives with no session at all — the person sending the file has no account —
+// so the quota, the file-count allowance and the per-file ceiling have to come
+// from the drop's OWNER, loaded here.
+func (a *App) findUserByID(ctx context.Context, id string) (*User, error) {
+	var (
+		u       User
+		email   *string
+		hash    *string
+		issuer  *string
+		subject *string
+	)
+	err := a.db.QueryRow(ctx,
+		`SELECT id::text, username, email, password_hash, oidc_issuer, oidc_subject,
+		        is_admin, is_super_admin, max_upload_bytes
+		 FROM users WHERE id = $1`, id).
+		Scan(&u.ID, &u.Username, &email, &hash, &issuer, &subject,
+			&u.IsAdmin, &u.IsSuperAdmin, &u.MaxUploadBytes)
+	if err != nil {
+		return nil, err
+	}
+	if email != nil {
+		u.Email = *email
+	}
+	if issuer != nil {
+		u.OIDCIssuer = *issuer
+	}
+	if subject != nil {
+		u.OIDCSubject = *subject
+	}
+	u.HasPassword = hash != nil && *hash != ""
+	return &u, nil
+}
+
 func (a *App) findUserByOIDCIdentity(ctx context.Context, issuer, sub string) (*User, error) {
 	if issuer == "" || sub == "" {
 		return nil, pgx.ErrNoRows

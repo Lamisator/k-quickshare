@@ -307,6 +307,67 @@ var migrations = []migration{
 			`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_upload_bytes BIGINT`,
 		},
 	},
+	{
+		version: 10,
+		name:    "file_drops",
+		// A DROP is a share link pointing the other way: the owner publishes a
+		// link that only ACCEPTS files, and keeps a second one that reads them.
+		//
+		// Two ids, not one. The public id addresses the upload page; the drop's
+		// own id addresses the inbox. Deriving one from the other, or using one
+		// id for both, would let anyone holding the public link enumerate the
+		// inbox endpoint — the fragment would still stop them decrypting
+		// anything, but they would learn how many files arrived and how large
+		// they are, which is exactly what the owner is not sharing.
+		//
+		// The server stores no key for any of this. enc_pk is the PUBLIC key and
+		// is itself sealed under a key derived from the public link's fragment,
+		// so the server cannot read even that; upload_verifier is SHA-256 of a
+		// token it can neither invert nor guess; and each submission's kem_ct is
+		// a ciphertext whose only opener is the seed in the private link.
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS drops (
+				id              UUID PRIMARY KEY,
+				public_id       UUID UNIQUE NOT NULL,
+				owner_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				label           TEXT,
+				note            TEXT,
+				drop_version    INTEGER NOT NULL DEFAULT 1,
+				kem_alg         TEXT NOT NULL,
+				enc_pk          BYTEA NOT NULL,
+				upload_verifier BYTEA NOT NULL,
+				auth_salt       BYTEA,
+				auth_verifier   BYTEA,
+				max_file_bytes  BIGINT,
+				max_total_bytes BIGINT,
+				max_files       INTEGER,
+				max_files_per_submission INTEGER,
+				max_submissions INTEGER,
+				expires_at      TIMESTAMPTZ,
+				closed_at       TIMESTAMPTZ,
+				archived_at     TIMESTAMPTZ,
+				created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+			`CREATE INDEX IF NOT EXISTS drops_owner_idx ON drops (owner_id, created_at DESC)`,
+			`CREATE INDEX IF NOT EXISTS drops_expires_at_idx ON drops (expires_at) WHERE expires_at IS NOT NULL`,
+
+			// A submission is a batch: same members, same wrapped keys, same
+			// sealed roster, same download page. All it adds is the
+			// encapsulation its key schedule descends from, and the sender's
+			// sealed note.
+			`ALTER TABLE batches ADD COLUMN IF NOT EXISTS drop_id UUID REFERENCES drops(id) ON DELETE CASCADE`,
+			`ALTER TABLE batches ADD COLUMN IF NOT EXISTS kem_ct BYTEA`,
+			`ALTER TABLE batches ADD COLUMN IF NOT EXISTS enc_note BYTEA`,
+			`CREATE INDEX IF NOT EXISTS batches_drop_id_idx ON batches (drop_id) WHERE drop_id IS NOT NULL`,
+
+			// Reservations have to carry the drop and the submission they are
+			// for, because a drop's limits are counted in FILES as well as in
+			// bytes. Two uploaders racing for the last slot of a one-file drop
+			// would otherwise both see a count of zero and both be let in.
+			`ALTER TABLE upload_reservations ADD COLUMN IF NOT EXISTS drop_id UUID REFERENCES drops(id) ON DELETE CASCADE`,
+			`ALTER TABLE upload_reservations ADD COLUMN IF NOT EXISTS batch_id UUID`,
+		},
+	},
 }
 
 // migrateUsernameCaseUnique adds the case-insensitive uniqueness constraint,

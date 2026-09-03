@@ -1,0 +1,106 @@
+{{template "bare_header" .}}
+
+{{/* The public face of a drop. No session, no account, and nothing here can
+     read what anyone has sent — including what this tab sends in a moment.
+     The recipient's public key arrives sealed from /r/{id}/key and is opened
+     with the secret in this page's fragment, which is how a substituted key is
+     caught. */}}
+<div class="dl-card dl-card-wide" id="drop-root" data-public="{{.PublicID}}"
+     data-version="{{.DropVersion}}" data-max-upload="{{.MaxUpload}}"
+     {{if gt .MaxPerSubmission 0}}data-max-files="{{.MaxPerSubmission}}" {{end}}
+     {{if .HasPassword}}data-mode="password" {{else}}data-mode="open" {{end}}
+     {{if .AuthSalt}}data-salt="{{.AuthSalt}}" {{end}}
+     {{if .Unlocked}}data-unlocked="1" {{end}}
+     {{if .Open}}data-open="1" {{end}}>
+
+  <p class="dl-kicker">{{T .Lang "drop.heading"}} · <span class="e2e-badge">{{T .Lang "drops.pq_badge"}}</span></p>
+
+  <div class="dl-file-head">
+    <span class="ficon ficon-archive" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="M7 16l5 5 5-5"/><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2"/></svg>
+    </span>
+    <div class="dl-file-title">
+      <h1>{{if .Label}}{{.Label}}{{else}}{{T .Lang "drop.heading"}}{{end}}</h1>
+      <span class="muted">{{T .Lang "drop.sub"}}</span>
+    </div>
+  </div>
+
+  <noscript><p class="alert">{{T .Lang "dl.js_required"}}</p></noscript>
+  <p class="alert" id="key-missing" hidden>{{T .Lang "dl.key_missing"}}</p>
+  <p class="alert" id="drop-error" hidden></p>
+
+  {{if .Note}}
+  <div class="drop-note">
+    <span class="drop-note-label">{{T .Lang "drop.note_from"}}</span>
+    <p>{{.Note}}</p>
+  </div>
+  {{end}}
+
+  {{if not .Open}}
+  <p class="alert alert-warn">{{if .Closed}}{{T .Lang "drop.complete"}}{{else}}{{T .Lang "drop.closed"}}{{end}}</p>
+  {{else}}
+
+  {{if .HasPassword}}
+  <div id="drop-lock"{{if .Unlocked}} hidden{{end}}>
+    <p class="dl-sub">{{T .Lang "drop.pw_hint"}}</p>
+    <div class="auth-form">
+      <label>
+        <span>{{T .Lang "dl.password"}}</span>
+        <input id="drop-password" type="password" autocomplete="off" autofocus>
+      </label>
+      <button type="button" id="drop-unlock" class="btn btn-primary btn-block">{{T .Lang "dl.unlock"}}</button>
+    </div>
+  </div>
+  {{end}}
+
+  <div id="drop-main"{{if and .HasPassword (not .Unlocked)}} hidden{{end}}>
+    <dl class="dl-details">
+      {{if gt .MaxPerSubmission 0}}
+      <dt>{{T .Lang "drops.max_per_sub"}}</dt>
+      <dd>{{if eq .MaxPerSubmission 1}}{{T .Lang "drop.one_file"}}{{else}}{{T .Lang "drop.n_files" .MaxPerSubmission}}{{end}}</dd>
+      {{end}}
+      {{if gt .MaxFiles 0}}
+      <dt>{{T .Lang "drops.max_files"}}</dt>
+      <dd>{{.MaxFiles}} · {{T .Lang "drop.files_left" .FilesLeft}}</dd>
+      {{end}}
+      <dt>{{T .Lang "drops.max_file_size"}}</dt>
+      <dd>{{humanSize .MaxUpload}}</dd>
+      {{if .ExpiresAt}}
+      <dt>{{T .Lang "drop.expires"}}</dt>
+      <dd><time data-ts="{{rfc3339 .ExpiresAt}}">{{formatTime .ExpiresAt}}</time>
+          <span class="chip chip-expiry">{{T .Lang "files.expires_in" (until .Lang .ExpiresAt)}}</span></dd>
+      {{end}}
+    </dl>
+
+    <fieldset class="options">
+      <legend>{{T .Lang "drop.about_you"}}</legend>
+      <label class="opt">
+        <span>{{T .Lang "drop.sender"}}</span>
+        <input id="drop-from" type="text" maxlength="200" placeholder="{{T .Lang "drop.sender_ph"}}" autocomplete="off">
+      </label>
+      <label class="opt opt-wide">
+        <span>{{T .Lang "drop.message"}}</span>
+        <textarea id="drop-message" rows="2" maxlength="1000" placeholder="{{T .Lang "drop.message_ph"}}"></textarea>
+      </label>
+    </fieldset>
+    <p class="step-hint">{{T .Lang "drop.message_hint"}}</p>
+
+    <div class="dropzone" id="drop-zone" tabindex="0" role="button" aria-label="{{T .Lang "upload.drop"}}">
+      <svg class="dz-icon" viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <p class="dz-text">{{T .Lang "upload.drop"}} <label class="dz-browse" for="drop-input">{{T .Lang "upload.browse"}}</label></p>
+      <p class="dz-hint">{{T .Lang "drop.max_file" (humanSize .MaxUpload)}}</p>
+      <input type="file" id="drop-input" {{if ne .MaxPerSubmission 1}}multiple{{end}} hidden>
+    </div>
+
+    <ul class="queue" id="drop-queue"></ul>
+
+    <p class="share-note">{{T .Lang "drop.no_read_back"}}</p>
+
+    <div class="drop-done" id="drop-done" hidden>
+      <p class="alert alert-ok">{{T .Lang "drop.sent_hint"}}</p>
+    </div>
+  </div>
+  {{end}}
+</div>
+
+{{template "bare_footer_kem" .}}
