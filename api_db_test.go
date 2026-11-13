@@ -547,3 +547,25 @@ func TestShareCLI(t *testing.T) {
 		t.Fatal("the CLI's share has no expiry")
 	}
 }
+
+// TestRedirectRegistered pins RFC 8252 §7.3: a loopback redirect may come back
+// on another port than the one registered, and nothing else may differ.
+func TestRedirectRegistered(t *testing.T) {
+	reg := []string{"http://localhost:53438/callback", "https://claude.ai/api/mcp/auth_callback"}
+	for uri, want := range map[string]bool{
+		"http://localhost:53438/callback":              true,
+		"http://localhost:61000/callback":              true,
+		"http://localhost/callback":                    true,
+		"https://claude.ai/api/mcp/auth_callback":      true,
+		"http://localhost:61000/other":                 false,
+		"http://127.0.0.1:61000/callback":              false,
+		"https://localhost:61000/callback":             false,
+		"http://evil.example:53438/callback":           false,
+		"https://claude.ai:8443/api/mcp/auth_callback": false,
+		"http://localhost:61000/callback?x=1":          false,
+	} {
+		if got := redirectRegistered(reg, uri); got != want {
+			t.Errorf("%s: got %v, want %v", uri, got, want)
+		}
+	}
+}

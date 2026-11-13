@@ -145,6 +145,37 @@ func validRedirectURI(raw string) bool {
 	return false
 }
 
+// redirectRegistered reports whether a requested redirect_uri is one the
+// client registered. Exact match, with one exception RFC 8252 §7.3 requires:
+// a native app's loopback redirect may use any port, because the app binds a
+// free one each time it signs in. Claude Code does exactly that — it registers
+// http://localhost:53438/callback and comes back on another port. Scheme,
+// host, path and query must still match.
+func redirectRegistered(registered []string, requested string) bool {
+	if slices.Contains(registered, requested) {
+		return true
+	}
+	req, err := url.Parse(requested)
+	if err != nil || req.Scheme != "http" || !isLoopbackHost(req.Hostname()) || req.Fragment != "" {
+		return false
+	}
+	for _, r := range registered {
+		reg, err := url.Parse(r)
+		if err != nil || reg.Scheme != "http" || !isLoopbackHost(reg.Hostname()) {
+			continue
+		}
+		if reg.Hostname() == req.Hostname() && reg.EscapedPath() == req.EscapedPath() &&
+			reg.RawQuery == req.RawQuery {
+			return true
+		}
+	}
+	return false
+}
+
+func isLoopbackHost(h string) bool {
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
 // --- registration ---------------------------------------------------------
 
 type oauthClient struct {
@@ -294,7 +325,9 @@ func (a *App) checkAuthorize(r *http.Request, q url.Values) (authzRequest, *auth
 	if ar.RedirectURI == "" && len(c.RedirectURIs) == 1 {
 		ar.RedirectURI = c.RedirectURIs[0]
 	}
-	if !slices.Contains(c.RedirectURIs, ar.RedirectURI) {
+	if !redirectRegistered(c.RedirectURIs, ar.RedirectURI) {
+		log.Printf("oauth authorize: %s asked for redirect_uri %q, registered %q",
+			c.ID, ar.RedirectURI, c.RedirectURIs)
 		return ar, &authzError{false, "invalid_request", a.tr(r, "oauth.err_redirect")}
 	}
 	ar.State = q.Get("state")
