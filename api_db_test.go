@@ -569,3 +569,18 @@ func TestRedirectRegistered(t *testing.T) {
 		}
 	}
 }
+
+// TestUnwrapParams: a link copied out of a wrapped terminal line still works,
+// and the client's state is returned untouched.
+func TestUnwrapParams(t *testing.T) {
+	q := unwrapParams(url.Values{
+		"redirect_uri":   {"http:  //localhost:53438/call back"},
+		"client_id":      {"pxc_ab cd"},
+		"code_challenge": {"abc\n def"},
+		"state":          {"a b"},
+	})
+	if q.Get("redirect_uri") != "http://localhost:53438/callback" || q.Get("client_id") != "pxc_abcd" ||
+		q.Get("code_challenge") != "abcdef" || q.Get("state") != "a b" {
+		t.Fatalf("unwrapped: %v", q)
+	}
+}

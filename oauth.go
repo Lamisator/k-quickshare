@@ -314,8 +314,29 @@ type authzError struct {
 	desc     string
 }
 
+// unwrapParams removes whitespace from the authorize parameters that can never
+// legitimately contain any: ids, base64url values and URLs. An authorization
+// link is long, and copied out of a terminal it arrives with spaces wherever
+// the line wrapped ("http:  //localhost…"), which would otherwise fail as an
+// unregistered return address. `state` is left alone: it is the client's own
+// opaque value and must come back exactly as sent.
+func unwrapParams(q url.Values) url.Values {
+	out := url.Values{}
+	for k, v := range q {
+		out[k] = append([]string(nil), v...)
+	}
+	for _, k := range []string{"client_id", "redirect_uri", "code_challenge", "code_challenge_method",
+		"response_type", "resource", "scope"} {
+		if v := out.Get(k); v != "" {
+			out.Set(k, strings.Join(strings.Fields(v), ""))
+		}
+	}
+	return out
+}
+
 func (a *App) checkAuthorize(r *http.Request, q url.Values) (authzRequest, *authzError) {
 	var ar authzRequest
+	q = unwrapParams(q)
 	c, err := a.loadOAuthClient(r.Context(), q.Get("client_id"))
 	if err != nil {
 		return ar, &authzError{false, "invalid_client", a.tr(r, "oauth.err_client")}
