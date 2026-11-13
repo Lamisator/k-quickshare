@@ -619,6 +619,76 @@ var translations = map[string]map[string]string{
 	"js.inbox_unverified_sender": {"en": "Sender details are what the sender typed. Nothing verifies them.", "de": "Absenderangaben sind das, was der Absender eingetippt hat. Nichts überprüft sie."},
 	"js.inbox_download_all":      {"en": "Download everything", "de": "Alles herunterladen"},
 
+	// --- server-sealed shares (agent API) ---
+	"sealed.badge": {"en": "Encrypted by the server", "de": "Vom Server verschlüsselt"},
+	"sealed.lead": {
+		"en": "This share is not end-to-end encrypted. A program sent the files to Pyxis unencrypted, and the server encrypted them.",
+		"de": "Diese Freigabe ist nicht Ende-zu-Ende-verschlüsselt. Ein Programm hat die Dateien unverschlüsselt an Pyxis geschickt, und der Server hat sie verschlüsselt."},
+	"sealed.more": {"en": "What does that mean?", "de": "Was bedeutet das?"},
+	"sealed.how": {
+		"en": "Files shared from the browser are encrypted on the sender's device before they leave it, so the server never sees their content. These came from a program, often an AI assistant, through the Pyxis API. It sent the content over HTTPS, unencrypted, and the server encrypted it.",
+		"de": "Im Browser geteilte Dateien werden auf dem Gerät des Absenders verschlüsselt, bevor sie es verlassen, sodass der Server ihren Inhalt nie sieht. Diese hier kamen von einem Programm, oft einem KI-Assistenten, über die Pyxis-API. Es hat den Inhalt per HTTPS unverschlüsselt geschickt, und der Server hat ihn verschlüsselt."},
+	"sealed.after": {
+		"en": "The server held the content and the key in memory only while it encrypted them. It wrote only ciphertext to disk and put the key into this link without keeping a copy. From then on, the stored files are as unreadable to the server as any other share.",
+		"de": "Der Server hatte Inhalt und Schlüssel nur so lange im Arbeitsspeicher, wie er zum Verschlüsseln brauchte. Auf die Platte kam nur Chiffretext, und den Schlüssel hat er in diesen Link geschrieben, ohne eine Kopie zu behalten. Danach kann der Server die gespeicherten Dateien so wenig lesen wie bei jeder anderen Freigabe."},
+	"sealed.trust": {
+		"en": "The difference is what you have to trust: that the server was running unmodified Pyxis at the moment of upload, and that whoever operates it did not record the content then. An end-to-end share does not ask for that trust.",
+		"de": "Der Unterschied ist, was man glauben muss: dass auf dem Server im Moment des Hochladens unverändertes Pyxis lief und dass der Betreiber den Inhalt nicht mitgeschnitten hat. Eine Ende-zu-Ende-Freigabe verlangt dieses Vertrauen nicht."},
+	"sealed.sender": {
+		"en": "The program that sent the files has seen them, and so may the service it runs on.",
+		"de": "Das Programm, das die Dateien geschickt hat, kennt sie, und womöglich auch der Dienst, auf dem es läuft."},
+	"sealed.same": {
+		"en": "Nothing changes for you: your browser decrypts the files with the key in this link, and the file list is checked against the sealed roster as for every share.",
+		"de": "Für dich ändert sich nichts: Dein Browser entschlüsselt die Dateien mit dem Schlüssel in diesem Link, und die Dateiliste wird wie bei jeder Freigabe gegen die versiegelte Liste geprüft."},
+
+	// --- API tokens and connected apps (account page) ---
+	"tokens.heading": {"en": "API tokens", "de": "API-Tokens"},
+	"tokens.sub": {
+		"en": "Let programs share files as you: AI agents over MCP, scripts over the REST API, or `pyxis share` from a terminal. Links made this way expire after one day unless the program asks for longer.",
+		"de": "Programme können damit in deinem Namen Dateien teilen: KI-Agenten über MCP, Skripte über die REST-API oder `pyxis share` im Terminal. So erstellte Links laufen nach einem Tag ab, wenn das Programm nicht mehr verlangt."},
+	"tokens.mcp":        {"en": "MCP server:", "de": "MCP-Server:"},
+	"tokens.rest":       {"en": "REST API:", "de": "REST-API:"},
+	"tokens.name":       {"en": "Name", "de": "Name"},
+	"tokens.name_ph":    {"en": "e.g. Claude Code on my laptop", "de": "z. B. Claude Code auf meinem Laptop"},
+	"tokens.lifetime":   {"en": "Valid for", "de": "Gültig für"},
+	"tokens.days":       {"en": "%d days", "de": "%d Tage"},
+	"tokens.no_expiry":  {"en": "no expiry", "de": "unbegrenzt"},
+	"tokens.create":     {"en": "Create token", "de": "Token erstellen"},
+	"tokens.created":    {"en": "Token “%s” created. Copy it now; it is not shown again.", "de": "Token „%s“ erstellt. Jetzt kopieren, es wird nicht noch einmal angezeigt."},
+	"tokens.copy":       {"en": "Copy", "de": "Kopieren"},
+	"tokens.created_at": {"en": "created", "de": "erstellt"},
+	"tokens.used_at":    {"en": "last used", "de": "zuletzt benutzt"},
+	"tokens.never_used": {"en": "never used", "de": "nie benutzt"},
+	"tokens.expires":    {"en": "expires", "de": "läuft ab"},
+	"tokens.expired":    {"en": "expired", "de": "abgelaufen"},
+	"tokens.revoke":     {"en": "Revoke", "de": "Widerrufen"},
+	"tokens.err_name":   {"en": "Give the token a name of up to 80 characters.", "de": "Gib dem Token einen Namen mit höchstens 80 Zeichen."},
+	"apps.heading":      {"en": "Connected apps", "de": "Verbundene Apps"},
+	"apps.none": {
+		"en": "No apps connected. An MCP client such as claude.ai or ChatGPT connects to the MCP server above and asks you to approve it here.",
+		"de": "Keine Apps verbunden. Ein MCP-Client wie claude.ai oder ChatGPT verbindet sich mit dem MCP-Server oben und bittet dich hier um Zustimmung."},
+	"apps.connected":  {"en": "connected", "de": "verbunden"},
+	"apps.disconnect": {"en": "Disconnect", "de": "Trennen"},
+
+	// --- OAuth consent ---
+	"oauth.title":      {"en": "Connect an app", "de": "App verbinden"},
+	"oauth.heading":    {"en": "Connect an app to Pyxis", "de": "App mit Pyxis verbinden"},
+	"oauth.ask":        {"en": "%s wants to share files through Pyxis as you.", "de": "%s möchte in deinem Namen Dateien über Pyxis teilen."},
+	"oauth.app":        {"en": "App", "de": "App"},
+	"oauth.self_named": {"en": "name given by the app itself", "de": "Name von der App selbst angegeben"},
+	"oauth.returns_to": {"en": "Returns to", "de": "Kehrt zurück zu"},
+	"oauth.account":    {"en": "Your account", "de": "Dein Konto"},
+	"oauth.grants": {
+		"en": "It will be able to create share links that count against your storage, list them and revoke them. It cannot see your other files. You can disconnect it at any time on your account page.",
+		"de": "Sie kann Freigabelinks erstellen, die auf deinen Speicher angerechnet werden, sie auflisten und widerrufen. Deine anderen Dateien sieht sie nicht. Du kannst sie jederzeit auf deiner Kontoseite trennen."},
+	"oauth.sealed": {
+		"en": "Files an app shares are encrypted by the server, not end-to-end, and their download page says so.",
+		"de": "Dateien, die eine App teilt, verschlüsselt der Server, nicht Ende-zu-Ende, und ihre Downloadseite sagt das auch."},
+	"oauth.approve":      {"en": "Allow", "de": "Erlauben"},
+	"oauth.deny":         {"en": "Deny", "de": "Ablehnen"},
+	"oauth.err_client":   {"en": "This app is not registered here, or its registration expired. Set up the connection again.", "de": "Diese App ist hier nicht registriert, oder ihre Registrierung ist abgelaufen. Richte die Verbindung neu ein."},
+	"oauth.err_redirect": {"en": "The return address is not registered for this app.", "de": "Die Rücksprungadresse ist für diese App nicht registriert."},
+
 	// --- generic ---
 	"generic.error": {"en": "Something went wrong.", "de": "Etwas ist schiefgelaufen."},
 }

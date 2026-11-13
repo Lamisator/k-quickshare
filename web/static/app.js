@@ -734,7 +734,10 @@
     const btn = e.target.closest('.btn-copy');
     if (!btn) return;
     e.preventDefault();
-    const url = new URL(btn.getAttribute('data-copy'), location.href).toString();
+    // A path is a link on this site and is made absolute; anything else (an
+    // absolute link, an API token) is copied exactly as it stands.
+    const raw = btn.getAttribute('data-copy') || '';
+    const url = raw.charAt(0) === '/' ? new URL(raw, location.href).toString() : raw;
     try {
       await navigator.clipboard.writeText(url);
       btn.classList.add('copied');

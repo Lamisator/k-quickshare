@@ -372,6 +372,11 @@ def env_file(cfg: Config) -> str:
         f"QUOTA_TOTAL_BYTES={cfg.quota_total_gb * GIB}",
         f"DISK_MIN_FREE_BYTES={cfg.disk_min_free_gb * GIB}",
         "",
+        "# --- agent API ---",
+        "# The origin links handed to programs (and the OAuth issuer for MCP",
+        "# connectors) are built from.",
+        f"PUBLIC_URL={cfg.base_url()}",
+        "",
     ]
     if cfg.publishes_port():
         lines += ["# --- published port ---", f"APP_PORT={cfg.port}", ""]
@@ -446,6 +451,8 @@ def compose_file(cfg: Config) -> str:
         "      QUOTA_USER_FILES: ${QUOTA_USER_FILES:-1000}",
         "      QUOTA_TOTAL_BYTES: ${QUOTA_TOTAL_BYTES:-0}",
         "      DISK_MIN_FREE_BYTES: ${DISK_MIN_FREE_BYTES:-1073741824}",
+        "      PUBLIC_URL: ${PUBLIC_URL:-}",
+        "      API_SEAL_MAX_BYTES: ${API_SEAL_MAX_BYTES:-104857600}",
         "    volumes:",
         f"      - {data}/files:/data/files",
         "    # /healthz fails while the database schema is not the version this",

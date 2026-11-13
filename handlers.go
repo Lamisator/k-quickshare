@@ -490,6 +490,13 @@ func (a *App) storeUpload(w http.ResponseWriter, r *http.Request, up uploadConte
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if expiresAt == nil && apiTokenIDFromContext(r.Context()) != nil &&
+		r.FormValue("expires_hours") == "" && r.FormValue("expires_at") == "" {
+		// The API's short default (handlers_api.go) holds for a standalone
+		// file too, not only for a batch.
+		t := time.Now().Add(apiDefaultExpiryHours * time.Hour)
+		expiresAt = &t
+	}
 	maxDownloads, err := parseMaxDownloads(r.FormValue("max_downloads"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -834,6 +841,10 @@ func (a *App) storeUpload(w http.ResponseWriter, r *http.Request, up uploadConte
 	shareURL := "/files/" + id.String()
 	if batch != nil {
 		shareURL = "/b/" + batch.ID
+	}
+	if apiTokenIDFromContext(r.Context()) != nil {
+		// A program has nothing to resolve a path against.
+		shareURL = a.publicBaseURL(r) + shareURL
 	}
 	if up.drop != nil {
 		// A sender gets no link. They cannot read what they just sent — the

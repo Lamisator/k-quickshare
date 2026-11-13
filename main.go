@@ -54,6 +54,16 @@ type App struct {
 	loginLimiter       *failLimiter // per (source, username)
 	loginSourceLimiter *failLimiter // per source, across all usernames
 	shareLimiter       *failLimiter // per (source, share)
+	apiLimiter         *failLimiter // per source, failed API token checks
+
+	// publicURL is PUBLIC_URL without a trailing slash, or "" to derive the
+	// origin from each request. The agent API needs it: a share link handed to
+	// a program is useless as a bare path.
+	publicURL string
+	// sealMaxBytes bounds one server-sealed API request. Server-side sealing
+	// holds the plaintext in memory — on purpose, so it never touches the
+	// disk — and this is what keeps that affordable.
+	sealMaxBytes int64
 
 	oidcMu  sync.RWMutex
 	oidc    *OIDC
@@ -78,6 +88,11 @@ type UserQuota struct {
 }
 
 func main() {
+	// `pyxis share FILE…` is the client: it encrypts on this machine and
+	// uploads through the API. Everything else starts the server.
+	if len(os.Args) > 1 && os.Args[1] == "share" {
+		os.Exit(runShareCLI(os.Args[2:]))
+	}
 	dsn := mustEnv("DATABASE_URL")
 	filesDir := envOr("FILES_DIR", "/data/files")
 	listen := envOr("LISTEN_ADDR", ":8080")
@@ -150,6 +165,9 @@ func main() {
 		loginLimiter:       newFailLimiter(failMaxTries, failWindow).shared(pool, "login"),
 		loginSourceLimiter: newFailLimiter(failMaxPerSource, failWindow).shared(pool, "login-src"),
 		shareLimiter:       newFailLimiter(failMaxTries, failWindow).shared(pool, "share"),
+		apiLimiter:         newFailLimiter(failMaxPerSource, failWindow).shared(pool, "api"),
+		publicURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_URL")), "/"),
+		sealMaxBytes:       envInt64("API_SEAL_MAX_BYTES", 100<<20),
 	}
 	app.trustedProxies, err = parseTrustedProxies(os.Getenv("TRUSTED_PROXY_CIDRS"))
 	if err != nil {
@@ -187,78 +205,7 @@ func main() {
 
 	app.startSweeper(ctx, time.Minute)
 
-	mux := http.NewServeMux()
-
-	// public
-	mux.HandleFunc("/healthz", app.handleHealth)
-	mux.HandleFunc("/files/", app.dispatchFileRoutes)
-	mux.HandleFunc("/b/", app.dispatchBatchRoutes)
-	// A drop's two public faces. /r/ accepts files from anyone holding the
-	// public link; /i/ reads them with the key in the private link's fragment.
-	// Neither needs a session: the capability is the link, and the server can
-	// decrypt nothing either of them touches.
-	mux.HandleFunc("/r/", app.dispatchDropUploadRoutes)
-	mux.HandleFunc("/i/", app.dispatchDropInboxRoutes)
-	mux.HandleFunc("/lang", app.handleLang)
-	mux.HandleFunc("/theme", app.handleTheme)
-	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			app.handleLoginPage(w, r)
-		case http.MethodPost:
-			app.handleLoginPost(w, r)
-		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-	mux.HandleFunc("/logout", app.handleLogout)
-	mux.HandleFunc("/auth/oidc/start", app.handleOIDCStart)
-	mux.HandleFunc("/auth/oidc/callback", app.handleOIDCCallback)
-
-	// static assets
-	staticSub, _ := fs.Sub(staticFS, "web/static")
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
-
-	// gated (any user)
-	mux.Handle("/", app.requireUserHandler(app.handleUploadPage))
-	mux.Handle("/history", app.requireUserHandler(app.handleHistory))
-	mux.Handle("/upload", app.requireUserHandler(app.handleUpload))
-	mux.Handle("/usage", app.requireUserHandler(app.handleStorageBars))
-	mux.Handle("/batches", app.requireUserHandler(app.handleCreateBatch))
-	mux.Handle("/drops", app.requireUserHandler(app.handleDrops))
-	mux.Handle("/drops/", app.requireUserHandler(app.dispatchDropOwnerRoutes))
-	mux.Handle("/delete/", app.requireUserHandler(app.handleDelete))
-	// Bulk delete from the file list. Registered as its own exact pattern so it
-	// cannot collide with a share id under /delete/.
-	mux.Handle("/delete", app.requireUserHandler(app.handleBulkDelete))
-	mux.Handle("/account", app.requireUserHandler(app.handleAccount))
-	mux.Handle("/account/password", app.requireUserHandler(app.handleAccountPassword))
-
-	// gated (admin)
-	mux.Handle("/admin/files", http.HandlerFunc(app.requireAdmin(app.handleAdminFiles)))
-	mux.Handle("/admin/users", http.HandlerFunc(app.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			app.handleAdminUsers(w, r)
-		case http.MethodPost:
-			app.handleAdminCreateUser(w, r)
-		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-	})))
-	mux.Handle("/admin/users/", http.HandlerFunc(app.requireAdmin(app.dispatchAdminUserAction)))
-	mux.Handle("/admin/settings", http.HandlerFunc(app.requireAdmin(app.handleAdminSettings)))
-	mux.Handle("/admin/settings/oidc", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsOIDC)))
-	mux.Handle("/admin/settings/quota", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsQuota)))
-	mux.Handle("/admin/settings/upload", http.HandlerFunc(app.requireAdmin(app.handleAdminSettingsUpload)))
-
-	mux.Handle("/batches/", app.requireUserHandler(app.dispatchBatchOwnerRoutes))
-
-	var handler http.Handler = mux
-	handler = app.withOptionalUser(handler)
-	handler = sameOriginCheck(handler)
-	handler = app.securityHeaders(handler)
-	handler = logRequests(handler)
+	handler := app.routes()
 
 	// Timeouts are explicit rather than left at Go's defaults of "none".
 	//
@@ -300,6 +247,101 @@ func main() {
 		log.Printf("graceful shutdown: %v", err)
 	}
 	log.Print("stopped")
+}
+
+// routes is the whole HTTP surface, middleware included.
+func (a *App) routes() http.Handler {
+	mux := http.NewServeMux()
+
+	// public
+	mux.HandleFunc("/healthz", a.handleHealth)
+	mux.HandleFunc("/files/", a.dispatchFileRoutes)
+	mux.HandleFunc("/b/", a.dispatchBatchRoutes)
+	// A drop's two public faces. /r/ accepts files from anyone holding the
+	// public link; /i/ reads them with the key in the private link's fragment.
+	// Neither needs a session: the capability is the link, and the server can
+	// decrypt nothing either of them touches.
+	mux.HandleFunc("/r/", a.dispatchDropUploadRoutes)
+	mux.HandleFunc("/i/", a.dispatchDropInboxRoutes)
+	mux.HandleFunc("/lang", a.handleLang)
+	mux.HandleFunc("/theme", a.handleTheme)
+	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			a.handleLoginPage(w, r)
+		case http.MethodPost:
+			a.handleLoginPost(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/logout", a.handleLogout)
+	mux.HandleFunc("/auth/oidc/start", a.handleOIDCStart)
+	mux.HandleFunc("/auth/oidc/callback", a.handleOIDCCallback)
+
+	// static assets
+	staticSub, _ := fs.Sub(staticFS, "web/static")
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+
+	// gated (any user)
+	mux.Handle("/", a.requireUserHandler(a.handleUploadPage))
+	mux.Handle("/history", a.requireUserHandler(a.handleHistory))
+	mux.Handle("/upload", a.requireUserHandler(a.handleUpload))
+	mux.Handle("/usage", a.requireUserHandler(a.handleStorageBars))
+	mux.Handle("/batches", a.requireUserHandler(a.handleCreateBatch))
+	mux.Handle("/drops", a.requireUserHandler(a.handleDrops))
+	mux.Handle("/drops/", a.requireUserHandler(a.dispatchDropOwnerRoutes))
+	mux.Handle("/delete/", a.requireUserHandler(a.handleDelete))
+	// Bulk delete from the file list. Registered as its own exact pattern so it
+	// cannot collide with a share id under /delete/.
+	mux.Handle("/delete", a.requireUserHandler(a.handleBulkDelete))
+	mux.Handle("/account", a.requireUserHandler(a.handleAccount))
+	mux.Handle("/account/password", a.requireUserHandler(a.handleAccountPassword))
+	mux.Handle("/account/tokens", a.requireUserHandler(a.handleAccountTokens))
+	mux.Handle("/account/tokens/", a.requireUserHandler(a.handleAccountTokenRevoke))
+
+	// For programs: bearer tokens only, never a session cookie (api_tokens.go).
+	mux.Handle("/api/v1/", withCORS(a.requireAPIToken(http.HandlerFunc(a.dispatchAPI))))
+	mux.Handle("/mcp", withCORS(a.requireAPIToken(http.HandlerFunc(a.handleMCP))))
+	mux.Handle("/account/apps/", a.requireUserHandler(a.handleAccountAppDisconnect))
+
+	// OAuth 2.1 for MCP connectors (oauth.go). Discovery, registration, token
+	// and revocation are called by the client itself; /oauth/authorize is the
+	// consent page and needs a signed-in person.
+	mux.Handle("/.well-known/oauth-protected-resource", withCORS(http.HandlerFunc(a.handleOAuthProtectedResource)))
+	mux.Handle("/.well-known/oauth-protected-resource/mcp", withCORS(http.HandlerFunc(a.handleOAuthProtectedResource)))
+	mux.Handle("/.well-known/oauth-authorization-server", withCORS(http.HandlerFunc(a.handleOAuthServerMetadata)))
+	mux.Handle("/oauth/register", withCORS(http.HandlerFunc(a.handleOAuthRegister)))
+	mux.Handle("/oauth/token", withCORS(http.HandlerFunc(a.handleOAuthToken)))
+	mux.Handle("/oauth/revoke", withCORS(http.HandlerFunc(a.handleOAuthRevoke)))
+	mux.Handle("/oauth/authorize", a.requireUserHandler(a.handleOAuthAuthorize))
+
+	// gated (admin)
+	mux.Handle("/admin/files", http.HandlerFunc(a.requireAdmin(a.handleAdminFiles)))
+	mux.Handle("/admin/users", http.HandlerFunc(a.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			a.handleAdminUsers(w, r)
+		case http.MethodPost:
+			a.handleAdminCreateUser(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/admin/users/", http.HandlerFunc(a.requireAdmin(a.dispatchAdminUserAction)))
+	mux.Handle("/admin/settings", http.HandlerFunc(a.requireAdmin(a.handleAdminSettings)))
+	mux.Handle("/admin/settings/oidc", http.HandlerFunc(a.requireAdmin(a.handleAdminSettingsOIDC)))
+	mux.Handle("/admin/settings/quota", http.HandlerFunc(a.requireAdmin(a.handleAdminSettingsQuota)))
+	mux.Handle("/admin/settings/upload", http.HandlerFunc(a.requireAdmin(a.handleAdminSettingsUpload)))
+
+	mux.Handle("/batches/", a.requireUserHandler(a.dispatchBatchOwnerRoutes))
+
+	var handler http.Handler = mux
+	handler = a.withOptionalUser(handler)
+	handler = sameOriginCheck(handler)
+	handler = a.securityHeaders(handler)
+	handler = logRequests(handler)
+	return handler
 }
 
 func (a *App) requireUserHandler(h http.HandlerFunc) http.Handler {
@@ -475,7 +517,11 @@ func (a *App) securityHeaders(h http.Handler) http.Handler {
 // and Referer (curl, API clients) pass — they carry no ambient cookies.
 func sameOriginCheck(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		// The API, MCP and the OAuth endpoints clients call directly never act
+		// on a cookie (api_tokens.go), so there is no ambient credential for a
+		// cross-origin request to ride on — and browser-based MCP clients send
+		// one legitimately.
+		if !cookielessPath(r.URL.Path) && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			source := r.Header.Get("Origin")
 			if source == "" {
 				source = r.Header.Get("Referer")
@@ -490,6 +536,10 @@ func sameOriginCheck(h http.Handler) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+func cookielessPath(p string) bool {
+	return strings.HasPrefix(p, "/api/v1/") || p == "/mcp" || isOAuthPublic(p)
 }
 
 func httpError(w http.ResponseWriter, err error, code int) {

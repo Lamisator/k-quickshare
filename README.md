@@ -23,7 +23,7 @@ dependencies beyond the two containers.
 |---|---|
 | **Payload** | AES-256-GCM over 64 KiB chunks, each sealed against the file's manifest as AAD |
 | **Key derivation** | HKDF-SHA256 from a 256-bit link secret, or PBKDF2-SHA256 (600 000 iterations) from a password |
-| **Where keys exist** | The uploader's tab, and any tab holding the link. Never the server, in any form, at any moment |
+| **Where keys exist** | The uploader's tab, and any tab holding the link. Never the server — except, for one request, in a share a program asks the server to seal ([agents](#programs-and-ai-agents)) |
 | **File names and types** | Sealed in a blob of their own, padded to a fixed size, under their own key branch |
 | **Batch integrity** | Each member's key wrapped under the batch key; the member list itself sealed as a roster |
 | **What the server stores** | Ciphertext, a sealed name blob, an opaque wrapped key, and a manifest that describes only geometry |
@@ -42,6 +42,7 @@ The whole scheme is in one file — [`web/static/e2e.js`](web/static/e2e.js), so
 - [Cryptography](#cryptography)
 - [Batch shares](#batch-shares)
 - [Drops: receiving files](#drops-receiving-files)
+- [Programs and AI agents](#programs-and-ai-agents)
 - [Running it](#running-it)
 - [Configuration](#configuration)
 - [Routes](#routes)
@@ -121,6 +122,14 @@ The whole scheme is in one file — [`web/static/e2e.js`](web/static/e2e.js), so
 **The server holds no key for any file, in any mode, at any moment.** There is
 exactly one encryption scheme, it runs entirely in the browser, and everything
 below follows from that single constraint.
+
+The one deliberate exception is a share a *program* asks the server to make
+from plaintext, through the agent API — an MCP tool call has no way to encrypt
+anything itself. The server then runs the same scheme on the sender's behalf,
+holds the key for the length of that one request, and forgets it; the share is
+marked, and its download page says it was not end-to-end encrypted. Nothing
+else changes, and nothing below is weakened for any other share.
+[Programs and AI agents](#programs-and-ai-agents) has the details.
 
 ### The trust boundary
 
@@ -687,6 +696,12 @@ whoever can reach them — and it is where this design does real work. The secon
 is the honest boundary of browser-delivered end-to-end encryption, and no scheme
 shipped this way can move it.
 
+A **server-sealed** share (made through `POST /api/v1/shares` or MCP) sits
+between the two blocks: once stored, it is in the first — ciphertext, no key —
+but at the moment of upload the server saw the plaintext and the key, so a
+hostile or compromised server *at that moment* could have kept both. The
+recipient is told so on the download page.
+
 ## Batch shares
 
 Every file uploaded during one visit lands under a single link, `/b/{id}#{secret}`.
@@ -929,6 +944,143 @@ limit shared across replicas through `auth_failures`, and an optional password
 for a link that is going somewhere public — the same PBKDF2 auth branch a
 password share uses, gating the upload rather than the ciphertext.
 
+## Programs and AI agents
+
+Other applications — AI agents above all — share files through an **API token**
+and get back the **full link**, origin and key fragment included, ready to hand
+to a person. Links made this way **expire after one day** unless the request
+asks for something else (`expires_hours`, `expires_at`; `0` means never).
+
+Tokens are made on the account page (*API tokens*), shown once, and stored as
+SHA-256 only, like sessions. They authenticate `/api/v1` and `/mcp` and nothing
+else; those two in turn ignore the session cookie entirely, so a page in a
+browser cannot use the API with someone's login. Failed token checks count
+against the source address.
+
+### Two ways in: who holds the key
+
+| | Server-sealed | End-to-end |
+|---|---|---|
+| **Endpoint** | `POST /api/v1/shares`, MCP | `POST /api/v1/batches` → `/upload` → `/batches/{id}/roster` |
+| **Sends** | plaintext, over HTTPS | ciphertext, exactly as a browser does |
+| **Who encrypts** | the Pyxis server, in memory | the client (`pyxis share`, or your own code) |
+| **Server sees** | the content and the key, for one request | what it sees of any browser upload |
+| **Size** | `API_SEAL_MAX_BYTES` per request (100 MiB) | the account's per-file limit, streamed |
+| **Download page** | "Encrypted by the server", with an explanation | the usual end-to-end badge |
+
+**Server-sealed** is for anything that can make an HTTP request but cannot run
+the container format — and it is the only option an MCP client has. The server
+runs the browser's scheme on the sender's behalf (`seal.go`, byte-compatible
+with `e2e.js` and tested against it): a fresh 32-byte secret, a random key per
+file wrapped under the batch key, a v5 manifest, a padded sealed name, a sealed
+roster. The plaintext is read into memory — `ParseMultipartForm` is avoided on
+purpose, because it spills large parts to temporary files — encrypted, written
+as ciphertext, and wiped; the secret goes into the returned link and is wiped
+too. The batch row is marked `server_sealed`, which is the only difference the
+recipient's browser ever sees.
+
+That is a real difference, and the download page says so instead of showing the
+end-to-end badge. Its note, with an explanation behind *What does that mean?*,
+states that the server saw the content and the key at upload and kept neither,
+that this asks the reader to trust the server at that moment, and that the
+program which sent the files (and its host) has seen them too.
+
+**End-to-end** is the browser's own protocol over a token. `pyxis share` — the
+server binary, run as a client — implements it:
+
+```bash
+export PYXIS_URL=https://pyxis.example.org PYXIS_TOKEN=pyx_…
+pyxis share report.pdf photos/*.jpg            # prints the link
+pyxis share -expires 72h -max-downloads 3 -json build.tar.gz
+```
+
+It encrypts while it uploads, so files of any size within the account's limit
+stream through in constant memory, and the share is indistinguishable from one
+made in a browser. An agent with a shell should prefer it.
+
+### REST
+
+```bash
+# a file (multipart) — or several: repeat -F file=@…
+curl -H "Authorization: Bearer $PYXIS_TOKEN" -F file=@report.pdf -F expires_hours=24 \
+     https://pyxis.example.org/api/v1/shares
+
+# JSON: text or base64, several files under one link
+curl -H "Authorization: Bearer $PYXIS_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"files":[{"name":"notes.md","text":"# hi"}],"max_downloads":1}' \
+     https://pyxis.example.org/api/v1/shares
+
+# a raw body; options in the query string
+curl -H "Authorization: Bearer $PYXIS_TOKEN" -H 'Content-Type: text/csv' --data-binary @data.csv \
+     'https://pyxis.example.org/api/v1/shares?name=data.csv'
+```
+
+```json
+{"id":"…","url":"https://pyxis.example.org/b/…#Kq…","expiresAt":"…","maxDownloads":null,
+ "files":[{"id":"…","name":"report.pdf","size":197842,"type":"application/pdf"}],
+ "serverSealed":true,"notice":"The url is the only copy of the decryption key …"}
+```
+
+`GET /api/v1/shares` lists the shares made through the API (links without
+fragments — the server does not have them), `DELETE /api/v1/shares/{id}` revokes
+one at once, and `GET /api/v1` describes the endpoints and the caller's limits.
+Errors are `{"error": "…"}` with a meaningful status: 401 token, 413 too large,
+507 quota.
+
+### MCP
+
+`/mcp` speaks the Model Context Protocol over Streamable HTTP (JSON responses,
+no SSE stream; protocol versions 2025-06-18, 2025-03-26 and 2024-11-05). Tools:
+
+| Tool | Does |
+|---|---|
+| `share_files` | One or more files (`name` + `text` or `content_base64`) under one link |
+| `share_text` | A piece of text as a file — the common case for an agent |
+| `list_shares` | The account's API shares and whether they are still active |
+| `delete_share` | Revoke a share now |
+
+Every share tool returns the full link in its text and in `structuredContent`,
+and the server's `instructions` and tool descriptions tell the model to pass the
+link on **verbatim**: the fragment is the key, and nothing else holds a copy.
+
+A client that takes a header (Claude Code, for instance) uses a token directly:
+
+```bash
+claude mcp add --transport http pyxis https://pyxis.example.org/mcp \
+  --header "Authorization: Bearer $PYXIS_TOKEN"
+```
+
+Clients that will not take a pasted token — **claude.ai and ChatGPT
+connectors** — use **OAuth 2.1**, for which Pyxis is its own authorization
+server, following the MCP authorization spec: protected resource metadata
+(RFC 9728) advertised in the 401 from `/mcp`, authorization server metadata
+(RFC 8414), dynamic client registration (RFC 7591), the authorization code
+flow with mandatory PKCE S256 and the `iss` response parameter, rotating
+refresh tokens, and revocation (RFC 7009). Adding the connector only needs the
+URL `https://pyxis.example.org/mcp`.
+
+- The person approves on `/oauth/authorize` while signed in — password or SSO,
+  whatever the instance uses. The page names the app as *self-named* and shows
+  the host the answer goes back to; its CSP widens `form-action` to exactly that
+  origin, so the redirect is not blocked.
+- An approval yields a one-hour access token, which is an ordinary API token of
+  that person's (so the API treats it identically), and a 90-day refresh token
+  that is replaced on every use. Codes live 10 minutes and are single-use, even
+  when the exchange fails. Every secret is stored as SHA-256.
+- Registration is open, as RFC 7591 intends, but bounded: at most 100 clients,
+  and one that never completes a grant is dropped after an hour. Registering
+  gets a client nothing until a signed-in person approves it.
+- *Connected apps* on the account page lists what has been approved; disconnect
+  removes every token of that app for that person.
+- Discovery, registration, token and revocation answer CORS for browser-based
+  MCP clients. They and the API never act on a cookie, so they are exempt from
+  the same-origin check that guards the web forms.
+
+**Behind a reverse proxy, set `PUBLIC_URL`.** The links handed to programs, the
+OAuth issuer and every discovery URL are built from it. Without it the origin is
+derived from the request's `Host` and `COOKIE_SECURE`, which is right behind a
+proxy that forwards `Host` unchanged and wrong behind one that does not.
+
 ## Running it
 
 ### Guided installer
@@ -1042,6 +1194,8 @@ Every setting is an environment variable. Only `DATABASE_URL` and
 | `QUOTA_USER_FILES` | `1000` | *Initial* default active files per user. |
 | `QUOTA_TOTAL_BYTES` | `0` | Instance-wide ceiling. `0` = unlimited. |
 | `DISK_MIN_FREE_BYTES` | `1073741824` | Refuse uploads below this free space. |
+| `PUBLIC_URL` | — | The instance's origin, e.g. `https://pyxis.example.org`. Builds the links the API returns and the OAuth issuer. Recommended behind a proxy. |
+| `API_SEAL_MAX_BYTES` | `104857600` | Most a server-sealed API or MCP request may carry (100 MiB). It is held in memory while it is encrypted. |
 
 `TRUSTED_PROXY_CIDRS` matters in **both** directions, which is why it has no
 safe default:
@@ -1089,6 +1243,18 @@ in force.
 | `GET /i/{dropID}/manifest` | Every delivery, with its encapsulation and wrapped keys (JSON) |
 | `GET /i/{dropID}/f/{fileID}/raw` | One received file's ciphertext; counts nothing |
 | `GET /healthz` | Health check |
+| `GET /.well-known/oauth-protected-resource` · `/.well-known/oauth-authorization-server` | OAuth discovery for MCP clients |
+| `POST /oauth/register` · `/oauth/token` · `/oauth/revoke` | OAuth client registration, code and refresh exchange, revocation |
+
+**API token** (`Authorization: Bearer pyx_…`; a session cookie is ignored)
+
+| Route | Purpose |
+|---|---|
+| `GET /api/v1` | Endpoints and the caller's limits |
+| `POST /api/v1/shares` | Server-sealed share from plaintext: multipart, JSON or a raw body |
+| `GET /api/v1/shares` · `DELETE /api/v1/shares/{id}` | The API's shares; revoke one |
+| `POST /api/v1/batches` · `/api/v1/upload` · `/api/v1/batches/{id}/roster` | End-to-end: the browser's protocol, as `pyxis share` uses it |
+| `POST /mcp` | Model Context Protocol (Streamable HTTP) |
 
 **Authenticated**
 
@@ -1104,6 +1270,9 @@ in force.
 | `POST /delete/{id}` | Delete a file |
 | `POST /delete` | Delete the files named by repeated `id` fields (the list's multi-select) |
 | `GET /account`, `POST /account/password` | Self-service account |
+| `POST /account/tokens` · `/account/tokens/{id}/revoke` | Create and revoke API tokens |
+| `POST /account/apps/{clientID}/disconnect` | Disconnect an OAuth-connected app |
+| `GET`/`POST /oauth/authorize` | OAuth consent page, and the decision |
 | `/admin/users`, `/admin/settings` | Admin only |
 | `POST /admin/settings/upload` | Instance-wide per-file upload limit. Admin only |
 | `POST /admin/users/{id}/quota` | One user's storage allowance and upload limit. Admin only |
@@ -1123,14 +1292,15 @@ the quota arithmetic, `humanSize`, the warning thresholds and the admin-only
 rule stay where they already are, and the refreshed bars are byte for byte what
 a reload would have drawn.
 
-There is no API for uploading plaintext. A client must encrypt in the browser
+The web routes take ciphertext only: a client must encrypt in the browser
 container format and POST the ciphertext with `e2e=1`, `e2e_version=5`, a
 `manifest` that names neither the file nor its type, and a padded sealed
 `enc_name`. Anything else is rejected, earlier container versions included: they
 still *read*, for as long as their shares live, but accepting one more of them
 as a write would mean one more file the server can describe.
-`web/static/e2e.js` is the reference implementation, and `chunkformat_test.go`
-mirrors it in Go.
+`web/static/e2e.js` is the reference implementation, `seal.go` writes the same
+format in Go, and `chunkformat_test.go` reads it. The one plaintext path is the
+agent API's `POST /api/v1/shares` (and MCP), described above.
 
 ---
 
@@ -1197,7 +1367,7 @@ compose files, and a secret scan. `govulncheck` also runs weekly, because
 advisories land without anyone pushing.
 
 - `chunkformat_test.go` — a Go reference implementation of the container
-  format, both versions. Nothing in the shipped binary encrypts or decrypts a
+  format, both versions. Nothing in the shipped binary decrypts a
   file, so this lives in test scope purely as an oracle.
 - `crypto_test.go` — the container round-trip including seekable reads, plus
   password hashing (Argon2id, and that a bcrypt hash is now rejected outright),
@@ -1227,6 +1397,13 @@ advisories land without anyone pushing.
   or `crypto/ed25519` is ever imported outside test scope.
 - `drops_db_test.go` — needs `TEST_DATABASE_URL`. A drop's limits, including
   two senders racing for the last slot of a one-file drop.
+- `api_db_test.go` — needs `TEST_DATABASE_URL`. The agent API end to end
+  through the real handler chain: token and cookie handling, server-sealed
+  shares in all three body formats with their one-day default, MCP, the whole
+  OAuth flow (PKCE, single-use codes, refresh rotation, disconnect) and
+  `pyxis share`. Every share is opened again from nothing but its link — keys
+  from the fragment, roster, sealed names, unwrapped keys, every chunk — so a
+  format slip fails as a decryption, not as a passing test.
 - `templates_test.go` — renders every template in both languages, checks
   translation completeness, verifies `e2e.js` is actually loaded (a missing script
   tag once broke every upload while all other tests passed), and that no
@@ -1288,6 +1465,11 @@ Two migrations do more than add columns, and are worth knowing about:
 - **4 (`username_case_insensitive_unique`)** fails, with the offending names in
   the message, if usernames that differ only in case already exist. Rename them
   by hand and start the container again.
+
+Migration 11 (`api_tokens_oauth_and_server_sealed_shares`) only adds: the
+`api_tokens` and OAuth tables, and `batches.server_sealed` /
+`batches.api_token_id`. Every existing batch is `server_sealed = false`, which
+is true of all of them.
 
 **Backups.** Back up `data/postgres` and `data/files`. Neither contains
 anything the server can decrypt, so a backup leaks no file contents — but it is
@@ -1417,9 +1599,15 @@ download rather than bounding idleness.
   the rest of the batch intact.
 - **Batch members have no standalone page**, so they get no per-file preview URL —
   previews happen inside the batch page after client-side decryption.
-- **No plaintext upload path at all.** Scripted clients must implement the
-  browser container format; there is no server-side encryption to fall back on.
-  This is deliberate, but it makes `curl` uploads considerably more work.
+- **A server-sealed share trusts the server at upload.** `POST /api/v1/shares`
+  and MCP hand the server plaintext; it encrypts and forgets, and the page says
+  so, but a compromised server at that moment could have kept both. Use
+  `pyxis share`, or the end-to-end API, where that matters.
+- **Server-sealed uploads are held in memory**, up to `API_SEAL_MAX_BYTES` per
+  request. Larger files go through `pyxis share`, which streams.
+- **The API cannot hand back a link it already gave out.** The key is in the
+  fragment, so `GET /api/v1/shares` lists links without one; a program that
+  loses the link has lost the share, as a person would.
 - **A file that never comes down from iCloud cannot be uploaded.** The retries
   above cover a slow or flaky fetch, not a device that will not produce the
   bytes at all. The only fix is on the device: open the file once so it is

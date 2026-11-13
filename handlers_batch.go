@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -47,6 +48,10 @@ type batchMeta struct {
 	DropID  *string
 	KemCT   []byte
 	EncNote []byte
+
+	// The server, not the sender's browser, encrypted this batch: it arrived
+	// as plaintext through the agent API. The download page says so.
+	ServerSealed bool
 }
 
 // isSubmission reports whether this batch belongs to a drop. A submission is
@@ -120,23 +125,52 @@ func (a *App) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		authVerifier = sum[:]
 	}
 
-	id := uuid.New()
-	_, err = a.db.Exec(r.Context(),
-		`INSERT INTO batches (id, created_by, expires_at, max_downloads,
-		                      key_mode, auth_salt, auth_verifier, e2e_version)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		id.String(), user.ID.String(), expiresAt, maxDownloads,
-		keyMode, authSalt, authVerifier, e2eCurrentVersion)
+	id, err := a.insertBatch(r.Context(), newBatch{
+		owner: user, tokenID: apiTokenIDFromContext(r.Context()),
+		expiresAt: expiresAt, maxDownloads: maxDownloads,
+		keyMode: keyMode, authSalt: authSalt, authVerifier: authVerifier,
+	})
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
+	shareURL := "/b/" + id
+	if apiTokenIDFromContext(r.Context()) != nil {
+		// A program has no location bar to resolve a path against. It gets
+		// the whole link, still without the fragment it appends itself.
+		shareURL = a.publicBaseURL(r) + shareURL
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":         id.String(),
-		"url":        "/b/" + id.String(),
+		"id":         id,
+		"url":        shareURL,
 		"expiresAt":  expiresAt,
 		"e2eVersion": e2eCurrentVersion,
 	})
+}
+
+// newBatch is one batch row about to be written.
+type newBatch struct {
+	owner        *User
+	tokenID      *string // the API token that made it, nil from the web
+	expiresAt    *time.Time
+	maxDownloads *int
+	keyMode      int
+	authSalt     []byte
+	authVerifier []byte
+	serverSealed bool // the server encrypted it: see seal.go
+}
+
+func (a *App) insertBatch(ctx context.Context, nb newBatch) (string, error) {
+	id := uuid.NewString()
+	_, err := a.db.Exec(ctx,
+		`INSERT INTO batches (id, created_by, expires_at, max_downloads,
+		                      key_mode, auth_salt, auth_verifier, e2e_version,
+		                      server_sealed, api_token_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		id, nb.owner.ID.String(), nb.expiresAt, nb.maxDownloads,
+		nb.keyMode, nb.authSalt, nb.authVerifier, e2eCurrentVersion,
+		nb.serverSealed, nb.tokenID)
+	return id, err
 }
 
 // dispatchBatchOwnerRoutes handles the authenticated side of a batch:
@@ -253,11 +287,12 @@ func (a *App) loadBatchMeta(r *http.Request, id uuid.UUID) (*batchMeta, error) {
 	err := a.db.QueryRow(r.Context(),
 		`SELECT created_at, created_by, expires_at, max_downloads, download_count,
 		        key_mode, auth_salt, auth_verifier, archived_at,
-		        e2e_version, roster, roster_seq, drop_id::text, kem_ct, enc_note
+		        e2e_version, roster, roster_seq, drop_id::text, kem_ct, enc_note, server_sealed
 		 FROM batches WHERE id = $1`, id.String()).
 		Scan(&bm.CreatedAt, &bm.CreatedBy, &bm.ExpiresAt, &bm.MaxDownloads,
 			&bm.DownloadCount, &bm.KeyMode, &bm.AuthSalt, &bm.AuthVerifier, &bm.ArchivedAt,
-			&bm.E2EVersion, &bm.Roster, &bm.RosterSeq, &bm.DropID, &bm.KemCT, &bm.EncNote)
+			&bm.E2EVersion, &bm.Roster, &bm.RosterSeq, &bm.DropID, &bm.KemCT, &bm.EncNote,
+			&bm.ServerSealed)
 	if err != nil {
 		return nil, err
 	}
@@ -384,6 +419,8 @@ func (a *App) renderBatchLanding(w http.ResponseWriter, r *http.Request, bm *bat
 		"TotalSize":  total,
 		"UploadedAt": bm.CreatedAt,
 		"HasLimit":   false,
+		// Drives the "not end-to-end encrypted" notice in place of the badge.
+		"ServerSealed": bm.ServerSealed,
 	}
 	if len(bm.AuthSalt) > 0 {
 		data["AuthSalt"] = base64.RawURLEncoding.EncodeToString(bm.AuthSalt)

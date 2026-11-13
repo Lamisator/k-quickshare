@@ -37,17 +37,38 @@ func needsPasswordStepUp(u *User) bool {
 }
 
 func (a *App) renderAccount(w http.ResponseWriter, r *http.Request, status int, errMsg, okMsg string) {
+	a.renderAccountWith(w, r, status, map[string]any{"Error": errMsg, "Success": okMsg})
+}
+
+// renderAccountWith renders the account page with extra template data: the
+// password form's messages, or the token section's.
+func (a *App) renderAccountWith(w http.ResponseWriter, r *http.Request, status int, extra map[string]any) {
 	// The quota panel that used to live here is now the shell's quota bar, so
 	// it is on this page too — renderStatus fills in Usage for every page.
 	user := userFromContext(r.Context())
-	a.renderStatus(w, r, status, "account.html", map[string]any{
+	tokens, err := a.listAPITokens(r.Context(), user.ID)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	apps, err := a.listOAuthGrants(r.Context(), user.ID.String())
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	data := map[string]any{
+		"Apps":           apps,
 		"Title":          a.tr(r, "title.account") + " · Pyxis",
 		"Active":         "account",
-		"Error":          errMsg,
-		"Success":        okMsg,
 		"StepUpRequired": user != nil && needsPasswordStepUp(user),
 		"MinPasswordLen": minPasswordLen,
-	})
+		"Tokens":         tokens,
+		"APIBase":        a.publicBaseURL(r),
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	a.renderStatus(w, r, status, "account.html", data)
 }
 
 func (a *App) handleAccountPassword(w http.ResponseWriter, r *http.Request) {

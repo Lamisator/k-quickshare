@@ -17,9 +17,11 @@ import (
 
 // Uploads are encrypted end-to-end in the browser. The server receives, stores
 // and serves ciphertext and holds no key material for any file, so there is no
-// file encryption or decryption in this package at all — only the geometry of
-// the container format (to validate what clients send) and encryption of short
-// settings secrets under the application KEK.
+// file DECRYPTION in this package at all — only the geometry of the container
+// format (to validate what clients send) and encryption of short settings
+// secrets under the application KEK. The one place that encrypts a file is
+// seal.go, for shares a program asks the server to make from plaintext; those
+// are marked server_sealed and say so on their download page.
 //
 // Container format, produced and consumed by web/static/e2e.js: 64 KiB
 // plaintext chunks, each sealed with AES-256-GCM under a 12-byte nonce of

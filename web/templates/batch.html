@@ -6,7 +6,7 @@
      even the file count to someone holding only the link. */}}
 <div class="dl-card dl-card-wide" id="batch-root" data-batch="{{.ID}}" data-mode="{{.E2EMode}}"
      {{if .AuthSalt}}data-salt="{{.AuthSalt}}" {{end}}{{if .Unlocked}}data-unlocked="1" {{end}}{{if .HasLimit}}data-limited="1" {{end}}>
-  <p class="dl-kicker">{{T .Lang "batch.kicker"}} · <span class="e2e-badge">{{T .Lang "dl.e2e"}}</span></p>
+  <p class="dl-kicker">{{T .Lang "batch.kicker"}} · {{if .ServerSealed}}<span class="sealed-badge">{{T .Lang "sealed.badge"}}</span>{{else}}<span class="e2e-badge">{{T .Lang "dl.e2e"}}</span>{{end}}</p>
 
   <div class="dl-file-head">
     <span class="ficon ficon-archive" aria-hidden="true">
@@ -19,6 +19,25 @@
       </span>
     </div>
   </div>
+
+  {{/* A share the SERVER encrypted, because a program handed it plaintext
+       through the API. The same badge as a browser upload would be untrue, so
+       the page says what happened, and explains it to whoever wants to know. */}}
+  {{if .ServerSealed}}
+  <div class="alert alert-warn sealed-note">
+    <p>{{T .Lang "sealed.lead"}}</p>
+    <details class="sealed-details">
+      <summary>{{T .Lang "sealed.more"}}</summary>
+      <ul>
+        <li>{{T .Lang "sealed.how"}}</li>
+        <li>{{T .Lang "sealed.after"}}</li>
+        <li>{{T .Lang "sealed.trust"}}</li>
+        <li>{{T .Lang "sealed.sender"}}</li>
+        <li>{{T .Lang "sealed.same"}}</li>
+      </ul>
+    </details>
+  </div>
+  {{end}}
 
   <noscript><p class="alert">{{T .Lang "dl.js_required"}}</p></noscript>
   <p class="alert" id="key-missing" hidden>{{T .Lang "dl.key_missing"}}</p>

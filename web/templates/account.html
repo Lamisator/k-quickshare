@@ -52,6 +52,84 @@
     </button>
   </form>
   {{end}}
+
+  {{/* Tokens for programs: AI agents, scripts, `pyxis share`. A token
+       authenticates /api/v1 and /mcp only, never the web pages. */}}
+  <h2 class="section-title" id="api-tokens">{{T .Lang "tokens.heading"}}</h2>
+  <p class="dl-sub">{{T .Lang "tokens.sub"}}</p>
+  <p class="api-endpoints">
+    {{T .Lang "tokens.mcp"}} <code>{{.APIBase}}/mcp</code><br>
+    {{T .Lang "tokens.rest"}} <code>{{.APIBase}}/api/v1</code>
+  </p>
+  {{if .TokenError}}<p class="alert">{{.TokenError}}</p>{{end}}
+  {{if .NewToken}}
+  <div class="alert alert-ok">
+    <p>{{T .Lang "tokens.created" .NewTokenName}}</p>
+    <div class="token-new">
+      <input type="text" readonly value="{{.NewToken}}" aria-label="{{T .Lang "tokens.heading"}}">
+      <button type="button" class="btn btn-ghost btn-sm btn-copy" data-copy="{{.NewToken}}">{{T .Lang "tokens.copy"}}</button>
+    </div>
+  </div>
+  {{end}}
+  {{if .Tokens}}
+  <ul class="token-list">
+    {{range .Tokens}}
+    <li>
+      <div>
+        <strong>{{.Name}}</strong> <span class="token-meta">…{{.Hint}}</span><br>
+        <span class="token-meta">
+          {{T $.Lang "tokens.created_at"}} <time data-ts="{{rfc3339 .CreatedAt}}">{{formatTime .CreatedAt}}</time>
+          · {{if .LastUsedAt}}{{T $.Lang "tokens.used_at"}} <time data-ts="{{rfc3339 .LastUsedAt}}">{{formatTime .LastUsedAt}}</time>{{else}}{{T $.Lang "tokens.never_used"}}{{end}}
+          · {{if .Expired}}{{T $.Lang "tokens.expired"}}{{else if .ExpiresAt}}{{T $.Lang "tokens.expires"}} <time data-ts="{{rfc3339 .ExpiresAt}}">{{formatTime .ExpiresAt}}</time>{{else}}{{T $.Lang "tokens.no_expiry"}}{{end}}
+        </span>
+      </div>
+      <form method="post" action="/account/tokens/{{.ID}}/revoke">
+        <button type="submit" class="btn btn-danger btn-sm">{{T $.Lang "tokens.revoke"}}</button>
+      </form>
+    </li>
+    {{end}}
+  </ul>
+  {{end}}
+  <form method="post" action="/account/tokens" class="auth-form" autocomplete="off">
+    <label>
+      <span>{{T .Lang "tokens.name"}}</span>
+      <input name="name" required maxlength="80" placeholder="{{T .Lang "tokens.name_ph"}}">
+    </label>
+    <label>
+      <span>{{T .Lang "tokens.lifetime"}}</span>
+      <select name="expires_days">
+        <option value="30">{{T .Lang "tokens.days" 30}}</option>
+        <option value="90" selected>{{T .Lang "tokens.days" 90}}</option>
+        <option value="365">{{T .Lang "tokens.days" 365}}</option>
+        <option value="0">{{T .Lang "tokens.no_expiry"}}</option>
+      </select>
+    </label>
+    <button type="submit" class="btn btn-primary btn-block">{{T .Lang "tokens.create"}}</button>
+  </form>
+
+  {{/* Apps connected through OAuth (claude.ai, ChatGPT…): their tokens are
+       short-lived and refreshed on their own, so the app is what is listed. */}}
+  <h2 class="section-title" id="connected-apps">{{T .Lang "apps.heading"}}</h2>
+  {{if .Apps}}
+  <ul class="token-list">
+    {{range .Apps}}
+    <li>
+      <div>
+        <strong>{{.ClientName}}</strong> <span class="token-meta oauth-host">{{.RedirectHost}}</span><br>
+        <span class="token-meta">
+          {{T $.Lang "apps.connected"}} <time data-ts="{{rfc3339 .GrantedAt}}">{{formatTime .GrantedAt}}</time>
+          {{if .LastUsedAt}}· {{T $.Lang "tokens.used_at"}} <time data-ts="{{rfc3339 .LastUsedAt}}">{{formatTime .LastUsedAt}}</time>{{end}}
+        </span>
+      </div>
+      <form method="post" action="/account/apps/{{.ClientID}}/disconnect">
+        <button type="submit" class="btn btn-danger btn-sm">{{T $.Lang "apps.disconnect"}}</button>
+      </form>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="dl-sub">{{T .Lang "apps.none"}}</p>
+  {{end}}
 </div>
 
 {{template "footer" .}}

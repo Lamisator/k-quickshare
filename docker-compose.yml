@@ -18,6 +18,8 @@ services:
       QUOTA_USER_FILES: ${QUOTA_USER_FILES:-1000}
       QUOTA_TOTAL_BYTES: ${QUOTA_TOTAL_BYTES:-0}
       DISK_MIN_FREE_BYTES: ${DISK_MIN_FREE_BYTES:-1073741824}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      API_SEAL_MAX_BYTES: ${API_SEAL_MAX_BYTES:-104857600}
     volumes:
       - ./data/files:/data/files
     healthcheck:

@@ -123,6 +123,8 @@ func TestTemplatesRender(t *testing.T) {
 			"OIDCLive": false, "Error": "", "Success": "",
 			"QuotaBytes": sizeInput(20 << 30), "QuotaFiles": int64(1000),
 			"MaxUpload": sizeInput(512 << 20)},
+		"oauth_consent.html": {"ClientName": "Claude", "RedirectHost": "claude.ai",
+			"Params": map[string]string{"client_id": "pxc_1", "state": "s"}},
 		"oidc_denied.html": {"User": (*User)(nil), "AllowedDomain": "a.example", "ActualDomain": "b.example"},
 		// A drop's three pages. The owner's list renders what the server may
 		// know — counts, sizes, terms — and nothing it may not, because it
@@ -192,6 +194,17 @@ func TestTemplatesRender(t *testing.T) {
 			"Error": "", "Success": "",
 			"User": &User{ID: uuid.New(), Username: "sso", OIDCSubject: "s",
 				OIDCIssuer: "https://idp.example"}},
+		// API tokens of each shape, one just created, and a connected app.
+		{"Active": "account", "StepUpRequired": false, "MinPasswordLen": minPasswordLen,
+			"APIBase": "https://pyxis.example", "NewToken": "pyx_abc", "NewTokenName": "agent",
+			"TokenError": "bad name",
+			"Tokens": []APIToken{
+				{ID: uuid.NewString(), Name: "laptop", Hint: "Ab3d", CreatedAt: now},
+				{ID: uuid.NewString(), Name: "ci", Hint: "xY9z", CreatedAt: now, LastUsedAt: &now, ExpiresAt: &exp},
+				{ID: uuid.NewString(), Name: "old", Hint: "0000", CreatedAt: now, ExpiresAt: &now},
+			},
+			"Apps": []OAuthGrant{{ClientID: "pxc_1", ClientName: "Claude",
+				RedirectURI: "https://claude.ai/api/mcp/auth_callback", GrantedAt: now, LastUsedAt: &now}}},
 	}
 	shellCases := []map[string]any{
 		{"Usage": UsageSummary{UsedBytes: 1 << 30, UsedFiles: 900,
@@ -218,6 +231,11 @@ func TestTemplatesRender(t *testing.T) {
 			"FileCount": 3, "TotalSize": int64(4096), "UploadedAt": now,
 			"ExpiresAt": exp.UTC(), "HasLimit": true, "MaxDL": 10, "DownloadsLeft": 7,
 			"User": (*User)(nil)},
+		// Sealed by the server through the agent API: the notice replaces the
+		// end-to-end badge.
+		{"State": "batch", "E2EMode": "url", "Unlocked": true, "ID": uuid.NewString(),
+			"FileCount": 1, "TotalSize": int64(42), "UploadedAt": now, "ExpiresAt": exp.UTC(),
+			"HasLimit": false, "ServerSealed": true, "User": (*User)(nil)},
 		// Password batch before unlock: no count, no size, no expiry.
 		{"State": "batch", "E2EMode": "password", "Unlocked": false, "ID": uuid.NewString(),
 			"FileCount": 0, "TotalSize": int64(0), "UploadedAt": now,

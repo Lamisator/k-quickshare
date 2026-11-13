@@ -2453,3 +2453,62 @@ body.bare {
   .row-action .inline-form input,
   .queue-link input { font-size: 16px; }
 }
+
+/* ---- Server-sealed shares (agent API) ---- */
+/* Takes the place of the end-to-end badge on a share the server encrypted. */
+.sealed-badge {
+  color: var(--warn, #e0b26e);
+  font-weight: 650;
+  letter-spacing: 0.06em;
+}
+.sealed-note { text-align: left; }
+.sealed-note p { margin: 0; }
+.sealed-details { margin-top: 0.55rem; }
+.sealed-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.sealed-details ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.15rem;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+.sealed-details li + li { margin-top: 0.35rem; }
+
+/* ---- API tokens and connected apps (account page) ---- */
+.token-list {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+}
+.token-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.88rem;
+}
+.token-list .token-meta { color: var(--text-muted); font-size: 0.8rem; }
+.token-list form { margin: 0; flex-shrink: 0; }
+.token-new {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0.25rem;
+}
+.token-new input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.api-endpoints {
+  margin: 0 0 1rem;
+  font-size: 0.84rem;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+.api-endpoints code { color: var(--text); }
+.oauth-host { font-family: var(--mono, ui-monospace, monospace); }

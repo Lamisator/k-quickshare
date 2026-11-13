@@ -368,6 +368,67 @@ var migrations = []migration{
 			`ALTER TABLE upload_reservations ADD COLUMN IF NOT EXISTS batch_id UUID`,
 		},
 	},
+	{
+		version: 11,
+		name:    "api_tokens_oauth_and_server_sealed_shares",
+		// Other programs — AI agents above all — share files through
+		// /api/v1 and /mcp with a bearer token instead of a session. Only
+		// SHA-256 of a token is stored, exactly as for sessions, so a dump of
+		// this table cannot be replayed against the API.
+		//
+		// server_sealed marks a batch the SERVER encrypted, because the client
+		// handed it plaintext (an MCP tool call cannot do otherwise). The
+		// download page states that the share was not end-to-end encrypted;
+		// without this column it would show the same badge as a browser upload,
+		// and that badge would be false. api_token_id records which token made
+		// the share, so revoking a token can be weighed against what it did.
+		stmts: []string{
+			`CREATE TABLE IF NOT EXISTS api_tokens (
+				id           UUID PRIMARY KEY,
+				user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				name         TEXT NOT NULL,
+				token_hash   TEXT UNIQUE NOT NULL,
+				hint         TEXT NOT NULL,
+				created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				last_used_at TIMESTAMPTZ,
+				expires_at   TIMESTAMPTZ
+			)`,
+			`CREATE INDEX IF NOT EXISTS api_tokens_user_idx ON api_tokens (user_id, created_at DESC)`,
+			`ALTER TABLE batches ADD COLUMN IF NOT EXISTS server_sealed BOOLEAN NOT NULL DEFAULT FALSE`,
+			`ALTER TABLE batches ADD COLUMN IF NOT EXISTS api_token_id UUID REFERENCES api_tokens(id) ON DELETE SET NULL`,
+
+			// OAuth 2.1 for MCP clients that will not take a pasted token
+			// (claude.ai, ChatGPT): dynamically registered clients, single-use
+			// codes, rotating refresh tokens. The access token an exchange
+			// yields is an ordinary api_tokens row with oauth_client_id set,
+			// so the bearer middleware needs nothing new. Every secret here is
+			// stored as SHA-256 only.
+			`CREATE TABLE IF NOT EXISTS oauth_clients (
+				id            TEXT PRIMARY KEY,
+				name          TEXT NOT NULL,
+				redirect_uris TEXT[] NOT NULL,
+				secret_hash   TEXT,
+				created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				last_used_at  TIMESTAMPTZ
+			)`,
+			`CREATE TABLE IF NOT EXISTS oauth_codes (
+				code_hash      TEXT PRIMARY KEY,
+				client_id      TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+				user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				redirect_uri   TEXT NOT NULL,
+				code_challenge TEXT NOT NULL,
+				expires_at     TIMESTAMPTZ NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+				token_hash TEXT PRIMARY KEY,
+				client_id  TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+				user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				expires_at TIMESTAMPTZ NOT NULL
+			)`,
+			`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS oauth_client_id TEXT REFERENCES oauth_clients(id) ON DELETE CASCADE`,
+		},
+	},
 }
 
 // migrateUsernameCaseUnique adds the case-insensitive uniqueness constraint,
